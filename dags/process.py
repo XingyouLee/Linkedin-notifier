@@ -22,7 +22,7 @@ def linkedin_notifier():
         location="Netherlands",
         geo_id="102890719",
         hours_old=72,
-        results_wanted=100,
+        results_wanted=200,
     ):
         """Scrape LinkedIn public job search via Playwright (no login required)."""
         import asyncio
