@@ -1,15 +1,12 @@
 import os
 from pathlib import Path
-
 import requests
 from dotenv import load_dotenv
 
 load_dotenv(Path(__file__).with_name('.env'))
 
-print("GMN_API_KEY exists?", "GMN_API_KEY" in os.environ)
-print("cwd:", os.getcwd())
+
 API_KEY = os.getenv("GMN_API_KEY")
-print("API key loaded:", bool(API_KEY))
 payload = {
   "model": "gpt-5.2",
   "input": [

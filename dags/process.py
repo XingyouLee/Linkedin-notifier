@@ -1,27 +1,25 @@
 from airflow.decorators import dag, task
 
 from datetime import datetime
-import sys
 import os
 import pandas as pd
-
-
 
 import database
 from jobspy import scrape_jobs
 
+
 @dag(
     start_date=datetime(2023, 1, 1),
-    schedule='@daily',
+    schedule=None,
     catchup=False,
     tags=['linkedin_notifier'],
 )
 def linkedin_notifier():
-    
+
     @task
-    def scan_for_new_posts():
+    def scan_and_save_jobs():
         jobs = scrape_jobs(
-            site_name=["linkedin"], # "glassdoor", "bayt", "naukri", "bdjobs"
+            site_name=["linkedin"],
             search_term="Data engineer",
             location="Netherlands",
             results_wanted=100,
@@ -30,162 +28,63 @@ def linkedin_notifier():
         )
         print(f"Found {len(jobs)} jobs")
         print(jobs.head())
-    
+
         import numpy as np
         jobs = jobs.replace({np.nan: None})
-        return jobs.to_dict(orient="records")
+        database.save_jobs(jobs)
+        return {"scanned": int(len(jobs))}
 
-    @task
-    def add_to_db(jobs_records):
-        # Convert back to dataframe
-        jobs_df = pd.DataFrame(jobs_records)
-        database.save_jobs(jobs_df)
-    
     @task
     def filter_jobs():
         df = database.get_latest_batch_jobs()
         print(df.head())
 
         blocked_companies = ["Elevation Group", "Capgemini", "Jobster", "Sogeti", "Info Support", "CGI Nederland", ""]
-        # Exclude jobs from blocked companies
         df = df[~df['company'].isin(blocked_companies)]
-        # Filter out jobs that Senior in the title
         df = df[~df['title'].str.contains("Senior", na=False)]
-        return df.head(3)
-    
-    @task
-    def retrieve_job_descriptions(job_records):
-        """Retrieve and attach job descriptions for all jobs using a single browser session."""
-        import asyncio
-        import os
-        import sys
+        return df
 
-        # Ensure the vendored linkedin_scraper repo (a package directory) is importable in the container.
-        # This matches `/Users/levi/Linkedin-notifier/scrape_job_description.py`.
-        SCRAPER_REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "linkedin_scraper"))
-        if SCRAPER_REPO not in sys.path:
-            sys.path.insert(0, SCRAPER_REPO)
-
-        from linkedin_scraper import BrowserManager, login_with_credentials
-        from linkedin_scraper.scrapers.job import JobScraper
-        from dotenv import load_dotenv
-
-        load_dotenv()
-        email = os.getenv("LINKEDIN_EMAIL")
-        password = os.getenv("LINKEDIN_PASSWORD")
-
-        chromium_args = [
-            "--no-sandbox",
-            "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--no-zygote",
-            "--disable-features=IsolateOrigins,site-per-process",
-            "--disable-site-isolation-trials",
-        ]
-
-        async def _extract_description_fallback(page):
-            show_more_selectors = [
-                "button[data-tracking-control-name='public_jobs_show-more-html-btn']",
-                "button.jobs-description__footer-button",
-                "button[aria-label*='Show more']",
-                "button:has-text('Show more')",
-            ]
-            for sel in show_more_selectors:
-                btn = page.locator(sel).first
-                if await btn.count() > 0:
-                    try:
-                        if await btn.is_visible():
-                            await btn.click(timeout=2000)
-                            await page.wait_for_timeout(500)
-                    except Exception:
-                        pass
-
-            for sel in [
-                ".show-more-less-html__markup",
-                ".jobs-description__content",
-                "[data-test-job-description]",
-                "div.job-details-module__content",
-                "[data-testid='expandable-text-box']",
-                "section:has(h2:has-text('About the job')) [tabindex='-1']",
-                "section:has(h2:has-text('About the job')) p",
-            ]:
-                loc = page.locator(sel).first
-                if await loc.count() > 0:
-                    text = (await loc.inner_text() or "").strip()
-                    if len(text) > 80 and text.lower() != "about the job":
-                        return text
-
-            article = page.locator("article").first
-            if await article.count() > 0:
-                text = (await article.inner_text() or "").strip()
-                if text.lower().startswith("about the job"):
-                    text = text[len("about the job"):].strip()
-                if len(text) > 80:
-                    return text
-            return None
-
-        async def scrape_all(jobs):
-            async with BrowserManager(headless=True, args=chromium_args) as browser:
-                if email and password:
-                    print(f"Logging in as {email}...")
-                    try:
-                        await login_with_credentials(browser.page, email=email, password=password)
-                        print("✅ Login successful")
-                    except Exception as e:
-                        print(f"⚠️ Login failed, continuing anyway: {e}")
-                else:
-                    print("⚠️ No LINKEDIN_EMAIL/PASSWORD found in environment")
-
-                job_scraper = JobScraper(browser.page)
-
-                for job in jobs:
-                    url = job.get("job_url")
-                    if not url:
-                        job["description"] = None
-                        job["description_error"] = "missing_job_url"
-                        continue
-
-                    print(f"📄 Scraping: {url}")
-                    try:
-                        scraped_job = await job_scraper.scrape(url)
-                        description = scraped_job.job_description
-                        if not description or len(description.strip()) <= 20 or description.strip().lower() == "about the job":
-                            description = await _extract_description_fallback(browser.page)
-
-                        job["description"] = description
-                        if not job["description"]:
-                            job["description_error"] = "empty_description"
-                    except Exception as e:
-                        print(f"❌ Scraping failed for {url}: {e}")
-                        job["description"] = None
-                        job["description_error"] = str(e)
-
-                    await asyncio.sleep(2)
-
-            return jobs
-
-        return asyncio.run(scrape_all(job_records))
-
-    # jobs = scan_for_new_posts()
-    
-    # Task 1: Save ALL newly scraped jobs to DB
-    # add_to_db(jobs)
-    
-    # Task 2: Filter the jobs we just added
-    filtered_jobs_df = filter_jobs()
-    # Convert DataFrame -> list[dict] inside a task
     @task
     def df_to_records(df):
         if df is None:
             return []
         return df.to_dict(orient="records")
 
-    filtered_job_records = df_to_records(filtered_jobs_df)
-    
+    @task
+    def enqueue_jd_requests(job_records):
+        jobs_df = pd.DataFrame(job_records or [])
+        queued = database.enqueue_jd_requests(jobs_df)
+        print(f"Queued {queued} JD requests for OpenClaw")
+        return [j.get("id") for j in (job_records or []) if j.get("id")]
+
+    @task
+    def wait_for_jd_results(job_ids, timeout_seconds=600, poll_interval=15):
+        import time
+
+        job_ids = job_ids or []
+        if not job_ids:
+            return []
+
+        start = time.time()
+        while True:
+            done_count = database.count_jd_queue_status(job_ids, "done")
+            failed_count = database.count_jd_queue_status(job_ids, "failed")
+            total = len(job_ids)
+            print(f"JD queue progress: done={done_count}, failed={failed_count}, total={total}")
+
+            if done_count + failed_count >= total:
+                break
+
+            if time.time() - start > timeout_seconds:
+                raise TimeoutError("Timed out waiting for OpenClaw JD scraping results")
+
+            time.sleep(poll_interval)
+
+        jobs_df = database.get_jobs_by_ids(job_ids)
+        return jobs_df.to_dict(orient="records")
+
     @task
     def match_jobs_with_resume_llm(job_records, batch_size=5):
-        """Call LLM in batches and attach raw model output per job."""
         import json
         import requests
         from dotenv import load_dotenv
@@ -245,13 +144,13 @@ def linkedin_notifier():
                     "Return ONLY valid JSON. No explanations outside JSON. No markdown. No comments. "
                     "JSON structure: "
                     "{"
-                    '\"fit_score\": 0-100, '
-                    '\"decision\": \"Strong Fit | Moderate Fit | Weak Fit | Not Recommended\", '
-                    '\"language_check\": {\"dutch_required\": true/false, \"language_blocker\": true/false, \"impact\": \"short explanation\"}, '
-                    '\"experience_check\": {\"required_years\": number, \"candidate_years\": number, \"gap_years\": number, \"severity\": \"none | minor | moderate | severe\"}, '
-                    '\"skills_match\": {\"strong_matches\": [], \"partial_matches\": [], \"missing_critical_skills\": []}, '
-                    '\"risk_factors\": [], '
-                    '\"summary\": \"3-5 concise lines\"'
+                    '"fit_score": 0-100, '
+                    '"decision": "Strong Fit | Moderate Fit | Weak Fit | Not Recommended", '
+                    '"language_check": {"dutch_required": true/false, "language_blocker": true/false, "impact": "short explanation"}, '
+                    '"experience_check": {"required_years": number, "candidate_years": number, "gap_years": number, "severity": "none | minor | moderate | severe"}, '
+                    '"skills_match": {"strong_matches": [], "partial_matches": [], "missing_critical_skills": []}, '
+                    '"risk_factors": [], '
+                    '"summary": "3-5 concise lines"'
                     "} "
                     "Job Description: <<<" + jd_text + ">>> "
                     "Candidate Resume: <<<" + resume_text + ">>>"
@@ -308,10 +207,6 @@ def linkedin_notifier():
 
         return pd.DataFrame(jobs)
 
-    # Task 3: Fetch JD for all matching jobs in a single batch
-    # Airflow automatically builds the dependency: filter_jobs -> df_to_records -> retrieve_job_descriptions
-    jobs_with_jd = retrieve_job_descriptions(filtered_job_records)
-
     @task
     def store_fitting_results(jobs_with_match_df):
         if jobs_with_match_df is None:
@@ -319,10 +214,92 @@ def linkedin_notifier():
         database.save_llm_matches(jobs_with_match_df)
         return len(jobs_with_match_df)
 
-    # Task 4: LLM match in batches and return dataframe with a new llm_match column
-    jobs_with_llm_match_df = match_jobs_with_resume_llm(jobs_with_jd)
+    @task
+    def select_jobs_for_notification(limit=20):
+        jobs_df = database.get_jobs_to_notify(limit=limit)
+        print(f"Jobs eligible for notification: {len(jobs_df)}")
+        return jobs_df.to_dict(orient="records")
 
-    # Task 5: Persist fitting results to database
-    store_fitting_results(jobs_with_llm_match_df)
+    @task
+    def notify_discord(jobs_to_notify):
+        import requests
+        from dotenv import load_dotenv
+
+        env_candidates = [
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
+            os.path.abspath(os.path.join(os.path.dirname(__file__), ".env")),
+            "/usr/local/airflow/.env",
+            "/usr/local/airflow/dags/.env",
+        ]
+        for env_path in env_candidates:
+            try:
+                load_dotenv(env_path)
+            except Exception:
+                pass
+
+        channel_id = "1476129860450779147"
+        bot_token = os.getenv("DISCORD_BOT_TOKEN")
+        webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
+
+        sent = 0
+        failed = 0
+
+        for job in jobs_to_notify or []:
+            job_id = job.get("id")
+            title = job.get("title") or "Unknown title"
+            company = job.get("company") or "Unknown company"
+            fit_score = job.get("fit_score")
+            fit_decision = job.get("fit_decision")
+            job_url = job.get("job_url") or ""
+
+            message = (
+                f"🎯 Job Match\n"
+                f"ID: {job_id}\n"
+                f"Title: {title}\n"
+                f"Company: {company}\n"
+                f"Decision: {fit_decision}\n"
+                f"Fit Score: {fit_score}\n"
+                f"URL: {job_url}"
+            )
+
+            try:
+                if bot_token:
+                    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+                    headers = {
+                        "Authorization": f"Bot {bot_token}",
+                        "Content-Type": "application/json",
+                    }
+                    resp = requests.post(url, headers=headers, json={"content": message}, timeout=30)
+                elif webhook_url:
+                    resp = requests.post(webhook_url, json={"content": message}, timeout=30)
+                else:
+                    raise RuntimeError("Missing DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL")
+
+                resp.raise_for_status()
+                database.mark_job_notified(job_id, status="sent")
+                sent += 1
+            except Exception as e:
+                database.mark_job_notified(job_id, status="failed", error=str(e))
+                failed += 1
+
+        return {"sent": sent, "failed": failed}
+
+    # Pipeline wiring (all task calls at bottom)
+    scan_meta = scan_and_save_jobs()
+
+    filtered_jobs_df = filter_jobs()
+    scan_meta >> filtered_jobs_df
+    filtered_job_records = df_to_records(filtered_jobs_df)
+
+    queued_job_ids = enqueue_jd_requests(filtered_job_records)
+    jobs_with_jd = wait_for_jd_results(queued_job_ids)
+
+    jobs_with_llm_match_df = match_jobs_with_resume_llm(jobs_with_jd)
+    store_result = store_fitting_results(jobs_with_llm_match_df)
+
+    jobs_to_notify = select_jobs_for_notification()
+    store_result >> jobs_to_notify
+    notify_discord(jobs_to_notify)
+
 
 linkedin_notifier()
