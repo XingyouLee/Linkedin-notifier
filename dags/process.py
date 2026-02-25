@@ -2,10 +2,10 @@ from airflow.decorators import dag, task
 
 from datetime import datetime
 import os
+import re
 import pandas as pd
 
 import database
-from jobspy import scrape_jobs
 
 
 @dag(
@@ -17,22 +17,127 @@ from jobspy import scrape_jobs
 def linkedin_notifier():
 
     @task
-    def scan_and_save_jobs():
-        jobs = scrape_jobs(
-            site_name=["linkedin"],
-            search_term="Data engineer",
-            location="Netherlands",
-            results_wanted=100,
-            hours_old=72,
-            country_indeed='Netherlands',
-        )
-        print(f"Found {len(jobs)} jobs")
-        print(jobs.head())
+    def scan_and_save_jobs(
+        search_term="Data Engineer",
+        location="Netherlands",
+        geo_id="102890719",
+        hours_old=72,
+        results_wanted=100,
+    ):
+        """Scrape LinkedIn public job search via Playwright (no login required)."""
+        import asyncio
+        import random
+        from playwright.async_api import async_playwright
 
-        import numpy as np
-        jobs = jobs.replace({np.nan: None})
-        database.save_jobs(jobs)
-        return {"scanned": int(len(jobs))}
+        async def _scrape():
+            seconds = hours_old * 3600
+            all_jobs = []
+            page_num = 0
+
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--no-sandbox",
+                        "--disable-setuid-sandbox",
+                        "--disable-dev-shm-usage",
+                        "--disable-gpu",
+                        "--no-zygote",
+                    ],
+                )
+                page = await browser.new_page(
+                    user_agent=(
+                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    )
+                )
+
+                while len(all_jobs) < results_wanted:
+                    start = page_num * 25
+                    url = (
+                        f"https://www.linkedin.com/jobs/search/"
+                        f"?keywords={search_term.replace(' ', '%20')}"
+                        f"&geoId={geo_id}"
+                        f"&location={location.replace(' ', '%20')}"
+                        f"&f_TPR=r{seconds}"
+                        f"&sortBy=DD"
+                        f"&start={start}"
+                    )
+                    print(f"Fetching page {page_num}: {url}")
+
+                    await page.goto(url, timeout=60000)
+                    await page.wait_for_timeout(2000 + random.randint(500, 1500))
+
+                    # Scroll down to trigger lazy-loaded cards
+                    for _ in range(3):
+                        await page.evaluate("window.scrollBy(0, 800)")
+                        await page.wait_for_timeout(500 + random.randint(200, 600))
+
+                    # Extract job cards from the DOM
+                    cards = await page.query_selector_all("ul.jobs-search__results-list > li")
+                    if not cards:
+                        cards = await page.query_selector_all("li div.base-card")
+
+                    if not cards:
+                        print(f"No cards found on page {page_num}, stopping.")
+                        break
+
+                    for card in cards:
+                        link_el = await card.query_selector("a.base-card__full-link")
+                        if not link_el:
+                            link_el = await card.query_selector("a[href*='/jobs/view/']")
+                        if not link_el:
+                            continue
+
+                        href = await link_el.get_attribute("href") or ""
+                        job_url = href.split("?")[0].strip()
+
+                        job_id_match = re.search(r"-(\d{8,})$", job_url) or re.search(r"/(\d{8,})", job_url)
+                        job_id = job_id_match.group(1) if job_id_match else None
+                        if not job_id:
+                            continue
+
+                        title_el = await card.query_selector("h3.base-search-card__title")
+                        if not title_el:
+                            title_el = await card.query_selector("span.sr-only")
+                        title = (await title_el.inner_text()).strip() if title_el else None
+
+                        company_el = await card.query_selector("h4.base-search-card__subtitle a")
+                        if not company_el:
+                            company_el = await card.query_selector("a.hidden-nested-link")
+                        company = (await company_el.inner_text()).strip() if company_el else None
+
+                        all_jobs.append({
+                            "id": job_id,
+                            "site": "linkedin",
+                            "job_url": job_url,
+                            "title": title,
+                            "company": company,
+                        })
+
+                    print(f"Page {page_num}: found {len(cards)} cards, total so far: {len(all_jobs)}")
+                    page_num += 1
+
+                    if len(cards) < 25:
+                        break
+
+                    # Random delay between pages
+                    await page.wait_for_timeout(1000 + random.randint(500, 2000))
+
+                await browser.close()
+
+            return all_jobs[:results_wanted]
+
+        all_jobs = asyncio.run(_scrape())
+
+        jobs_df = pd.DataFrame(all_jobs)
+        print(f"Found {len(jobs_df)} jobs total")
+        if not jobs_df.empty:
+            print(jobs_df.head(10))
+
+        database.save_jobs(jobs_df)
+        return {"scanned": len(all_jobs)}
 
     @task
     def filter_jobs():
@@ -81,6 +186,8 @@ def linkedin_notifier():
             time.sleep(poll_interval)
 
         jobs_df = database.get_jobs_by_ids(job_ids)
+        import numpy as np
+        jobs_df = jobs_df.replace({np.nan: None})
         return jobs_df.to_dict(orient="records")
 
     @task
