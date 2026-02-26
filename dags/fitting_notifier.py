@@ -9,8 +9,9 @@ import database
 
 @dag(
     start_date=datetime(2023, 1, 1),
-    schedule="*/10 * * * *",
+    schedule=None,
     catchup=False,
+    is_paused_upon_creation=False,
     tags=['linkedin_fitting_notifier'],
 )
 def linkedin_fitting_notifier():
@@ -102,11 +103,14 @@ def linkedin_fitting_notifier():
                     "- Years of experience "
                     "- Language requirements "
                     "- Domain relevance "
+                    "5. Extract JD experience requirement clearly into exp_requirement. "
+                    "If not explicitly stated, set exp_requirement to 'not specified'. "
                     "Return ONLY valid JSON. No explanations outside JSON. No markdown. No comments. "
                     "JSON structure: "
                     "{"
                     '"fit_score": 0-100, '
                     '"decision": "Strong Fit | Moderate Fit | Weak Fit | Not Recommended", '
+                    '"exp_requirement": "one-line JD experience requirement", '
                     '"language_check": {"dutch_required": true/false, "language_blocker": true/false, "impact": "short explanation"}, '
                     '"experience_check": {"required_years": number, "candidate_years": number, "gap_years": number, "severity": "none | minor | moderate | severe"}, '
                     '"skills_match": {"strong_matches": [], "partial_matches": [], "missing_critical_skills": []}, '
@@ -219,6 +223,7 @@ def linkedin_fitting_notifier():
 
     @task
     def notify_discord(jobs_to_notify):
+        import json
         import requests
         from dotenv import load_dotenv
 
@@ -248,6 +253,15 @@ def linkedin_fitting_notifier():
             fit_score = job.get("fit_score")
             fit_decision = job.get("fit_decision")
             job_url = job.get("job_url") or ""
+            exp_requirement = "not specified"
+
+            llm_match = job.get("llm_match")
+            if llm_match:
+                try:
+                    parsed = llm_match if isinstance(llm_match, dict) else json.loads(llm_match)
+                    exp_requirement = parsed.get("exp_requirement") or "not specified"
+                except Exception:
+                    pass
 
             message = (
                 "🎯 Job Match\n"
@@ -256,6 +270,7 @@ def linkedin_fitting_notifier():
                 f"Company: {company}\n"
                 f"Decision: {fit_decision}\n"
                 f"Fit Score: {fit_score}\n"
+                f"Exp Requirement: {exp_requirement}\n"
                 f"URL: {job_url}"
             )
 

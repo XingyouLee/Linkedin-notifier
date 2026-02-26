@@ -1,7 +1,6 @@
 import sqlite3
 from typing import List, Dict, Any
 import pandas as pd
-from datetime import datetime
 import os
 import json
 
@@ -79,38 +78,8 @@ def init_db():
         )
     """)
 
-    # Legacy table cleanup: fitting state is tracked directly on jobs.
-    cursor.execute("DROP TABLE IF EXISTS fitting_queue")
-
-    # Lightweight migration for existing databases
-    cursor.execute("PRAGMA table_info(jobs)")
-    existing_cols = {row[1] for row in cursor.fetchall()}
-    if "description" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN description TEXT")
-    if "description_error" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN description_error TEXT")
-    if "llm_match" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN llm_match TEXT")
-    if "llm_match_error" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN llm_match_error TEXT")
-    if "fit_score" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_score INTEGER")
-    if "fit_decision" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_decision TEXT")
-    if "notified_at" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN notified_at DATETIME")
-    if "notify_status" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN notify_status TEXT")
-    if "notify_error" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN notify_error TEXT")
-    if "fit_status" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_status TEXT")
-    if "fit_attempts" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_attempts INTEGER DEFAULT 0")
-    if "fit_last_error" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_last_error TEXT")
-    if "fit_updated_at" not in existing_cols:
-        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_updated_at DATETIME")
+    # Legacy schema migration is intentionally disabled after schema stabilization.
+    # If you ever mount an older jobs.db, run one-off migration SQL manually.
 
     cursor.execute(
         """
@@ -169,17 +138,13 @@ def save_jobs(jobs_df: pd.DataFrame):
     
     inserted_count = cursor.rowcount
     
-    # Optional: If no jobs were inserted, delete the empty batch to keep the DB clean
-    if inserted_count == 0:
-        cursor.execute("DELETE FROM batches WHERE id = ?", (batch_id,))
-    
     conn.commit()
     conn.close()
     
     if inserted_count > 0:
         print(f"✅ Added {inserted_count} new jobs to the database in Batch {batch_id}.")
     else:
-        print("No new jobs to add (all were duplicates).")
+        print(f"No new jobs to add (all were duplicates). Batch {batch_id} is empty.")
 
 def enqueue_jd_requests(jobs_df: pd.DataFrame):
     """Upsert pending JD requests for OpenClaw worker."""
@@ -479,13 +444,6 @@ def mark_job_notified(job_id: str, status: str = "sent", error: str = None):
     conn.commit()
     conn.close()
 
-
-def get_all_jobs() -> pd.DataFrame:
-    """Retrieves all jobs from the database as a pandas DataFrame."""
-    conn = sqlite3.connect(DB_PATH)
-    df = pd.read_sql_query("SELECT * FROM jobs", conn)
-    conn.close()
-    return df
 
 def save_jd_result(job_id: str, description: str = None, description_error: str = None):
     """Persist one JD scrape result from OpenClaw worker."""

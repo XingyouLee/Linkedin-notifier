@@ -1,4 +1,5 @@
 from airflow.decorators import dag, task
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 from datetime import datetime
 import os
@@ -12,6 +13,7 @@ import database
     start_date=datetime(2023, 1, 1),
     schedule=None,
     catchup=False,
+    is_paused_upon_creation=False,
     tags=['linkedin_notifier'],
 )
 def linkedin_notifier():
@@ -256,7 +258,15 @@ def linkedin_notifier():
     jobs_with_jd = fetch_jd_results(queued_job_ids)
 
     jd_worker_meta >> jobs_with_jd
-    enqueue_fitting_tasks(jobs_with_jd)
+    fitting_enqueue_meta = enqueue_fitting_tasks(jobs_with_jd)
+
+    trigger_fitting_notifier = TriggerDagRunOperator(
+        task_id="trigger_fitting_notifier",
+        trigger_dag_id="linkedin_fitting_notifier",
+        conf={"source_dag_run_id": "{{ dag_run.run_id }}"},
+        wait_for_completion=False,
+    )
+    fitting_enqueue_meta >> trigger_fitting_notifier
 
 
 linkedin_notifier()

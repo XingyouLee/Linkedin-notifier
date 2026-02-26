@@ -20,10 +20,17 @@ Your Astro project contains the following files and folders:
 Two-DAG Architecture
 ====================
 
-- `linkedin_notifier`: Scrapes and filters jobs, queues JD scraping, waits for JD results, and enqueues LLM fitting tasks (no LLM calls inside this DAG).
-- `linkedin_fitting_notifier`: Runs every 10 minutes to claim pending fitting tasks, run LLM matching, store results, and send notifications.
+- `linkedin_notifier` (`dags/process.py`): Scrapes and filters jobs, queues JD scraping, runs the in-DAG JD worker, enqueues fitting tasks, then triggers `linkedin_fitting_notifier`.
+- `linkedin_fitting_notifier` (`dags/fitting_notifier.py`): Trigger-only DAG (`schedule=None`) that claims pending fitting tasks, runs LLM matching, stores results, and sends notifications.
 
-To run locally, start Airflow with `astro dev start`, trigger `linkedin_notifier` from the Airflow UI to populate the fitting queue, and let `linkedin_fitting_notifier` run on its 10-minute schedule (or trigger it manually when needed).
+Run locally
+-----------
+
+1. Start Airflow: `astro dev start`
+2. Ensure fitting DAG is unpaused (triggered runs stay queued if paused): `astro dev run dags unpause linkedin_fitting_notifier`
+3. Trigger the pipeline: `astro dev run dags trigger linkedin_notifier`
+
+`SCAN_RESULTS_WANTED` controls scan size in `linkedin_notifier` (default `100`).
 
 Deploy Your Project Locally
 ===========================

@@ -1,13 +1,9 @@
 import asyncio
-import os
 import re
-import sqlite3
 
 from playwright.async_api import async_playwright
 
 import database
-
-DB_PATH = database.DB_PATH
 
 SHOW_MORE_SELECTORS = [
     "button[data-tracking-control-name='public_jobs_show-more-html-btn']",
@@ -25,45 +21,6 @@ DESCRIPTION_SELECTORS = [
     "section:has(h2:has-text('About the job')) [tabindex='-1']",
     "section:has(h2:has-text('About the job')) p",
 ]
-
-
-def get_pending(limit=5):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-    cur.execute(
-        """
-        SELECT job_id, job_url
-        FROM jd_queue
-        WHERE status='pending'
-        ORDER BY updated_at ASC
-        LIMIT ?
-        """,
-        (limit,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
-
-
-def save_result(job_id, description=None, error=None):
-    conn = sqlite3.connect(DB_PATH)
-    cur = conn.cursor()
-
-    if description:
-        cur.execute("UPDATE jobs SET description=?, description_error=NULL WHERE id=?", (description, job_id))
-        cur.execute(
-            "UPDATE jd_queue SET status='done', attempts=attempts+1, updated_at=CURRENT_TIMESTAMP, error=NULL WHERE job_id=?",
-            (job_id,),
-        )
-    else:
-        cur.execute("UPDATE jobs SET description=NULL, description_error=? WHERE id=?", (error, job_id))
-        cur.execute(
-            "UPDATE jd_queue SET status='failed', attempts=attempts+1, updated_at=CURRENT_TIMESTAMP, error=? WHERE job_id=?",
-            (error, job_id),
-        )
-
-    conn.commit()
-    conn.close()
 
 
 async def extract_description(page):
@@ -102,7 +59,10 @@ async def extract_description(page):
 
 
 async def run_once(limit=5):
-    items = get_pending(limit=limit)
+    pending_df = database.get_pending_jd_requests(limit=limit)
+    items = [] if pending_df.empty else list(
+        pending_df[["job_id", "job_url"]].itertuples(index=False, name=None)
+    )
     if not items:
         print("No pending JD requests")
         return 0
@@ -128,11 +88,11 @@ async def run_once(limit=5):
                 await page.wait_for_timeout(1500)
                 description = await extract_description(page)
                 if description:
-                    save_result(job_id, description=description)
+                    database.save_jd_result(job_id, description=description)
                 else:
-                    save_result(job_id, error="empty_description")
+                    database.save_jd_result(job_id, description_error="empty_description")
             except Exception as e:
-                save_result(job_id, error=str(e))
+                database.save_jd_result(job_id, description_error=str(e))
             processed += 1
 
         await browser.close()
