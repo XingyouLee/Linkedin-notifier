@@ -4,7 +4,7 @@ from datetime import datetime
 import os
 import pandas as pd
 
-import database
+from dags import database
 
 
 @dag(
@@ -17,12 +17,12 @@ import database
 def linkedin_fitting_notifier():
 
     @task
-    def claim_fitting_tasks(limit=10):
-        env_limit = int(os.getenv("FITTING_CLAIM_LIMIT", str(limit)))
-        return database.claim_pending_fitting_tasks(limit=env_limit)
+    def claim_fitting_tasks():
+        return database.claim_pending_fitting_tasks(limit=None)
 
     @task
     def fetch_jobs_for_fitting(queue_items):
+        print("Number of queue items: ", len(queue_items))
         if not queue_items:
             return []
 
@@ -305,7 +305,7 @@ def linkedin_fitting_notifier():
     store_result >> finalize_result
 
     jobs_to_notify = select_jobs_for_notification()
-    store_result >> jobs_to_notify
+    finalize_result >> jobs_to_notify
     notify_discord(jobs_to_notify)
 
 

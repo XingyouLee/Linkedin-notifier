@@ -3,7 +3,7 @@ import re
 
 from playwright.async_api import async_playwright
 
-import database
+from dags import database
 
 SHOW_MORE_SELECTORS = [
     "button[data-tracking-control-name='public_jobs_show-more-html-btn']",

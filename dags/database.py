@@ -227,7 +227,7 @@ def enqueue_fitting_requests(jobs_df: pd.DataFrame):
     return queued
 
 
-def claim_pending_fitting_tasks(limit: int = 10) -> List[Dict[str, Any]]:
+def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     """Atomically claim pending fitting tasks for processing."""
     init_db()
 
@@ -238,17 +238,28 @@ def claim_pending_fitting_tasks(limit: int = 10) -> List[Dict[str, Any]]:
 
     try:
         cursor.execute("BEGIN IMMEDIATE")
-        cursor.execute(
-            """
-            SELECT id AS job_id, COALESCE(fit_attempts, 0) AS attempts
-            FROM jobs
-            WHERE fit_status = 'pending_fit'
-              AND description IS NOT NULL
-            ORDER BY COALESCE(fit_updated_at, '1970-01-01 00:00:00') ASC
-            LIMIT ?
-            """,
-            (limit,),
-        )
+        if limit is None or int(limit) <= 0:
+            cursor.execute(
+                """
+                SELECT id AS job_id, COALESCE(fit_attempts, 0) AS attempts
+                FROM jobs
+                WHERE (fit_status = 'pending_fit' OR fit_status = 'fitting')
+                  AND description IS NOT NULL
+                ORDER BY COALESCE(fit_updated_at, '1970-01-01 00:00:00') ASC
+                """
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT id AS job_id, COALESCE(fit_attempts, 0) AS attempts
+                FROM jobs
+                WHERE (fit_status = 'pending_fit' OR fit_status = 'fitting')
+                  AND description IS NOT NULL
+                ORDER BY COALESCE(fit_updated_at, '1970-01-01 00:00:00') ASC
+                LIMIT ?
+                """,
+                (int(limit),),
+            )
         rows = cursor.fetchall()
         if not rows:
             cursor.execute("COMMIT")

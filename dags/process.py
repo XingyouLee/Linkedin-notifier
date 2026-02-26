@@ -3,10 +3,27 @@ from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOpe
 
 from datetime import datetime
 import os
-import re
 import pandas as pd
+from dotenv import load_dotenv
 
-import database
+from dags import database
+
+
+def _load_env():
+    env_candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), ".env")),
+        "/usr/local/airflow/.env",
+        "/usr/local/airflow/dags/.env",
+    ]
+    for env_path in env_candidates:
+        try:
+            load_dotenv(env_path)
+        except Exception:
+            pass
+
+
+_load_env()
 
 
 @dag(
@@ -23,132 +40,89 @@ def linkedin_notifier():
         search_term="Data Engineer",
         location="Netherlands",
         geo_id="102890719",
-        hours_old=72,
+        hours_old=168,
         results_wanted=10,
     ):
-        """Scrape LinkedIn public job search via Playwright (no login required)."""
-        import asyncio
-        import random
-        from playwright.async_api import async_playwright
+        """Scrape LinkedIn jobs via JobSpy and normalize job ids for DB dedupe."""
+        from jobspy import scrape_jobs
 
-        async def _scrape():
-            seconds = hours_old * 3600
-            all_jobs = []
-            page_num = 0
+        print(
+            f"Scanning LinkedIn with JobSpy: term={search_term}, location={location}, "
+            f"hours_old={hours_old}, results_wanted={results_wanted}"
+        )
+        if geo_id:
+            print(f"geo_id={geo_id} is ignored by JobSpy LinkedIn scraping.")
 
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--no-zygote",
-                    ],
-                )
-                page = await browser.new_page(
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    )
-                )
+        jobs_df = scrape_jobs(
+            site_name=["linkedin"],
+            search_term=search_term,
+            location=location,
+            results_wanted=results_wanted,
+            hours_old=hours_old,
+            country_indeed="Netherlands",
+        )
 
-                while len(all_jobs) < results_wanted:
-                    start = page_num * 25
-                    url = (
-                        f"https://www.linkedin.com/jobs/search/"
-                        f"?keywords={search_term.replace(' ', '%20')}"
-                        f"&geoId={geo_id}"
-                        f"&location={location.replace(' ', '%20')}"
-                        f"&f_TPR=r{seconds}"
-                        f"&sortBy=DD"
-                        f"&start={start}"
-                    )
-                    print(f"Fetching page {page_num}: {url}")
+        if jobs_df is None or jobs_df.empty:
+            print("JobSpy returned no jobs.")
+            return {"scanned_raw": 0, "scanned_unique": 0}
 
-                    await page.goto(url, timeout=60000)
-                    await page.wait_for_timeout(2000 + random.randint(500, 1500))
+        jobs_df = jobs_df.copy()
+        if "job_url" not in jobs_df.columns and "job_url_direct" in jobs_df.columns:
+            jobs_df["job_url"] = jobs_df["job_url_direct"]
+        if "job_url" not in jobs_df.columns:
+            jobs_df["job_url"] = None
+        if "site" not in jobs_df.columns:
+            jobs_df["site"] = "linkedin"
+        jobs_df["site"] = jobs_df["site"].fillna("linkedin")
+        if "title" not in jobs_df.columns:
+            jobs_df["title"] = None
+        if "company" not in jobs_df.columns:
+            jobs_df["company"] = None
+        if "id" not in jobs_df.columns:
+            jobs_df["id"] = None
 
-                    # Scroll down to trigger lazy-loaded cards
-                    for _ in range(3):
-                        await page.evaluate("window.scrollBy(0, 800)")
-                        await page.wait_for_timeout(500 + random.randint(200, 600))
+        jobs_df["id"] = jobs_df["id"].fillna("").astype(str).str.strip()
+        jobs_df["id"] = jobs_df["id"].str.replace(r"^li-", "", regex=True)
 
-                    # Extract job cards from the DOM
-                    cards = await page.query_selector_all("ul.jobs-search__results-list > li")
-                    if not cards:
-                        cards = await page.query_selector_all("li div.base-card")
+        missing_mask = jobs_df["id"].eq("") & jobs_df["job_url"].notna()
+        if missing_mask.any():
+            jobs_df.loc[missing_mask, "id"] = (
+                jobs_df.loc[missing_mask, "job_url"]
+                .astype(str)
+                .str.extract(r"(\d{8,})", expand=False)
+                .fillna("")
+            )
 
-                    if not cards:
-                        print(f"No cards found on page {page_num}, stopping.")
-                        break
+        jobs_df = jobs_df[jobs_df["id"] != ""]
+        raw_count = len(jobs_df)
+        jobs_df = jobs_df.drop_duplicates(subset=["id"], keep="first")
+        unique_count = len(jobs_df)
+        duplicate_count = raw_count - unique_count
+        if duplicate_count > 0:
+            print(
+                "JobSpy returned duplicate job ids: "
+                f"total={raw_count}, unique={unique_count}, duplicates={duplicate_count}"
+            )
+        else:
+            print(f"JobSpy id stats: total={raw_count}, unique={unique_count}, duplicates=0")
 
-                    for card in cards:
-                        link_el = await card.query_selector("a.base-card__full-link")
-                        if not link_el:
-                            link_el = await card.query_selector("a[href*='/jobs/view/']")
-                        if not link_el:
-                            continue
-
-                        href = await link_el.get_attribute("href") or ""
-                        job_url = href.split("?")[0].strip()
-
-                        job_id_match = re.search(r"-(\d{8,})$", job_url) or re.search(r"/(\d{8,})", job_url)
-                        job_id = job_id_match.group(1) if job_id_match else None
-                        if not job_id:
-                            continue
-
-                        title_el = await card.query_selector("h3.base-search-card__title")
-                        if not title_el:
-                            title_el = await card.query_selector("span.sr-only")
-                        title = (await title_el.inner_text()).strip() if title_el else None
-
-                        company_el = await card.query_selector("h4.base-search-card__subtitle a")
-                        if not company_el:
-                            company_el = await card.query_selector("a.hidden-nested-link")
-                        company = (await company_el.inner_text()).strip() if company_el else None
-
-                        all_jobs.append({
-                            "id": job_id,
-                            "site": "linkedin",
-                            "job_url": job_url,
-                            "title": title,
-                            "company": company,
-                        })
-
-                    print(f"Page {page_num}: found {len(cards)} cards, total so far: {len(all_jobs)}")
-                    page_num += 1
-
-                    if len(cards) < 25:
-                        break
-
-                    # Random delay between pages
-                    await page.wait_for_timeout(1000 + random.randint(500, 2000))
-
-                await browser.close()
-
-            return all_jobs[:results_wanted]
-
-        all_jobs = asyncio.run(_scrape())
-
-        jobs_df = pd.DataFrame(all_jobs)
-        print(f"Found {len(jobs_df)} jobs total")
-        if not jobs_df.empty:
-            print(jobs_df.head(10))
-
+        jobs_df = jobs_df[["id", "site", "job_url", "title", "company"]]
         database.save_jobs(jobs_df)
-        return {"scanned": len(all_jobs)}
+
+        return {
+            "scanned_raw": raw_count,
+            "scanned_unique": unique_count,
+            "scanned_duplicates": duplicate_count,
+        }
 
     @task
     def filter_jobs():
         df = database.get_latest_batch_jobs()
-        print(df.head())
-
         blocked_companies = ["Elevation Group", "Capgemini", "Jobster", "Sogeti", "Info Support", "CGI Nederland", ""]
         df = df[~df['company'].isin(blocked_companies)]
         df = df[~df['title'].str.contains("Senior", na=False)]
+        df = df[~df['title'].str.contains("Medior", na=False)]
+        print("Filtered records:", df.shape[0])
         return df
 
     @task
