@@ -17,6 +17,14 @@ Your Astro project contains the following files and folders:
 - plugins: Add custom or community plugins for your project to this file. It is empty by default.
 - airflow_settings.yaml: Use this local-only file to specify Airflow Connections, Variables, and Pools instead of entering them in the Airflow UI as you develop DAGs in this project.
 
+Two-DAG Architecture
+====================
+
+- `linkedin_notifier`: Scrapes and filters jobs, queues JD scraping, waits for JD results, and enqueues LLM fitting tasks (no LLM calls inside this DAG).
+- `linkedin_fitting_notifier`: Runs every 10 minutes to claim pending fitting tasks, run LLM matching, store results, and send notifications.
+
+To run locally, start Airflow with `astro dev start`, trigger `linkedin_notifier` from the Airflow UI to populate the fitting queue, and let `linkedin_fitting_notifier` run on its 10-minute schedule (or trigger it manually when needed).
+
 Deploy Your Project Locally
 ===========================
 

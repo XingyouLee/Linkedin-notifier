@@ -22,7 +22,7 @@ def linkedin_notifier():
         location="Netherlands",
         geo_id="102890719",
         hours_old=72,
-        results_wanted=200,
+        results_wanted=10,
     ):
         """Scrape LinkedIn public job search via Playwright (no login required)."""
         import asyncio
@@ -153,260 +153,110 @@ def linkedin_notifier():
     def df_to_records(df):
         if df is None:
             return []
-        return df.to_dict(orient="records")
+        clean_df = df.astype(object).where(pd.notna(df), None)
+        return clean_df.to_dict(orient="records")
 
     @task
     def enqueue_jd_requests(job_records):
         jobs_df = pd.DataFrame(job_records or [])
         queued = database.enqueue_jd_requests(jobs_df)
-        print(f"Queued {queued} JD requests for OpenClaw")
+        print(f"Queued {queued} JD requests for in-DAG worker")
         return [j.get("id") for j in (job_records or []) if j.get("id")]
 
-    @task
-    def wait_for_jd_results(job_ids, timeout_seconds=600, poll_interval=15):
+    @task(task_id="run_jd_worker")
+    def run_jd_worker(job_ids, worker_batch_size=5, max_loops=20, idle_loop_limit=2):
+        import asyncio
         import time
+        from openclaw_jd_worker import run_once
 
+        job_ids = job_ids or []
+        if not job_ids:
+            return {"processed": 0, "done": 0, "failed": 0, "pending": 0, "total": 0}
+
+        worker_batch_size = int(os.getenv("JD_WORKER_BATCH_SIZE", str(worker_batch_size)))
+        max_loops = int(os.getenv("JD_WORKER_MAX_LOOPS", str(max_loops)))
+        idle_loop_limit = int(os.getenv("JD_WORKER_IDLE_LOOP_LIMIT", str(idle_loop_limit)))
+
+        total = len(job_ids)
+        total_processed = 0
+        idle_loops = 0
+
+        for _ in range(max_loops):
+            done_count = database.count_jd_queue_status(job_ids, "done")
+            failed_count = database.count_jd_queue_status(job_ids, "failed")
+            pending_count = total - done_count - failed_count
+            print(
+                f"JD queue progress(before): done={done_count}, failed={failed_count}, "
+                f"pending={pending_count}, total={total}"
+            )
+
+            if pending_count <= 0:
+                break
+
+            processed = asyncio.run(run_once(limit=worker_batch_size))
+            total_processed += processed
+
+            if processed == 0:
+                idle_loops += 1
+                if idle_loops >= idle_loop_limit:
+                    break
+                time.sleep(2)
+                continue
+
+            idle_loops = 0
+            time.sleep(1)
+
+        done_count = database.count_jd_queue_status(job_ids, "done")
+        failed_count = database.count_jd_queue_status(job_ids, "failed")
+        pending_count = total - done_count - failed_count
+        result = {
+            "processed": total_processed,
+            "done": done_count,
+            "failed": failed_count,
+            "pending": pending_count,
+            "total": total,
+        }
+
+        if pending_count > 0:
+            raise RuntimeError(f"JD worker stopped with pending jobs: {result}")
+
+        return result
+
+    @task
+    def fetch_jd_results(job_ids):
         job_ids = job_ids or []
         if not job_ids:
             return []
 
-        start = time.time()
-        while True:
-            done_count = database.count_jd_queue_status(job_ids, "done")
-            failed_count = database.count_jd_queue_status(job_ids, "failed")
-            total = len(job_ids)
-            print(f"JD queue progress: done={done_count}, failed={failed_count}, total={total}")
-
-            if done_count + failed_count >= total:
-                break
-
-            if time.time() - start > timeout_seconds:
-                raise TimeoutError("Timed out waiting for OpenClaw JD scraping results")
-
-            time.sleep(poll_interval)
-
         jobs_df = database.get_jobs_by_ids(job_ids)
         import numpy as np
+
         jobs_df = jobs_df.replace({np.nan: None})
         return jobs_df.to_dict(orient="records")
 
     @task
-    def match_jobs_with_resume_llm(job_records, batch_size=5):
-        import json
-        import requests
-        from dotenv import load_dotenv
-
-        env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-        load_dotenv(env_path)
-
-        api_key = os.getenv("GMN_API_KEY")
-        if not api_key:
-            for job in job_records or []:
-                job["llm_match"] = None
-                job["llm_match_error"] = "missing_gmn_api_key"
-            return pd.DataFrame(job_records or [])
-
-        resume_candidates = [
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "resume.md")),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "resume.md")),
-        ]
-        resume_text = None
-        resume_error = None
-        for resume_path in resume_candidates:
-            try:
-                with open(resume_path, "r", encoding="utf-8") as f:
-                    resume_text = f.read()
-                break
-            except Exception as e:
-                resume_error = e
-
-        if not resume_text:
-            for job in job_records or []:
-                job["llm_match"] = None
-                job["llm_match_error"] = f"resume_read_error: {resume_error}"
-            return pd.DataFrame(job_records or [])
-
-        jobs = job_records or []
-        for i in range(0, len(jobs), batch_size):
-            batch = jobs[i:i + batch_size]
-
-            for j in batch:
-                jd_text = j.get("description") or ""
-                base_prompt = (
-                    "If output is not valid JSON, regenerate until valid. "
-                    "Do not include markdown. Do not include trailing commas. "
-                    "You are a strict job-fit evaluator. Evaluate whether the candidate fits the job description. "
-                    "CRITICAL RULES: "
-                    "1. If the job explicitly requires Dutch (e.g., 'Dutch required', 'Fluent Dutch mandatory'): "
-                    "- Set language_blocker = true "
-                    "- Cap fit_score at 40 "
-                    "2. If required experience >= 5 years AND candidate has < 2 years: "
-                    "- Apply heavy penalty "
-                    "3. Be strict and realistic. Do not be optimistic. "
-                    "4. Prioritize: "
-                    "- Required skills match "
-                    "- Years of experience "
-                    "- Language requirements "
-                    "- Domain relevance "
-                    "Return ONLY valid JSON. No explanations outside JSON. No markdown. No comments. "
-                    "JSON structure: "
-                    "{"
-                    '"fit_score": 0-100, '
-                    '"decision": "Strong Fit | Moderate Fit | Weak Fit | Not Recommended", '
-                    '"language_check": {"dutch_required": true/false, "language_blocker": true/false, "impact": "short explanation"}, '
-                    '"experience_check": {"required_years": number, "candidate_years": number, "gap_years": number, "severity": "none | minor | moderate | severe"}, '
-                    '"skills_match": {"strong_matches": [], "partial_matches": [], "missing_critical_skills": []}, '
-                    '"risk_factors": [], '
-                    '"summary": "3-5 concise lines"'
-                    "} "
-                    "Job Description: <<<" + jd_text + ">>> "
-                    "Candidate Resume: <<<" + resume_text + ">>>"
-                )
-
-                parsed = None
-                last_error = None
-                for attempt in range(3):
-                    prompt = base_prompt
-                    if attempt > 0:
-                        prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
-
-                    payload = {
-                        "model": "gpt-5.2",
-                        "input": [
-                            {
-                                "type": "message",
-                                "role": "user",
-                                "content": [{"type": "input_text", "text": prompt}],
-                            }
-                        ],
-                    }
-
-                    try:
-                        r = requests.post(
-                            "https://gmn.chuangzuoli.com/v1/responses",
-                            headers={
-                                "Content-Type": "application/json",
-                                "Authorization": f"Bearer {api_key}",
-                            },
-                            json=payload,
-                            timeout=120,
-                        )
-                        r.raise_for_status()
-                        response_json = r.json()
-                        output_text = response_json.get("output_text")
-                        if not output_text:
-                            try:
-                                output_text = response_json["output"][0]["content"][0]["text"]
-                            except Exception:
-                                output_text = json.dumps(response_json, ensure_ascii=False)
-
-                        parsed = json.loads(output_text)
-                        break
-                    except Exception as e:
-                        last_error = str(e)
-
-                if parsed is not None:
-                    j["llm_match"] = json.dumps(parsed, ensure_ascii=False)
-                    j["llm_match_error"] = None
-                else:
-                    j["llm_match"] = None
-                    j["llm_match_error"] = last_error or "invalid_json_response"
-
-        return pd.DataFrame(jobs)
-
-    @task
-    def store_fitting_results(jobs_with_match_df):
-        if jobs_with_match_df is None:
-            return 0
-        database.save_llm_matches(jobs_with_match_df)
-        return len(jobs_with_match_df)
-
-    @task
-    def select_jobs_for_notification(limit=20):
-        jobs_df = database.get_jobs_to_notify(limit=limit)
-        print(f"Jobs eligible for notification: {len(jobs_df)}")
-        return jobs_df.to_dict(orient="records")
-
-    @task
-    def notify_discord(jobs_to_notify):
-        import requests
-        from dotenv import load_dotenv
-
-        env_candidates = [
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), ".env")),
-            "/usr/local/airflow/.env",
-            "/usr/local/airflow/dags/.env",
-        ]
-        for env_path in env_candidates:
-            try:
-                load_dotenv(env_path)
-            except Exception:
-                pass
-
-        channel_id = "1476129860450779147"
-        bot_token = os.getenv("DISCORD_BOT_TOKEN")
-        webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
-
-        sent = 0
-        failed = 0
-
-        for job in jobs_to_notify or []:
-            job_id = job.get("id")
-            title = job.get("title") or "Unknown title"
-            company = job.get("company") or "Unknown company"
-            fit_score = job.get("fit_score")
-            fit_decision = job.get("fit_decision")
-            job_url = job.get("job_url") or ""
-
-            message = (
-                f"🎯 Job Match\n"
-                f"ID: {job_id}\n"
-                f"Title: {title}\n"
-                f"Company: {company}\n"
-                f"Decision: {fit_decision}\n"
-                f"Fit Score: {fit_score}\n"
-                f"URL: {job_url}"
-            )
-
-            try:
-                if bot_token:
-                    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-                    headers = {
-                        "Authorization": f"Bot {bot_token}",
-                        "Content-Type": "application/json",
-                    }
-                    resp = requests.post(url, headers=headers, json={"content": message}, timeout=30)
-                elif webhook_url:
-                    resp = requests.post(webhook_url, json={"content": message}, timeout=30)
-                else:
-                    raise RuntimeError("Missing DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL")
-
-                resp.raise_for_status()
-                database.mark_job_notified(job_id, status="sent")
-                sent += 1
-            except Exception as e:
-                database.mark_job_notified(job_id, status="failed", error=str(e))
-                failed += 1
-
-        return {"sent": sent, "failed": failed}
+    def enqueue_fitting_tasks(job_records):
+        jobs_df = pd.DataFrame(job_records or [])
+        if "description" in jobs_df.columns:
+            jobs_df = jobs_df[jobs_df["description"].notna()]
+        queued = database.enqueue_fitting_requests(jobs_df)
+        print(f"Queued {queued} fitting requests")
+        return {"queued": queued}
 
     # Pipeline wiring (all task calls at bottom)
-    scan_meta = scan_and_save_jobs()
+    results_wanted = int(os.getenv("SCAN_RESULTS_WANTED", "10"))
+    scan_meta = scan_and_save_jobs(results_wanted=results_wanted)
 
     filtered_jobs_df = filter_jobs()
     scan_meta >> filtered_jobs_df
     filtered_job_records = df_to_records(filtered_jobs_df)
 
     queued_job_ids = enqueue_jd_requests(filtered_job_records)
-    jobs_with_jd = wait_for_jd_results(queued_job_ids)
+    jd_worker_meta = run_jd_worker(queued_job_ids)
+    jobs_with_jd = fetch_jd_results(queued_job_ids)
 
-    jobs_with_llm_match_df = match_jobs_with_resume_llm(jobs_with_jd)
-    store_result = store_fitting_results(jobs_with_llm_match_df)
-
-    jobs_to_notify = select_jobs_for_notification()
-    store_result >> jobs_to_notify
-    notify_discord(jobs_to_notify)
+    jd_worker_meta >> jobs_with_jd
+    enqueue_fitting_tasks(jobs_with_jd)
 
 
 linkedin_notifier()

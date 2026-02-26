@@ -8,7 +8,7 @@ load_dotenv(Path(__file__).with_name('.env'))
 
 API_KEY = os.getenv("GMN_API_KEY")
 payload = {
-  "model": "gpt-5.2",
+  "model": "gpt-5.2-codex",
   "input": [
     {"type": "message", "role": "user",
      "content": [{"type": "input_text", "text": "Explain BFS in 2 sentences."}]}

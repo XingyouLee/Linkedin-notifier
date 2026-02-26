@@ -5,7 +5,9 @@ import sqlite3
 
 from playwright.async_api import async_playwright
 
-DB_PATH = "/usr/local/airflow/include/jobs.db"
+import database
+
+DB_PATH = database.DB_PATH
 
 SHOW_MORE_SELECTORS = [
     "button[data-tracking-control-name='public_jobs_show-more-html-btn']",

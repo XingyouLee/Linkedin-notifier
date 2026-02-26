@@ -5,8 +5,26 @@ from datetime import datetime
 import os
 import json
 
-# Point DB to the include directory so it is shared between Astro docker container and host machine
-DB_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "include", "jobs.db"))
+def _resolve_db_path() -> str:
+    env_db_path = os.getenv("JOBS_DB_PATH")
+    if env_db_path:
+        return env_db_path
+
+    candidate_paths = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "include", "jobs.db")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "include", "jobs.db")),
+        "/usr/local/airflow/include/jobs.db",
+    ]
+
+    for candidate in candidate_paths:
+        candidate_dir = os.path.dirname(candidate)
+        if os.path.isdir(candidate_dir):
+            return candidate
+
+    return candidate_paths[0]
+
+
+DB_PATH = _resolve_db_path()
 
 def init_db():
     """Initializes the database and creates/migrates tables."""
@@ -39,6 +57,10 @@ def init_db():
             notified_at DATETIME,
             notify_status TEXT,
             notify_error TEXT,
+            fit_status TEXT,
+            fit_attempts INTEGER DEFAULT 0,
+            fit_last_error TEXT,
+            fit_updated_at DATETIME,
             FOREIGN KEY (batch_id) REFERENCES batches (id)
         )
     """)
@@ -56,6 +78,9 @@ def init_db():
             FOREIGN KEY (job_id) REFERENCES jobs (id)
         )
     """)
+
+    # Legacy table cleanup: fitting state is tracked directly on jobs.
+    cursor.execute("DROP TABLE IF EXISTS fitting_queue")
 
     # Lightweight migration for existing databases
     cursor.execute("PRAGMA table_info(jobs)")
@@ -78,6 +103,27 @@ def init_db():
         cursor.execute("ALTER TABLE jobs ADD COLUMN notify_status TEXT")
     if "notify_error" not in existing_cols:
         cursor.execute("ALTER TABLE jobs ADD COLUMN notify_error TEXT")
+    if "fit_status" not in existing_cols:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_status TEXT")
+    if "fit_attempts" not in existing_cols:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_attempts INTEGER DEFAULT 0")
+    if "fit_last_error" not in existing_cols:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_last_error TEXT")
+    if "fit_updated_at" not in existing_cols:
+        cursor.execute("ALTER TABLE jobs ADD COLUMN fit_updated_at DATETIME")
+
+    cursor.execute(
+        """
+        UPDATE jobs
+        SET fit_status = CASE
+            WHEN notified_at IS NOT NULL THEN 'notified'
+            WHEN llm_match IS NOT NULL THEN 'fit_done'
+            WHEN llm_match_error IS NOT NULL THEN 'fit_failed'
+            ELSE fit_status
+        END
+        WHERE fit_status IS NULL
+        """
+    )
 
     conn.commit()
     conn.close()
@@ -172,6 +218,151 @@ def enqueue_jd_requests(jobs_df: pd.DataFrame):
     return len(records)
 
 
+def enqueue_fitting_requests(jobs_df: pd.DataFrame):
+    """Mark jobs as pending for one-time fitting at job level."""
+    if jobs_df is None or jobs_df.empty:
+        return 0
+
+    init_db()
+
+    if "id" not in jobs_df.columns:
+        return 0
+
+    filtered_df = jobs_df.copy()
+    if "description" in filtered_df.columns:
+        filtered_df = filtered_df[filtered_df["description"].notna()]
+
+    if filtered_df.empty:
+        return 0
+
+    job_ids = filtered_df["id"].astype(str).unique().tolist()
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    queued = 0
+    for job_id in job_ids:
+        cursor.execute(
+            """
+            UPDATE jobs
+            SET fit_status = 'pending_fit',
+                fit_updated_at = CURRENT_TIMESTAMP,
+                fit_last_error = NULL,
+                fit_attempts = COALESCE(fit_attempts, 0)
+            WHERE id = ?
+              AND description IS NOT NULL
+              AND COALESCE(fit_status, '') NOT IN ('pending_fit', 'fitting', 'fit_done', 'notified')
+            """,
+            (job_id,),
+        )
+        queued += cursor.rowcount
+
+    conn.commit()
+    conn.close()
+    return queued
+
+
+def claim_pending_fitting_tasks(limit: int = 10) -> List[Dict[str, Any]]:
+    """Atomically claim pending fitting tasks for processing."""
+    init_db()
+
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.isolation_level = None
+    cursor = conn.cursor()
+
+    try:
+        cursor.execute("BEGIN IMMEDIATE")
+        cursor.execute(
+            """
+            SELECT id AS job_id, COALESCE(fit_attempts, 0) AS attempts
+            FROM jobs
+            WHERE fit_status = 'pending_fit'
+              AND description IS NOT NULL
+            ORDER BY COALESCE(fit_updated_at, '1970-01-01 00:00:00') ASC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            cursor.execute("COMMIT")
+            return []
+
+        cursor.executemany(
+            """
+            UPDATE jobs
+            SET fit_status = 'fitting',
+                fit_updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            [(row["job_id"],) for row in rows],
+        )
+        cursor.execute("COMMIT")
+
+        return [
+            {
+                "job_id": row["job_id"],
+                "attempts": row["attempts"],
+            }
+            for row in rows
+        ]
+    except Exception:
+        try:
+            cursor.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def mark_fitting_done(job_id: str):
+    """Mark fitting task as completed."""
+    init_db()
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE jobs
+        SET fit_status = 'fit_done',
+            fit_updated_at = CURRENT_TIMESTAMP,
+            fit_last_error = NULL
+        WHERE id = ?
+        """,
+        (job_id,),
+    )
+    conn.commit()
+    conn.close()
+
+
+def mark_fitting_failed(
+    job_id: str,
+    error: str = "",
+    retry: bool = True,
+):
+    """Mark fitting task as failed and optionally requeue."""
+    init_db()
+
+    status = "pending_fit" if retry else "fit_failed"
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        UPDATE jobs
+        SET fit_status = ?,
+            fit_attempts = COALESCE(fit_attempts, 0) + 1,
+            fit_last_error = ?,
+            fit_updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        """,
+        (status, error, job_id),
+    )
+    conn.commit()
+    conn.close()
+
+
 def count_jd_queue_status(job_ids: List[str], status: str) -> int:
     """Count how many jobs in given ids are in target status."""
     if not job_ids:
@@ -239,13 +430,14 @@ def save_llm_matches(jobs_df: pd.DataFrame):
 
 
 def get_jobs_to_notify(limit: int = 10) -> pd.DataFrame:
-    """Get unsent jobs with acceptable fit decisions."""
+    """Get unnotified fit results that are ready to notify."""
     conn = sqlite3.connect(DB_PATH)
     query = """
         SELECT *
         FROM jobs
         WHERE fit_decision IN ('Strong Fit', 'Moderate Fit')
-          AND (notified_at IS NULL)
+          AND notified_at IS NULL
+          AND fit_status IN ('fit_done', 'notify_failed')
         ORDER BY batch_id DESC, fit_score DESC
         LIMIT ?
     """
@@ -266,7 +458,8 @@ def mark_job_notified(job_id: str, status: str = "sent", error: str = None):
             UPDATE jobs
             SET notified_at = CURRENT_TIMESTAMP,
                 notify_status = 'sent',
-                notify_error = NULL
+                notify_error = NULL,
+                fit_status = 'notified'
             WHERE id = ?
             """,
             (job_id,),
@@ -276,7 +469,8 @@ def mark_job_notified(job_id: str, status: str = "sent", error: str = None):
             """
             UPDATE jobs
             SET notify_status = ?,
-                notify_error = ?
+                notify_error = ?,
+                fit_status = 'notify_failed'
             WHERE id = ?
             """,
             (status, error, job_id),
