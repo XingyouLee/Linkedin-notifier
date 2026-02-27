@@ -33,6 +33,10 @@ Sep 2023 - May 2024
 - Built an Airflow DAG for a daily ELT pipeline: polling a financial API via custom Sensor, extracting and staging market data to MinIO (S3), and triggering Spark through DockerOperator for transformation.
 - Managed cross-task data passing via XCom and automated warehouse ingestion from S3-compatible storage into PostgreSQL for downstream BI reporting.
 
+### LinkedIn Job Discovery & Fit-Scoring Automation with Apache Airflow (Jan - Feb 2026)
+- Built a schedule-ready end-to-end Airflow pipeline to continuously scan LinkedIn jobs with JobSpy, normalize and deduplicate job IDs, and orchestrate queued JD extraction through a Playwright worker with SQLite state tracking.
+- Implemented LLM-based resume-to-JD fit scoring with retry-safe queue transitions, then auto-pushed matches to Discord, turning new postings into actionable job alerts.
+
 ## Skills
 - Programming: Python, SQL, R, Java, C, Bash
 - Data Engineering / Big Data: Azure Databricks, Apache Spark, Airflow, PySpark, Spark SQL, Azure Data Factory, ETL/ELT, Delta Lake, Kafka

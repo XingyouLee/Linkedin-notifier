@@ -3,8 +3,34 @@ from airflow.decorators import dag, task
 from datetime import datetime
 import os
 import pandas as pd
-
+from dotenv import load_dotenv
+import time
 from dags import database
+
+
+def _load_env():
+    env_candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), ".env")),
+        "/usr/local/airflow/.env",
+        "/usr/local/airflow/dags/.env",
+    ]
+
+    for env_path in env_candidates:
+        try:
+            load_dotenv(env_path)
+        except Exception:
+            pass
+
+    if not os.getenv("GMN_API_KEY"):
+        for env_path in env_candidates:
+            try:
+                load_dotenv(env_path, override=True)
+            except Exception:
+                pass
+
+
+_load_env()
 
 
 @dag(
@@ -44,10 +70,7 @@ def linkedin_fitting_notifier():
 
         import json
         import requests
-        from dotenv import load_dotenv
-
-        env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-        load_dotenv(env_path)
+        _load_env()
 
         api_key = os.getenv("GMN_API_KEY")
         if not api_key:
@@ -90,7 +113,7 @@ def linkedin_fitting_notifier():
                 base_prompt = (
                     "If output is not valid JSON, regenerate until valid. "
                     "Do not include markdown. Do not include trailing commas. "
-                    "You are a strict job-fit evaluator. Evaluate whether the candidate fits the job description. "
+                    "You are a strict job-fit evaluator. Evaluate whether the candidate fits the job description. The candidate is opening to multiple roles, like Data Engineer, Data Scientist, Data Analyst, Machine Learning Engineer, Python Developer, etc."
                     "CRITICAL RULES: "
                     "1. If the job explicitly requires Dutch (e.g., 'Dutch required', 'Fluent Dutch mandatory'): "
                     "- Set language_blocker = true "
@@ -225,19 +248,7 @@ def linkedin_fitting_notifier():
     def notify_discord(jobs_to_notify):
         import json
         import requests
-        from dotenv import load_dotenv
-
-        env_candidates = [
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), ".env")),
-            "/usr/local/airflow/.env",
-            "/usr/local/airflow/dags/.env",
-        ]
-        for env_path in env_candidates:
-            try:
-                load_dotenv(env_path)
-            except Exception:
-                pass
+        _load_env()
 
         channel_id = "1476129860450779147"
         bot_token = os.getenv("DISCORD_BOT_TOKEN")
@@ -293,6 +304,7 @@ def linkedin_fitting_notifier():
             except Exception as e:
                 database.mark_job_notified(job_id, status="failed", error=str(e))
                 failed += 1
+            time.sleep(1)
 
         return {"sent": sent, "failed": failed}
 
