@@ -4,8 +4,9 @@ LinkedIn Notifier (Airflow + Astro)
 This project runs a two-DAG pipeline:
 
 1. `linkedin_notifier` (`/Users/levi/Linkedin-notifier/dags/process.py`)
-   - Scan LinkedIn jobs via `jobspy.scrape_jobs`
-   - Normalize job ids (`li-437...` -> `437...`)
+   - Scan LinkedIn jobs via Playwright (`dags/linkedin_public_jobs_scraper.py`)
+   - Auto-scroll result list so each page can load full 25 cards
+   - Login with email/password when LinkedIn shows sign-in wall
    - Save new jobs into SQLite
    - Queue JD scraping, run JD worker, enqueue fitting tasks
    - Trigger `linkedin_fitting_notifier`
@@ -41,6 +42,10 @@ For Astro local runs, keep runtime vars in:
 Common vars:
 
 - `SCAN_RESULTS_WANTED`: scan target count
+- `SCAN_SEARCH_TERMS`: comma-separated terms (optional)
+- `SCAN_HOURS_OLD`, `SCAN_DISTANCE`, `SCAN_SCROLL_MAX_ROUNDS`
+- `SCAN_HEADLESS` (`true`/`false`)
+- `LINKEDIN_EMAIL`, `LINKEDIN_PASSWORD` (required if LinkedIn asks login)
 - `JD_WORKER_BATCH_SIZE`, `JD_WORKER_MAX_LOOPS`, `JD_WORKER_IDLE_LOOP_LIMIT`
 - `FITTING_MAX_ATTEMPTS`
 - `FITTING_MODEL_NAME`
@@ -61,6 +66,5 @@ Data storage
 Notes
 -----
 
-- Scan now uses JobSpy instead of custom Playwright pagination.
 - Job id normalization is required to keep DB dedupe stable (`id` is stored as numeric string).
 - Notifications run after fitting finalization, so newly finished jobs are not skipped.
