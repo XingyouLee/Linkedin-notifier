@@ -44,8 +44,190 @@ def linkedin_notifier():
         hours_old=168,
         results_wanted=10,
     ):
-        """Scrape LinkedIn jobs with Playwright and save unique rows."""
-        from linkedin_public_jobs_scraper import scrape_linkedin_public_jobs
+        """Scrape LinkedIn jobs via guest API logic and save unique rows."""
+        import math
+        import re
+        import time
+        from html import unescape
+
+        import requests
+
+        api_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+        request_page_size = int(os.getenv("SCAN_REQUEST_PAGE_SIZE", "10"))
+        http_max_retries = max(0, int(os.getenv("SCAN_HTTP_MAX_RETRIES", "6")))
+        http_base_delay_sec = float(os.getenv("SCAN_HTTP_BASE_DELAY_SEC", "2.0"))
+        http_max_delay_sec = float(os.getenv("SCAN_HTTP_MAX_DELAY_SEC", "60.0"))
+        http_jitter_sec = float(os.getenv("SCAN_HTTP_JITTER_SEC", "1.5"))
+        between_req_min_sec = float(os.getenv("SCAN_BETWEEN_REQUESTS_MIN_SEC", "0.8"))
+        between_req_max_sec = float(os.getenv("SCAN_BETWEEN_REQUESTS_MAX_SEC", "1.8"))
+        between_terms_delay_sec = float(os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0"))
+        request_timeout_sec = int(os.getenv("SCAN_REQUEST_TIMEOUT_SEC", "45"))
+        tag_re = re.compile(r"<[^>]+>")
+        whitespace_re = re.compile(r"\s+")
+        job_url_re = re.compile(r'href="([^"]*?/jobs/view/[^"]+)"')
+        title_re = re.compile(r"<h3[^>]*>(.*?)</h3>", re.S)
+        company_re = re.compile(r"<h4[^>]*>(.*?)</h4>", re.S)
+        job_id_re = re.compile(r"-(\d+)\?")
+        item_re = re.compile(r"<li>(.*?)</li>", re.S)
+
+        def _clean_text(raw: str) -> str:
+            if not raw:
+                return ""
+            text = unescape(raw)
+            text = tag_re.sub(" ", text)
+            text = whitespace_re.sub(" ", text)
+            return text.strip()
+
+        def _extract_job_id(job_url: str) -> str:
+            if not job_url:
+                return ""
+            match = job_id_re.search(job_url)
+            return match.group(1) if match else ""
+
+        def _build_params(term: str, start: int):
+            params = {
+                "keywords": term,
+                "distance": str(distance),
+                "start": str(start),
+            }
+            if location:
+                params["location"] = location
+            if geo_id:
+                params["geoId"] = str(geo_id)
+            if hours_old > 0:
+                params["f_TPR"] = f"r{hours_old * 3600}"
+            return params
+
+        def _parse_items(html_text: str):
+            rows = []
+            for item in item_re.findall(html_text):
+                url_match = job_url_re.search(item)
+                title_match = title_re.search(item)
+                company_match = company_re.search(item)
+                if not url_match or not title_match or not company_match:
+                    continue
+
+                job_url = unescape(url_match.group(1))
+                job_id = _extract_job_id(job_url)
+                if not job_id:
+                    continue
+
+                rows.append(
+                    {
+                        "id": job_id,
+                        "title": _clean_text(title_match.group(1)),
+                        "company": _clean_text(company_match.group(1)),
+                        "job_url": job_url,
+                        "site": "linkedin",
+                    }
+                )
+            return rows
+
+        def _fetch_page(session: requests.Session, term: str, start: int):
+            for attempt in range(http_max_retries + 1):
+                try:
+                    response = session.get(
+                        api_url,
+                        params=_build_params(term=term, start=start),
+                        timeout=request_timeout_sec,
+                        headers={
+                            "User-Agent": (
+                                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/145.0.0.0 Safari/537.36"
+                            )
+                        },
+                    )
+                except requests.RequestException as error:
+                    if attempt >= http_max_retries:
+                        print(
+                            f"term={term}, start={start}, network_error={error}, "
+                            f"attempt={attempt + 1}/{http_max_retries + 1} -> stop page"
+                        )
+                        return []
+
+                    backoff = min(http_max_delay_sec, http_base_delay_sec * (2 ** attempt))
+                    sleep_sec = backoff + random.uniform(0, http_jitter_sec)
+                    print(
+                        f"term={term}, start={start}, network_error={error}, "
+                        f"retry_in={sleep_sec:.1f}s, attempt={attempt + 1}/{http_max_retries + 1}"
+                    )
+                    time.sleep(sleep_sec)
+                    continue
+
+                status_code = response.status_code
+                if status_code == 429 or status_code >= 500:
+                    if attempt >= http_max_retries:
+                        print(
+                            f"term={term}, start={start}, status={status_code}, "
+                            f"attempt={attempt + 1}/{http_max_retries + 1} -> stop page"
+                        )
+                        return []
+
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        sleep_sec = float(retry_after)
+                    else:
+                        backoff = min(http_max_delay_sec, http_base_delay_sec * (2 ** attempt))
+                        sleep_sec = backoff + random.uniform(0, http_jitter_sec)
+
+                    print(
+                        f"term={term}, start={start}, status={status_code}, "
+                        f"retry_in={sleep_sec:.1f}s, attempt={attempt + 1}/{http_max_retries + 1}"
+                    )
+                    time.sleep(max(0.0, sleep_sec))
+                    continue
+
+                if status_code >= 400:
+                    print(f"term={term}, start={start}, status={status_code} -> stop page")
+                    return []
+
+                return _parse_items(response.text)
+
+            return []
+
+        def _scrape_one_term(session: requests.Session, term: str, target_count: int):
+            expected_pages = math.ceil(target_count / 25)
+            term_rows = []
+            seen_ids = set()
+            start = 0
+            request_count = 0
+
+            while len(term_rows) < target_count:
+                page_rows = _fetch_page(session=session, term=term, start=start)
+                request_count += 1
+
+                if not page_rows:
+                    print(f"term={term}, request={request_count}, start={start}, fetched=0 -> stop")
+                    break
+
+                added = 0
+                for row in page_rows:
+                    if row["id"] in seen_ids:
+                        continue
+                    seen_ids.add(row["id"])
+                    row["search_term"] = term
+                    term_rows.append(row)
+                    added += 1
+                    if len(term_rows) >= target_count:
+                        break
+
+                logical_page = math.ceil(len(term_rows) / 25) if term_rows else 1
+                print(
+                    f"term={term}, request={request_count}, logical_page~{logical_page}/{expected_pages}, "
+                    f"start={start}, fetched={len(page_rows)}, added={added}, total={len(term_rows)}"
+                )
+
+                if added == 0:
+                    break
+
+                start += request_page_size
+                if between_req_max_sec > 0:
+                    delay_min = min(between_req_min_sec, between_req_max_sec)
+                    delay_max = max(between_req_min_sec, between_req_max_sec)
+                    time.sleep(random.uniform(delay_min, delay_max))
+
+            return term_rows
 
         env_terms = os.getenv("SCAN_SEARCH_TERMS", "")
         terms_input = search_terms if search_terms is not None else env_terms
@@ -58,43 +240,32 @@ def linkedin_notifier():
 
         results_per_term = int(os.getenv("SCAN_RESULTS_PER_TERM", str(results_wanted)))
         hours_old = int(os.getenv("SCAN_HOURS_OLD", str(hours_old)))
-        distance = int(os.getenv("SCAN_DISTANCE", "0"))
-        scroll_max_rounds = int(os.getenv("SCAN_SCROLL_MAX_ROUNDS", "18"))
-        headless = os.getenv("SCAN_HEADLESS", "true").strip().lower() not in {"0", "false", "no"}
-
-        linkedin_email = (
-            os.getenv("LINKEDIN_EMAIL")
-            or os.getenv("SCAN_LINKEDIN_EMAIL")
-            or None
-        )
-        linkedin_password = (
-            os.getenv("LINKEDIN_PASSWORD")
-            or os.getenv("SCAN_LINKEDIN_PASSWORD")
-            or None
-        )
-        login_enabled = bool(linkedin_email and linkedin_password)
+        distance = int(os.getenv("SCAN_DISTANCE", "25"))
 
         print(
-            f"Scanning LinkedIn jobs: source=playwright, terms={terms}, location={location}, "
+            f"Scanning LinkedIn jobs: source=scripts_guest_api, terms={terms}, location={location}, "
             f"hours_old={hours_old}, results_per_term={results_per_term}, "
-            f"distance={distance}, headless={headless}, login_enabled={login_enabled}"
+            f"distance={distance}"
         )
 
-        jobs_df = scrape_linkedin_public_jobs(
-            terms=terms,
-            location=location,
-            geo_id=geo_id,
-            distance=distance,
-            hours_old=hours_old,
-            max_results_per_term=max(1, results_per_term),
-            max_scroll_rounds=max(1, scroll_max_rounds),
-            email=linkedin_email,
-            password=linkedin_password,
-            headless=headless,
-        )
+        all_rows = []
+        with requests.Session() as session:
+            for idx, term in enumerate(terms):
+                all_rows.extend(
+                    _scrape_one_term(
+                        session=session,
+                        term=term,
+                        target_count=max(1, results_per_term),
+                    )
+                )
+                if idx < len(terms) - 1 and between_terms_delay_sec > 0:
+                    print(f"term={term} done, cooldown_before_next_term={between_terms_delay_sec:.1f}s")
+                    time.sleep(between_terms_delay_sec)
+
+        jobs_df = pd.DataFrame(all_rows)
 
         if jobs_df is None or jobs_df.empty:
-            print("No jobs returned by Playwright scanner.")
+            print("No jobs returned by scripts scraper.")
             return {"scanned_raw": 0, "scanned_unique": 0}
 
         raw_count = len(jobs_df)
@@ -124,11 +295,10 @@ def linkedin_notifier():
 
         return {
             "terms": terms,
-            "scan_source": "playwright_public",
+            "scan_source": "scripts_guest_api",
             "scanned_raw": raw_count,
             "scanned_unique": unique_count,
             "scanned_duplicates": duplicate_count,
-            "login_enabled": login_enabled,
         }
 
     @task

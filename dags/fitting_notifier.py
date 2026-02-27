@@ -72,11 +72,46 @@ def linkedin_fitting_notifier():
         import requests
         _load_env()
 
+        def _persist_one_result(job_item):
+            job_id = job_item.get("id")
+            if not job_id:
+                return
+
+            save_df = pd.DataFrame(
+                [
+                    {
+                        "id": job_id,
+                        "llm_match": job_item.get("llm_match"),
+                        "llm_match_error": job_item.get("llm_match_error"),
+                    }
+                ]
+            )
+            database.save_llm_matches(save_df)
+
+            llm_error = job_item.get("llm_match_error")
+            if llm_error:
+                print(f"llm_result job_id={job_id} status=error error={llm_error}")
+                return
+
+            fit_score = None
+            decision = None
+            try:
+                parsed_match = json.loads(job_item.get("llm_match") or "{}")
+                fit_score = parsed_match.get("fit_score")
+                decision = parsed_match.get("decision")
+            except Exception:
+                pass
+            print(
+                f"llm_result job_id={job_id} status=ok "
+                f"fit_score={fit_score} decision={decision}"
+            )
+
         api_key = os.getenv("GMN_API_KEY")
         if not api_key:
             for job in job_records or []:
                 job["llm_match"] = None
                 job["llm_match_error"] = "missing_gmn_api_key"
+                _persist_one_result(job)
             return pd.DataFrame(job_records or [])
 
         resume_candidates = [
@@ -97,6 +132,7 @@ def linkedin_fitting_notifier():
             for job in job_records or []:
                 job["llm_match"] = None
                 job["llm_match_error"] = f"resume_read_error: {resume_error}"
+                _persist_one_result(job)
             return pd.DataFrame(job_records or [])
 
         jobs = job_records or []
@@ -104,95 +140,102 @@ def linkedin_fitting_notifier():
             batch = jobs[i:i + batch_size]
 
             for j in batch:
-                jd_text = j.get("description") or ""
-                if not jd_text.strip():
+                try:
+                    jd_text = j.get("description") or ""
+                    if not jd_text.strip():
+                        j["llm_match"] = None
+                        j["llm_match_error"] = "missing_job_description"
+                        _persist_one_result(j)
+                        continue
+
+                    base_prompt = (
+                        "If output is not valid JSON, regenerate until valid. "
+                        "Do not include markdown. Do not include trailing commas. "
+                        "You are a strict job-fit evaluator. Evaluate whether the candidate fits the job description. The candidate is opening to multiple roles, like Data Engineer, Data Scientist, Data Analyst, Machine Learning Engineer, Python Developer, etc."
+                        "CRITICAL RULES: "
+                        "1. If the job explicitly requires Dutch (e.g., 'Dutch required', 'Fluent Dutch mandatory'): "
+                        "- Set language_blocker = true "
+                        "- Cap fit_score at 40 "
+                        "2. If required experience >= 5 years AND candidate has < 2 years: "
+                        "- Apply heavy penalty "
+                        "3. Be strict and realistic. Do not be optimistic. "
+                        "4. Prioritize: "
+                        "- Required skills match "
+                        "- Years of experience "
+                        "- Language requirements "
+                        "- Domain relevance "
+                        "5. Extract JD experience requirement clearly into exp_requirement. "
+                        "If not explicitly stated, set exp_requirement to 'not specified'. "
+                        "Return ONLY valid JSON. No explanations outside JSON. No markdown. No comments. "
+                        "JSON structure: "
+                        "{"
+                        '"fit_score": 0-100, '
+                        '"decision": "Strong Fit | Moderate Fit | Weak Fit | Not Recommended", '
+                        '"exp_requirement": "one-line JD experience requirement", '
+                        '"language_check": {"dutch_required": true/false, "language_blocker": true/false, "impact": "short explanation"}, '
+                        '"experience_check": {"required_years": number, "candidate_years": number, "gap_years": number, "severity": "none | minor | moderate | severe"}, '
+                        '"skills_match": {"strong_matches": [], "partial_matches": [], "missing_critical_skills": []}, '
+                        '"risk_factors": [], '
+                        '"summary": "3-5 concise lines"'
+                        "} "
+                        "Job Description: <<<" + jd_text + ">>> "
+                        "Candidate Resume: <<<" + resume_text + ">>>"
+                    )
+
+                    parsed = None
+                    last_error = None
+                    for attempt in range(3):
+                        prompt = base_prompt
+                        if attempt > 0:
+                            prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
+
+                        model_name = os.getenv("FITTING_MODEL_NAME", "gpt-5.2")
+                        payload = {
+                            "model": model_name,
+                            "input": [
+                                {
+                                    "type": "message",
+                                    "role": "user",
+                                    "content": [{"type": "input_text", "text": prompt}],
+                                }
+                            ],
+                        }
+
+                        try:
+                            r = requests.post(
+                                "https://gmn.chuangzuoli.com/v1/responses",
+                                headers={
+                                    "Content-Type": "application/json",
+                                    "Authorization": f"Bearer {api_key}",
+                                },
+                                json=payload,
+                                timeout=120,
+                            )
+                            r.raise_for_status()
+                            response_json = r.json()
+                            output_text = response_json.get("output_text")
+                            if not output_text:
+                                try:
+                                    output_text = response_json["output"][0]["content"][0]["text"]
+                                except Exception:
+                                    output_text = json.dumps(response_json, ensure_ascii=False)
+
+                            parsed = json.loads(output_text)
+                            break
+                        except Exception as e:
+                            last_error = str(e)
+
+                    if parsed is not None:
+                        j["llm_match"] = json.dumps(parsed, ensure_ascii=False)
+                        j["llm_match_error"] = None
+                    else:
+                        j["llm_match"] = None
+                        j["llm_match_error"] = last_error or "invalid_json_response"
+                except Exception as e:
                     j["llm_match"] = None
-                    j["llm_match_error"] = "missing_job_description"
-                    continue
+                    j["llm_match_error"] = f"unexpected_job_error: {e}"
 
-                base_prompt = (
-                    "If output is not valid JSON, regenerate until valid. "
-                    "Do not include markdown. Do not include trailing commas. "
-                    "You are a strict job-fit evaluator. Evaluate whether the candidate fits the job description. The candidate is opening to multiple roles, like Data Engineer, Data Scientist, Data Analyst, Machine Learning Engineer, Python Developer, etc."
-                    "CRITICAL RULES: "
-                    "1. If the job explicitly requires Dutch (e.g., 'Dutch required', 'Fluent Dutch mandatory'): "
-                    "- Set language_blocker = true "
-                    "- Cap fit_score at 40 "
-                    "2. If required experience >= 5 years AND candidate has < 2 years: "
-                    "- Apply heavy penalty "
-                    "3. Be strict and realistic. Do not be optimistic. "
-                    "4. Prioritize: "
-                    "- Required skills match "
-                    "- Years of experience "
-                    "- Language requirements "
-                    "- Domain relevance "
-                    "5. Extract JD experience requirement clearly into exp_requirement. "
-                    "If not explicitly stated, set exp_requirement to 'not specified'. "
-                    "Return ONLY valid JSON. No explanations outside JSON. No markdown. No comments. "
-                    "JSON structure: "
-                    "{"
-                    '"fit_score": 0-100, '
-                    '"decision": "Strong Fit | Moderate Fit | Weak Fit | Not Recommended", '
-                    '"exp_requirement": "one-line JD experience requirement", '
-                    '"language_check": {"dutch_required": true/false, "language_blocker": true/false, "impact": "short explanation"}, '
-                    '"experience_check": {"required_years": number, "candidate_years": number, "gap_years": number, "severity": "none | minor | moderate | severe"}, '
-                    '"skills_match": {"strong_matches": [], "partial_matches": [], "missing_critical_skills": []}, '
-                    '"risk_factors": [], '
-                    '"summary": "3-5 concise lines"'
-                    "} "
-                    "Job Description: <<<" + jd_text + ">>> "
-                    "Candidate Resume: <<<" + resume_text + ">>>"
-                )
-
-                parsed = None
-                last_error = None
-                for attempt in range(3):
-                    prompt = base_prompt
-                    if attempt > 0:
-                        prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
-
-                    model_name = os.getenv("FITTING_MODEL_NAME", "gpt-5.2")
-                    payload = {
-                        "model": model_name,
-                        "input": [
-                            {
-                                "type": "message",
-                                "role": "user",
-                                "content": [{"type": "input_text", "text": prompt}],
-                            }
-                        ],
-                    }
-
-                    try:
-                        r = requests.post(
-                            "https://gmn.chuangzuoli.com/v1/responses",
-                            headers={
-                                "Content-Type": "application/json",
-                                "Authorization": f"Bearer {api_key}",
-                            },
-                            json=payload,
-                            timeout=120,
-                        )
-                        r.raise_for_status()
-                        response_json = r.json()
-                        output_text = response_json.get("output_text")
-                        if not output_text:
-                            try:
-                                output_text = response_json["output"][0]["content"][0]["text"]
-                            except Exception:
-                                output_text = json.dumps(response_json, ensure_ascii=False)
-
-                        parsed = json.loads(output_text)
-                        break
-                    except Exception as e:
-                        last_error = str(e)
-
-                if parsed is not None:
-                    j["llm_match"] = json.dumps(parsed, ensure_ascii=False)
-                    j["llm_match_error"] = None
-                else:
-                    j["llm_match"] = None
-                    j["llm_match_error"] = last_error or "invalid_json_response"
+                _persist_one_result(j)
 
         return pd.DataFrame(jobs)
 
@@ -200,7 +243,7 @@ def linkedin_fitting_notifier():
     def store_fitting_results(jobs_with_match_df):
         if jobs_with_match_df is None or jobs_with_match_df.empty:
             return 0
-        database.save_llm_matches(jobs_with_match_df)
+        print("LLM results already persisted per response.")
         return len(jobs_with_match_df)
 
     @task

@@ -7,8 +7,10 @@ import math
 import re
 from html import unescape
 from pathlib import Path
-from urllib.parse import urlencode
+from types import SimpleNamespace
+from typing import List
 
+import pandas as pd
 import requests
 
 API_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
@@ -28,6 +30,8 @@ TITLE_RE = re.compile(r"<h3[^>]*>(.*?)</h3>", re.S)
 COMPANY_RE = re.compile(r"<h4[^>]*>(.*?)</h4>", re.S)
 JOB_ID_RE = re.compile(r"-(\d+)\?")
 ITEM_RE = re.compile(r"<li>(.*?)</li>", re.S)
+
+JOB_COLUMNS = ["id", "site", "job_url", "title", "company", "search_term"]
 
 
 def clean_text(raw: str) -> str:
@@ -145,6 +149,76 @@ def scrape_jobs(args):
             start += REQUEST_PAGE_SIZE
 
     return all_rows
+
+
+def _normalize_terms(terms) -> List[str]:
+    if terms is None:
+        return []
+    if isinstance(terms, str):
+        parts = [part.strip() for part in terms.split(",")]
+    else:
+        parts = [str(part).strip() for part in terms]
+    return [part for part in parts if part]
+
+
+def scrape_jobs_for_term(
+    term: str,
+    location: str = "Netherlands",
+    geo_id: str = "102890719",
+    distance: int = 25,
+    hours_old: int = 168,
+    results_wanted: int = 100,
+):
+    args = SimpleNamespace(
+        term=term,
+        location=location,
+        geo_id=geo_id,
+        distance=int(distance),
+        hours_old=int(hours_old),
+        results_wanted=max(1, int(results_wanted)),
+    )
+    rows = scrape_jobs(args)
+    for row in rows:
+        row["site"] = "linkedin"
+        row["search_term"] = term
+    return rows
+
+
+def scrape_linkedin_public_jobs(
+    terms,
+    location="Netherlands",
+    geo_id="102890719",
+    distance=25,
+    hours_old=168,
+    results_wanted=100,
+):
+    normalized_terms = _normalize_terms(terms)
+    if not normalized_terms:
+        return pd.DataFrame(columns=JOB_COLUMNS)
+
+    all_rows = []
+    for term in normalized_terms:
+        term_rows = scrape_jobs_for_term(
+            term=term,
+            location=location,
+            geo_id=geo_id,
+            distance=distance,
+            hours_old=hours_old,
+            results_wanted=results_wanted,
+        )
+        all_rows.extend(term_rows)
+
+    if not all_rows:
+        return pd.DataFrame(columns=JOB_COLUMNS)
+
+    jobs_df = pd.DataFrame(all_rows)
+    for col in JOB_COLUMNS:
+        if col not in jobs_df.columns:
+            jobs_df[col] = None
+    jobs_df["id"] = jobs_df["id"].fillna("").astype(str).str.strip()
+    jobs_df = jobs_df[jobs_df["id"] != ""]
+    jobs_df = jobs_df.drop_duplicates(subset=["id"], keep="first")
+    return jobs_df[JOB_COLUMNS].reset_index(drop=True)
 
 
 def write_output(rows, output_path: Path):
