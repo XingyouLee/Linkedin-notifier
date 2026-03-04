@@ -28,7 +28,7 @@ _load_env()
 
 @dag(
     start_date=datetime(2023, 1, 1),
-    schedule="@daily",
+    schedule="0 */12 * * *",
     catchup=False,
     is_paused_upon_creation=False,
     tags=['linkedin_notifier'],
@@ -304,7 +304,7 @@ def linkedin_notifier():
     @task
     def filter_jobs():
         df = database.get_latest_batch_jobs()
-        blocked_companies = ["Elevation Group", "Capgemini", "Jobster", "Sogeti", "Info Support", "CGI Nederland", ""]
+        blocked_companies = ["Elevation Group", "Capgemini", "Jobster", "Sogeti", "CGI Nederland", "Mercor"]
         df = df[~df['company'].isin(blocked_companies)]
         df = df[~df['title'].str.contains("Senior", na=False)]
         df = df[~df['title'].str.contains("Medior", na=False)]
@@ -330,7 +330,7 @@ def linkedin_notifier():
         import asyncio
         import math
         import time
-        from openclaw_jd_worker import run_once
+        from jd_playwright_worker import run_once
 
         job_ids = job_ids or []
         if not job_ids:

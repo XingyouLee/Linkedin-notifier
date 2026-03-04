@@ -3,7 +3,7 @@
 ## JD Scraping Pipeline Improvements
 
 - Add fallback mode for JD scraping:
-  - Primary path: Playwright worker (`dags/openclaw_jd_worker.py`)
+  - Primary path: Playwright worker (`dags/jd_playwright_worker.py`)
   - Fallback path: OpenClaw browser-tool based rescue for failed jobs
 - Proposed flow:
   1. Worker marks failed rows with `status='failed'` and clear error reason

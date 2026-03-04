@@ -6,7 +6,7 @@ This project runs a two-DAG pipeline:
 1. `linkedin_notifier` (`/Users/levi/Linkedin-notifier/dags/process.py`)
    - Scan LinkedIn jobs via scripts guest API scraper (`scripts/linkedin_public_jobs_scraper.py`)
    - Save new jobs into SQLite
-   - Queue JD scraping, run JD worker, enqueue fitting tasks
+   - Queue JD scraping, run Playwright JD worker (`dags/jd_playwright_worker.py`), enqueue fitting tasks
    - Trigger `linkedin_fitting_notifier`
 
 2. `linkedin_fitting_notifier` (`/Users/levi/Linkedin-notifier/dags/fitting_notifier.py`)
