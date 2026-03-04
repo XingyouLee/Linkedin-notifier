@@ -151,7 +151,7 @@ def linkedin_fitting_notifier():
                     base_prompt = (
                         "If output is not valid JSON, regenerate until valid. "
                         "Do not include markdown. Do not include trailing commas. "
-                        "You are a strict job-fit evaluator. Evaluate whether the candidate fits the job description. The candidate is opening to multiple roles, like Data Engineer, Data Scientist, Data Analyst, Machine Learning Engineer, Python Developer, etc."
+                        "You are a strict job-fit evaluator, with years of experience in recruitment from the Netherlands. Evaluate whether the candidate fits the job description. The candidate is opening to multiple roles, like Data Engineer, Data Scientist, Data Analyst, Machine Learning Engineer, Python Developer, etc."
                         "CRITICAL RULES: "
                         "1. If the job explicitly requires Dutch (e.g., 'Dutch required', 'Fluent Dutch mandatory'): "
                         "- Set language_blocker = true "
@@ -291,16 +291,39 @@ def linkedin_fitting_notifier():
     def notify_discord(jobs_to_notify):
         import json
         import requests
+        from datetime import datetime
+
         _load_env()
 
         channel_id = "1476129860450779147"
         bot_token = os.getenv("DISCORD_BOT_TOKEN")
         webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
 
+        def _send_discord_message(content: str):
+            try:
+                if bot_token:
+                    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+                    headers = {
+                        "Authorization": f"Bot {bot_token}",
+                        "Content-Type": "application/json",
+                    }
+                    resp = requests.post(url, headers=headers, json={"content": content}, timeout=30)
+                elif webhook_url:
+                    resp = requests.post(webhook_url, json={"content": content}, timeout=30)
+                else:
+                    return False, "Missing DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL"
+
+                resp.raise_for_status()
+                return True, None
+            except Exception as e:
+                return False, str(e)
+
+        jobs_to_notify = jobs_to_notify or []
+        eligible = len(jobs_to_notify)
         sent = 0
         failed = 0
 
-        for job in jobs_to_notify or []:
+        for job in jobs_to_notify:
             job_id = job.get("id")
             title = job.get("title") or "Unknown title"
             company = job.get("company") or "Unknown company"
@@ -328,28 +351,36 @@ def linkedin_fitting_notifier():
                 f"URL: {job_url}"
             )
 
-            try:
-                if bot_token:
-                    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-                    headers = {
-                        "Authorization": f"Bot {bot_token}",
-                        "Content-Type": "application/json",
-                    }
-                    resp = requests.post(url, headers=headers, json={"content": message}, timeout=30)
-                elif webhook_url:
-                    resp = requests.post(webhook_url, json={"content": message}, timeout=30)
-                else:
-                    raise RuntimeError("Missing DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL")
-
-                resp.raise_for_status()
+            ok, error = _send_discord_message(message)
+            if ok:
                 database.mark_job_notified(job_id, status="sent")
                 sent += 1
-            except Exception as e:
-                database.mark_job_notified(job_id, status="failed", error=str(e))
+            else:
+                database.mark_job_notified(job_id, status="failed", error=error)
                 failed += 1
             time.sleep(1)
 
-        return {"sent": sent, "failed": failed}
+        summary_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        summary_message = (
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📌 Fitting Notification Summary\n"
+            f"Time: {summary_time}\n"
+            f"Eligible: {eligible}\n"
+            f"Sent: {sent}\n"
+            f"Failed: {failed}\n"
+            "━━━━━━━━━━━━━━━━━━━━"
+        )
+
+        summary_sent, summary_error = _send_discord_message(summary_message)
+        if not summary_sent:
+            print(f"Failed to send summary message: {summary_error}")
+
+        return {
+            "eligible": eligible,
+            "sent": sent,
+            "failed": failed,
+            "summary_sent": summary_sent,
+        }
 
     queue_items = claim_fitting_tasks()
     job_records = fetch_jobs_for_fitting(queue_items)
