@@ -1,17 +1,36 @@
 from airflow.decorators import dag, task
+from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 from datetime import datetime
 import os
-import re
 import pandas as pd
+from dotenv import load_dotenv
+import random
+from dags import database
 
-import database
+
+def _load_env():
+    env_candidates = [
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
+        os.path.abspath(os.path.join(os.path.dirname(__file__), ".env")),
+        "/usr/local/airflow/.env",
+        "/usr/local/airflow/dags/.env",
+    ]
+    for env_path in env_candidates:
+        try:
+            load_dotenv(env_path)
+        except Exception:
+            pass
+
+
+_load_env()
 
 
 @dag(
     start_date=datetime(2023, 1, 1),
-    schedule=None,
+    schedule="0 */12 * * *",
     catchup=False,
+    is_paused_upon_creation=False,
     tags=['linkedin_notifier'],
 )
 def linkedin_notifier():
@@ -19,394 +38,412 @@ def linkedin_notifier():
     @task
     def scan_and_save_jobs(
         search_term="Data Engineer",
+        search_terms=None,
         location="Netherlands",
         geo_id="102890719",
-        hours_old=72,
-        results_wanted=200,
+        hours_old=168,
+        results_wanted=10,
     ):
-        """Scrape LinkedIn public job search via Playwright (no login required)."""
-        import asyncio
-        import random
-        from playwright.async_api import async_playwright
+        """Scrape LinkedIn jobs via guest API logic and save unique rows."""
+        import math
+        import re
+        import time
+        from html import unescape
 
-        async def _scrape():
-            seconds = hours_old * 3600
-            all_jobs = []
-            page_num = 0
+        import requests
 
-            async with async_playwright() as p:
-                browser = await p.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--no-sandbox",
-                        "--disable-setuid-sandbox",
-                        "--disable-dev-shm-usage",
-                        "--disable-gpu",
-                        "--no-zygote",
-                    ],
+        api_url = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+        request_page_size = int(os.getenv("SCAN_REQUEST_PAGE_SIZE", "10"))
+        http_max_retries = max(0, int(os.getenv("SCAN_HTTP_MAX_RETRIES", "6")))
+        http_base_delay_sec = float(os.getenv("SCAN_HTTP_BASE_DELAY_SEC", "2.0"))
+        http_max_delay_sec = float(os.getenv("SCAN_HTTP_MAX_DELAY_SEC", "60.0"))
+        http_jitter_sec = float(os.getenv("SCAN_HTTP_JITTER_SEC", "1.5"))
+        between_req_min_sec = float(os.getenv("SCAN_BETWEEN_REQUESTS_MIN_SEC", "0.8"))
+        between_req_max_sec = float(os.getenv("SCAN_BETWEEN_REQUESTS_MAX_SEC", "1.8"))
+        between_terms_delay_sec = float(os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0"))
+        request_timeout_sec = int(os.getenv("SCAN_REQUEST_TIMEOUT_SEC", "45"))
+        tag_re = re.compile(r"<[^>]+>")
+        whitespace_re = re.compile(r"\s+")
+        job_url_re = re.compile(r'href="([^"]*?/jobs/view/[^"]+)"')
+        title_re = re.compile(r"<h3[^>]*>(.*?)</h3>", re.S)
+        company_re = re.compile(r"<h4[^>]*>(.*?)</h4>", re.S)
+        job_id_re = re.compile(r"-(\d+)\?")
+        item_re = re.compile(r"<li>(.*?)</li>", re.S)
+
+        def _clean_text(raw: str) -> str:
+            if not raw:
+                return ""
+            text = unescape(raw)
+            text = tag_re.sub(" ", text)
+            text = whitespace_re.sub(" ", text)
+            return text.strip()
+
+        def _extract_job_id(job_url: str) -> str:
+            if not job_url:
+                return ""
+            match = job_id_re.search(job_url)
+            return match.group(1) if match else ""
+
+        def _build_params(term: str, start: int):
+            params = {
+                "keywords": term,
+                "distance": str(distance),
+                "start": str(start),
+            }
+            if location:
+                params["location"] = location
+            if geo_id:
+                params["geoId"] = str(geo_id)
+            if hours_old > 0:
+                params["f_TPR"] = f"r{hours_old * 3600}"
+            return params
+
+        def _parse_items(html_text: str):
+            rows = []
+            for item in item_re.findall(html_text):
+                url_match = job_url_re.search(item)
+                title_match = title_re.search(item)
+                company_match = company_re.search(item)
+                if not url_match or not title_match or not company_match:
+                    continue
+
+                job_url = unescape(url_match.group(1))
+                job_id = _extract_job_id(job_url)
+                if not job_id:
+                    continue
+
+                rows.append(
+                    {
+                        "id": job_id,
+                        "title": _clean_text(title_match.group(1)),
+                        "company": _clean_text(company_match.group(1)),
+                        "job_url": job_url,
+                        "site": "linkedin",
+                    }
                 )
-                page = await browser.new_page(
-                    user_agent=(
-                        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
+            return rows
+
+        def _fetch_page(session: requests.Session, term: str, start: int):
+            for attempt in range(http_max_retries + 1):
+                try:
+                    response = session.get(
+                        api_url,
+                        params=_build_params(term=term, start=start),
+                        timeout=request_timeout_sec,
+                        headers={
+                            "User-Agent": (
+                                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                "Chrome/145.0.0.0 Safari/537.36"
+                            )
+                        },
                     )
-                )
+                except requests.RequestException as error:
+                    if attempt >= http_max_retries:
+                        print(
+                            f"term={term}, start={start}, network_error={error}, "
+                            f"attempt={attempt + 1}/{http_max_retries + 1} -> stop page"
+                        )
+                        return []
 
-                while len(all_jobs) < results_wanted:
-                    start = page_num * 25
-                    url = (
-                        f"https://www.linkedin.com/jobs/search/"
-                        f"?keywords={search_term.replace(' ', '%20')}"
-                        f"&geoId={geo_id}"
-                        f"&location={location.replace(' ', '%20')}"
-                        f"&f_TPR=r{seconds}"
-                        f"&sortBy=DD"
-                        f"&start={start}"
+                    backoff = min(http_max_delay_sec, http_base_delay_sec * (2 ** attempt))
+                    sleep_sec = backoff + random.uniform(0, http_jitter_sec)
+                    print(
+                        f"term={term}, start={start}, network_error={error}, "
+                        f"retry_in={sleep_sec:.1f}s, attempt={attempt + 1}/{http_max_retries + 1}"
                     )
-                    print(f"Fetching page {page_num}: {url}")
+                    time.sleep(sleep_sec)
+                    continue
 
-                    await page.goto(url, timeout=60000)
-                    await page.wait_for_timeout(2000 + random.randint(500, 1500))
+                status_code = response.status_code
+                if status_code == 429 or status_code >= 500:
+                    if attempt >= http_max_retries:
+                        print(
+                            f"term={term}, start={start}, status={status_code}, "
+                            f"attempt={attempt + 1}/{http_max_retries + 1} -> stop page"
+                        )
+                        return []
 
-                    # Scroll down to trigger lazy-loaded cards
-                    for _ in range(3):
-                        await page.evaluate("window.scrollBy(0, 800)")
-                        await page.wait_for_timeout(500 + random.randint(200, 600))
+                    retry_after = response.headers.get("Retry-After")
+                    if retry_after and retry_after.isdigit():
+                        sleep_sec = float(retry_after)
+                    else:
+                        backoff = min(http_max_delay_sec, http_base_delay_sec * (2 ** attempt))
+                        sleep_sec = backoff + random.uniform(0, http_jitter_sec)
 
-                    # Extract job cards from the DOM
-                    cards = await page.query_selector_all("ul.jobs-search__results-list > li")
-                    if not cards:
-                        cards = await page.query_selector_all("li div.base-card")
+                    print(
+                        f"term={term}, start={start}, status={status_code}, "
+                        f"retry_in={sleep_sec:.1f}s, attempt={attempt + 1}/{http_max_retries + 1}"
+                    )
+                    time.sleep(max(0.0, sleep_sec))
+                    continue
 
-                    if not cards:
-                        print(f"No cards found on page {page_num}, stopping.")
+                if status_code >= 400:
+                    print(f"term={term}, start={start}, status={status_code} -> stop page")
+                    return []
+
+                return _parse_items(response.text)
+
+            return []
+
+        def _scrape_one_term(session: requests.Session, term: str, target_count: int):
+            expected_pages = math.ceil(target_count / 25)
+            term_rows = []
+            seen_ids = set()
+            start = 0
+            request_count = 0
+
+            while len(term_rows) < target_count:
+                page_rows = _fetch_page(session=session, term=term, start=start)
+                request_count += 1
+
+                if not page_rows:
+                    print(f"term={term}, request={request_count}, start={start}, fetched=0 -> stop")
+                    break
+
+                added = 0
+                for row in page_rows:
+                    if row["id"] in seen_ids:
+                        continue
+                    seen_ids.add(row["id"])
+                    row["search_term"] = term
+                    term_rows.append(row)
+                    added += 1
+                    if len(term_rows) >= target_count:
                         break
 
-                    for card in cards:
-                        link_el = await card.query_selector("a.base-card__full-link")
-                        if not link_el:
-                            link_el = await card.query_selector("a[href*='/jobs/view/']")
-                        if not link_el:
-                            continue
+                logical_page = math.ceil(len(term_rows) / 25) if term_rows else 1
+                print(
+                    f"term={term}, request={request_count}, logical_page~{logical_page}/{expected_pages}, "
+                    f"start={start}, fetched={len(page_rows)}, added={added}, total={len(term_rows)}"
+                )
 
-                        href = await link_el.get_attribute("href") or ""
-                        job_url = href.split("?")[0].strip()
+                if added == 0:
+                    break
 
-                        job_id_match = re.search(r"-(\d{8,})$", job_url) or re.search(r"/(\d{8,})", job_url)
-                        job_id = job_id_match.group(1) if job_id_match else None
-                        if not job_id:
-                            continue
+                start += request_page_size
+                if between_req_max_sec > 0:
+                    delay_min = min(between_req_min_sec, between_req_max_sec)
+                    delay_max = max(between_req_min_sec, between_req_max_sec)
+                    time.sleep(random.uniform(delay_min, delay_max))
 
-                        title_el = await card.query_selector("h3.base-search-card__title")
-                        if not title_el:
-                            title_el = await card.query_selector("span.sr-only")
-                        title = (await title_el.inner_text()).strip() if title_el else None
+            return term_rows
 
-                        company_el = await card.query_selector("h4.base-search-card__subtitle a")
-                        if not company_el:
-                            company_el = await card.query_selector("a.hidden-nested-link")
-                        company = (await company_el.inner_text()).strip() if company_el else None
+        env_terms = os.getenv("SCAN_SEARCH_TERMS", "")
+        terms_input = search_terms if search_terms is not None else env_terms
+        if isinstance(terms_input, str):
+            terms = [t.strip() for t in terms_input.split(",") if t.strip()]
+        else:
+            terms = [str(t).strip() for t in (terms_input or []) if str(t).strip()]
+        if not terms:
+            terms = [search_term]
 
-                        all_jobs.append({
-                            "id": job_id,
-                            "site": "linkedin",
-                            "job_url": job_url,
-                            "title": title,
-                            "company": company,
-                        })
+        results_per_term = int(os.getenv("SCAN_RESULTS_PER_TERM", str(results_wanted)))
+        hours_old = int(os.getenv("SCAN_HOURS_OLD", str(hours_old)))
+        distance = int(os.getenv("SCAN_DISTANCE", "25"))
 
-                    print(f"Page {page_num}: found {len(cards)} cards, total so far: {len(all_jobs)}")
-                    page_num += 1
+        print(
+            f"Scanning LinkedIn jobs: source=scripts_guest_api, terms={terms}, location={location}, "
+            f"hours_old={hours_old}, results_per_term={results_per_term}, "
+            f"distance={distance}"
+        )
 
-                    if len(cards) < 25:
-                        break
+        all_rows = []
+        with requests.Session() as session:
+            for idx, term in enumerate(terms):
+                all_rows.extend(
+                    _scrape_one_term(
+                        session=session,
+                        term=term,
+                        target_count=max(1, results_per_term),
+                    )
+                )
+                if idx < len(terms) - 1 and between_terms_delay_sec > 0:
+                    print(f"term={term} done, cooldown_before_next_term={between_terms_delay_sec:.1f}s")
+                    time.sleep(between_terms_delay_sec)
 
-                    # Random delay between pages
-                    await page.wait_for_timeout(1000 + random.randint(500, 2000))
+        jobs_df = pd.DataFrame(all_rows)
 
-                await browser.close()
+        if jobs_df is None or jobs_df.empty:
+            print("No jobs returned by scripts scraper.")
+            return {"scanned_raw": 0, "scanned_unique": 0}
 
-            return all_jobs[:results_wanted]
+        raw_count = len(jobs_df)
+        jobs_df["id"] = jobs_df["id"].fillna("").astype(str).str.strip()
+        jobs_df = jobs_df[jobs_df["id"] != ""]
+        jobs_df = jobs_df.drop_duplicates(subset=["id"], keep="first")
+        unique_count = len(jobs_df)
+        duplicate_count = raw_count - unique_count
 
-        all_jobs = asyncio.run(_scrape())
+        if unique_count == 0:
+            print("No valid job ids found after normalization.")
+            return {"scanned_raw": raw_count, "scanned_unique": 0, "scanned_duplicates": raw_count}
 
-        jobs_df = pd.DataFrame(all_jobs)
-        print(f"Found {len(jobs_df)} jobs total")
-        if not jobs_df.empty:
-            print(jobs_df.head(10))
+        if "search_term" not in jobs_df.columns:
+            jobs_df["search_term"] = None
+        per_term_stats = (
+            jobs_df.groupby("search_term")["id"].nunique().sort_values(ascending=False).to_dict()
+        )
 
-        database.save_jobs(jobs_df)
-        return {"scanned": len(all_jobs)}
+        print(f"Per-term unique stats: {per_term_stats}")
+        print(
+            "Merged id stats: "
+            f"total={raw_count}, unique={unique_count}, duplicates={duplicate_count}"
+        )
+
+        database.save_jobs(jobs_df[["id", "site", "job_url", "title", "company"]])
+
+        return {
+            "terms": terms,
+            "scan_source": "scripts_guest_api",
+            "scanned_raw": raw_count,
+            "scanned_unique": unique_count,
+            "scanned_duplicates": duplicate_count,
+        }
 
     @task
     def filter_jobs():
         df = database.get_latest_batch_jobs()
-        print(df.head())
-
-        blocked_companies = ["Elevation Group", "Capgemini", "Jobster", "Sogeti", "Info Support", "CGI Nederland", ""]
+        blocked_companies = ["Elevation Group", "Capgemini", "Jobster", "Sogeti", "CGI Nederland", "Mercor"]
         df = df[~df['company'].isin(blocked_companies)]
         df = df[~df['title'].str.contains("Senior", na=False)]
+        df = df[~df['title'].str.contains("Medior", na=False)]
+        print("Filtered records:", df.shape[0])
         return df
 
     @task
     def df_to_records(df):
         if df is None:
             return []
-        return df.to_dict(orient="records")
+        clean_df = df.astype(object).where(pd.notna(df), None)
+        return clean_df.to_dict(orient="records")
 
     @task
     def enqueue_jd_requests(job_records):
         jobs_df = pd.DataFrame(job_records or [])
         queued = database.enqueue_jd_requests(jobs_df)
-        print(f"Queued {queued} JD requests for OpenClaw")
+        print(f"Queued {queued} JD requests for in-DAG worker")
         return [j.get("id") for j in (job_records or []) if j.get("id")]
 
-    @task
-    def wait_for_jd_results(job_ids, timeout_seconds=600, poll_interval=15):
+    @task(task_id="run_jd_worker")
+    def run_jd_worker(job_ids, worker_batch_size=5, max_loops=20, idle_loop_limit=2):
+        import asyncio
+        import math
         import time
+        from jd_playwright_worker import run_once
 
+        job_ids = job_ids or []
+        if not job_ids:
+            return {"processed": 0, "done": 0, "failed": 0, "pending": 0, "total": 0}
+
+        worker_batch_size = int(os.getenv("JD_WORKER_BATCH_SIZE", str(worker_batch_size)))
+        idle_loop_limit = int(os.getenv("JD_WORKER_IDLE_LOOP_LIMIT", str(idle_loop_limit)))
+        worker_batch_size = max(1, worker_batch_size)
+        idle_loop_limit = max(1, idle_loop_limit)
+
+        total = len(job_ids)
+        min_loops_needed = math.ceil(total / worker_batch_size) + idle_loop_limit
+        max_loops = int(os.getenv("JD_WORKER_MAX_LOOPS", str(max(max_loops, min_loops_needed))))
+        if max_loops <= 0:
+            max_loops = min_loops_needed
+
+        total_processed = 0
+        idle_loops = 0
+
+        print(
+            f"JD worker config: batch_size={worker_batch_size}, "
+            f"max_loops={max_loops}, idle_loop_limit={idle_loop_limit}, "
+            f"min_loops_needed={min_loops_needed}, total={total}"
+        )
+
+        for _ in range(max_loops):
+            done_count = database.count_jd_queue_status(job_ids, "done")
+            failed_count = database.count_jd_queue_status(job_ids, "failed")
+            pending_count = total - done_count - failed_count
+            print(
+                f"JD queue progress(before): done={done_count}, failed={failed_count}, "
+                f"pending={pending_count}, total={total}"
+            )
+
+            if pending_count <= 0:
+                break
+
+            processed = asyncio.run(run_once(limit=worker_batch_size))
+            total_processed += processed
+
+            if processed == 0:
+                idle_loops += 1
+                if idle_loops >= idle_loop_limit:
+                    break
+                time.sleep(2)
+                continue
+
+            idle_loops = 0
+            time.sleep(random.randint(1, 3))
+
+        done_count = database.count_jd_queue_status(job_ids, "done")
+        failed_count = database.count_jd_queue_status(job_ids, "failed")
+        pending_count = total - done_count - failed_count
+        result = {
+            "processed": total_processed,
+            "done": done_count,
+            "failed": failed_count,
+            "pending": pending_count,
+            "total": total,
+        }
+
+        if pending_count > 0:
+            raise RuntimeError(
+                "JD worker stopped with pending jobs: "
+                f"{result}. Increase JD_WORKER_MAX_LOOPS (suggested >= {min_loops_needed}) "
+                f"or JD_WORKER_BATCH_SIZE (current {worker_batch_size})."
+            )
+
+        return result
+
+    @task
+    def fetch_jd_results(job_ids):
         job_ids = job_ids or []
         if not job_ids:
             return []
 
-        start = time.time()
-        while True:
-            done_count = database.count_jd_queue_status(job_ids, "done")
-            failed_count = database.count_jd_queue_status(job_ids, "failed")
-            total = len(job_ids)
-            print(f"JD queue progress: done={done_count}, failed={failed_count}, total={total}")
-
-            if done_count + failed_count >= total:
-                break
-
-            if time.time() - start > timeout_seconds:
-                raise TimeoutError("Timed out waiting for OpenClaw JD scraping results")
-
-            time.sleep(poll_interval)
-
         jobs_df = database.get_jobs_by_ids(job_ids)
         import numpy as np
+
         jobs_df = jobs_df.replace({np.nan: None})
         return jobs_df.to_dict(orient="records")
 
     @task
-    def match_jobs_with_resume_llm(job_records, batch_size=5):
-        import json
-        import requests
-        from dotenv import load_dotenv
-
-        env_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))
-        load_dotenv(env_path)
-
-        api_key = os.getenv("GMN_API_KEY")
-        if not api_key:
-            for job in job_records or []:
-                job["llm_match"] = None
-                job["llm_match_error"] = "missing_gmn_api_key"
-            return pd.DataFrame(job_records or [])
-
-        resume_candidates = [
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "resume.md")),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "resume.md")),
-        ]
-        resume_text = None
-        resume_error = None
-        for resume_path in resume_candidates:
-            try:
-                with open(resume_path, "r", encoding="utf-8") as f:
-                    resume_text = f.read()
-                break
-            except Exception as e:
-                resume_error = e
-
-        if not resume_text:
-            for job in job_records or []:
-                job["llm_match"] = None
-                job["llm_match_error"] = f"resume_read_error: {resume_error}"
-            return pd.DataFrame(job_records or [])
-
-        jobs = job_records or []
-        for i in range(0, len(jobs), batch_size):
-            batch = jobs[i:i + batch_size]
-
-            for j in batch:
-                jd_text = j.get("description") or ""
-                base_prompt = (
-                    "If output is not valid JSON, regenerate until valid. "
-                    "Do not include markdown. Do not include trailing commas. "
-                    "You are a strict job-fit evaluator. Evaluate whether the candidate fits the job description. "
-                    "CRITICAL RULES: "
-                    "1. If the job explicitly requires Dutch (e.g., 'Dutch required', 'Fluent Dutch mandatory'): "
-                    "- Set language_blocker = true "
-                    "- Cap fit_score at 40 "
-                    "2. If required experience >= 5 years AND candidate has < 2 years: "
-                    "- Apply heavy penalty "
-                    "3. Be strict and realistic. Do not be optimistic. "
-                    "4. Prioritize: "
-                    "- Required skills match "
-                    "- Years of experience "
-                    "- Language requirements "
-                    "- Domain relevance "
-                    "Return ONLY valid JSON. No explanations outside JSON. No markdown. No comments. "
-                    "JSON structure: "
-                    "{"
-                    '"fit_score": 0-100, '
-                    '"decision": "Strong Fit | Moderate Fit | Weak Fit | Not Recommended", '
-                    '"language_check": {"dutch_required": true/false, "language_blocker": true/false, "impact": "short explanation"}, '
-                    '"experience_check": {"required_years": number, "candidate_years": number, "gap_years": number, "severity": "none | minor | moderate | severe"}, '
-                    '"skills_match": {"strong_matches": [], "partial_matches": [], "missing_critical_skills": []}, '
-                    '"risk_factors": [], '
-                    '"summary": "3-5 concise lines"'
-                    "} "
-                    "Job Description: <<<" + jd_text + ">>> "
-                    "Candidate Resume: <<<" + resume_text + ">>>"
-                )
-
-                parsed = None
-                last_error = None
-                for attempt in range(3):
-                    prompt = base_prompt
-                    if attempt > 0:
-                        prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
-
-                    payload = {
-                        "model": "gpt-5.2",
-                        "input": [
-                            {
-                                "type": "message",
-                                "role": "user",
-                                "content": [{"type": "input_text", "text": prompt}],
-                            }
-                        ],
-                    }
-
-                    try:
-                        r = requests.post(
-                            "https://gmn.chuangzuoli.com/v1/responses",
-                            headers={
-                                "Content-Type": "application/json",
-                                "Authorization": f"Bearer {api_key}",
-                            },
-                            json=payload,
-                            timeout=120,
-                        )
-                        r.raise_for_status()
-                        response_json = r.json()
-                        output_text = response_json.get("output_text")
-                        if not output_text:
-                            try:
-                                output_text = response_json["output"][0]["content"][0]["text"]
-                            except Exception:
-                                output_text = json.dumps(response_json, ensure_ascii=False)
-
-                        parsed = json.loads(output_text)
-                        break
-                    except Exception as e:
-                        last_error = str(e)
-
-                if parsed is not None:
-                    j["llm_match"] = json.dumps(parsed, ensure_ascii=False)
-                    j["llm_match_error"] = None
-                else:
-                    j["llm_match"] = None
-                    j["llm_match_error"] = last_error or "invalid_json_response"
-
-        return pd.DataFrame(jobs)
-
-    @task
-    def store_fitting_results(jobs_with_match_df):
-        if jobs_with_match_df is None:
-            return 0
-        database.save_llm_matches(jobs_with_match_df)
-        return len(jobs_with_match_df)
-
-    @task
-    def select_jobs_for_notification(limit=20):
-        jobs_df = database.get_jobs_to_notify(limit=limit)
-        print(f"Jobs eligible for notification: {len(jobs_df)}")
-        return jobs_df.to_dict(orient="records")
-
-    @task
-    def notify_discord(jobs_to_notify):
-        import requests
-        from dotenv import load_dotenv
-
-        env_candidates = [
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), ".env")),
-            "/usr/local/airflow/.env",
-            "/usr/local/airflow/dags/.env",
-        ]
-        for env_path in env_candidates:
-            try:
-                load_dotenv(env_path)
-            except Exception:
-                pass
-
-        channel_id = "1476129860450779147"
-        bot_token = os.getenv("DISCORD_BOT_TOKEN")
-        webhook_url = os.getenv("DISCORD_WEBHOOK_URL")
-
-        sent = 0
-        failed = 0
-
-        for job in jobs_to_notify or []:
-            job_id = job.get("id")
-            title = job.get("title") or "Unknown title"
-            company = job.get("company") or "Unknown company"
-            fit_score = job.get("fit_score")
-            fit_decision = job.get("fit_decision")
-            job_url = job.get("job_url") or ""
-
-            message = (
-                f"🎯 Job Match\n"
-                f"ID: {job_id}\n"
-                f"Title: {title}\n"
-                f"Company: {company}\n"
-                f"Decision: {fit_decision}\n"
-                f"Fit Score: {fit_score}\n"
-                f"URL: {job_url}"
-            )
-
-            try:
-                if bot_token:
-                    url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
-                    headers = {
-                        "Authorization": f"Bot {bot_token}",
-                        "Content-Type": "application/json",
-                    }
-                    resp = requests.post(url, headers=headers, json={"content": message}, timeout=30)
-                elif webhook_url:
-                    resp = requests.post(webhook_url, json={"content": message}, timeout=30)
-                else:
-                    raise RuntimeError("Missing DISCORD_BOT_TOKEN or DISCORD_WEBHOOK_URL")
-
-                resp.raise_for_status()
-                database.mark_job_notified(job_id, status="sent")
-                sent += 1
-            except Exception as e:
-                database.mark_job_notified(job_id, status="failed", error=str(e))
-                failed += 1
-
-        return {"sent": sent, "failed": failed}
+    def enqueue_fitting_tasks(job_records):
+        jobs_df = pd.DataFrame(job_records or [])
+        if "description" in jobs_df.columns:
+            jobs_df = jobs_df[jobs_df["description"].notna()]
+        queued = database.enqueue_fitting_requests(jobs_df)
+        print(f"Queued {queued} fitting requests")
+        return {"queued": queued}
 
     # Pipeline wiring (all task calls at bottom)
-    scan_meta = scan_and_save_jobs()
+    results_wanted = int(os.getenv("SCAN_RESULTS_WANTED", "10"))
+    scan_meta = scan_and_save_jobs(results_wanted=results_wanted)
 
     filtered_jobs_df = filter_jobs()
     scan_meta >> filtered_jobs_df
     filtered_job_records = df_to_records(filtered_jobs_df)
 
     queued_job_ids = enqueue_jd_requests(filtered_job_records)
-    jobs_with_jd = wait_for_jd_results(queued_job_ids)
+    jd_worker_meta = run_jd_worker(queued_job_ids)
+    jobs_with_jd = fetch_jd_results(queued_job_ids)
 
-    jobs_with_llm_match_df = match_jobs_with_resume_llm(jobs_with_jd)
-    store_result = store_fitting_results(jobs_with_llm_match_df)
+    jd_worker_meta >> jobs_with_jd
+    fitting_enqueue_meta = enqueue_fitting_tasks(jobs_with_jd)
 
-    jobs_to_notify = select_jobs_for_notification()
-    store_result >> jobs_to_notify
-    notify_discord(jobs_to_notify)
+    trigger_fitting_notifier = TriggerDagRunOperator(
+        task_id="trigger_fitting_notifier",
+        trigger_dag_id="linkedin_fitting_notifier",
+        conf={"source_dag_run_id": "{{ dag_run.run_id }}"},
+        wait_for_completion=False,
+    )
+    fitting_enqueue_meta >> trigger_fitting_notifier
 
 
 linkedin_notifier()

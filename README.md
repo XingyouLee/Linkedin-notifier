@@ -1,45 +1,66 @@
-Overview
-========
+LinkedIn Notifier (Airflow + Astro)
+==================================
 
-Welcome to Astronomer! This project was generated after you ran 'astro dev init' using the Astronomer CLI. This readme describes the contents of the project, as well as how to run Apache Airflow on your local machine.
+This project runs a two-DAG pipeline:
 
-Project Contents
-================
+1. `linkedin_notifier` (`/Users/levi/Linkedin-notifier/dags/process.py`)
+   - Scan LinkedIn jobs via scripts guest API scraper (`scripts/linkedin_public_jobs_scraper.py`)
+   - Save new jobs into SQLite
+   - Queue JD scraping, run Playwright JD worker (`dags/jd_playwright_worker.py`), enqueue fitting tasks
+   - Trigger `linkedin_fitting_notifier`
 
-Your Astro project contains the following files and folders:
+2. `linkedin_fitting_notifier` (`/Users/levi/Linkedin-notifier/dags/fitting_notifier.py`)
+   - Claim fitting tasks (`pending_fit` and recoverable `fitting`)
+   - Run LLM fitting
+   - Save match result + score + decision
+   - Finalize queue status
+   - Send Discord notification for `Strong Fit` / `Moderate Fit`
 
-- dags: This folder contains the Python files for your Airflow DAGs. By default, this directory includes one example DAG:
-    - `example_astronauts`: This DAG shows a simple ETL pipeline example that queries the list of astronauts currently in space from the Open Notify API and prints a statement for each astronaut. The DAG uses the TaskFlow API to define tasks in Python, and dynamic task mapping to dynamically print a statement for each astronaut. For more on how this DAG works, see our [Getting started tutorial](https://www.astronomer.io/docs/learn/get-started-with-airflow).
-- Dockerfile: This file contains a versioned Astro Runtime Docker image that provides a differentiated Airflow experience. If you want to execute other commands or overrides at runtime, specify them here.
-- include: This folder contains any additional files that you want to include as part of your project. It is empty by default.
-- packages.txt: Install OS-level packages needed for your project by adding them to this file. It is empty by default.
-- requirements.txt: Install Python packages needed for your project by adding them to this file. It is empty by default.
-- plugins: Add custom or community plugins for your project to this file. It is empty by default.
-- airflow_settings.yaml: Use this local-only file to specify Airflow Connections, Variables, and Pools instead of entering them in the Airflow UI as you develop DAGs in this project.
 
-Deploy Your Project Locally
-===========================
+Run locally
+-----------
 
-Start Airflow on your local machine by running 'astro dev start'.
+1. Start local Airflow:
+   - `astro dev start`
+2. Trigger scan DAG:
+   - `astro dev run dags trigger linkedin_notifier`
+3. Or trigger fitting DAG directly:
+   - `astro dev run dags trigger linkedin_fitting_notifier`
 
-This command will spin up five Docker containers on your machine, each for a different Airflow component:
 
-- Postgres: Airflow's Metadata Database
-- Scheduler: The Airflow component responsible for monitoring and triggering tasks
-- DAG Processor: The Airflow component responsible for parsing DAGs
-- API Server: The Airflow component responsible for serving the Airflow UI and API
-- Triggerer: The Airflow component responsible for triggering deferred tasks
+Environment variables
+---------------------
 
-When all five containers are ready the command will open the browser to the Airflow UI at http://localhost:8080/. You should also be able to access your Postgres Database at 'localhost:5432/postgres' with username 'postgres' and password 'postgres'.
+For Astro local runs, keep runtime vars in:
 
-Note: If you already have either of the above ports allocated, you can either [stop your existing Docker containers or change the port](https://www.astronomer.io/docs/astro/cli/troubleshoot-locally#ports-are-not-available-for-my-local-airflow-webserver).
+- `/Users/levi/Linkedin-notifier/dags/.env`
 
-Deploy Your Project to Astronomer
-=================================
+(`.dockerignore` excludes root `.env`, so scheduler may not see it.)
 
-If you have an Astronomer account, pushing code to a Deployment on Astronomer is simple. For deploying instructions, refer to Astronomer documentation: https://www.astronomer.io/docs/astro/deploy-code/
+Common vars:
 
-Contact
-=======
+- `SCAN_RESULTS_WANTED`: scan target count
+- `SCAN_SEARCH_TERMS`: comma-separated terms (optional)
+- `SCAN_HOURS_OLD`, `SCAN_DISTANCE`
+- `JD_WORKER_BATCH_SIZE`, `JD_WORKER_MAX_LOOPS`, `JD_WORKER_IDLE_LOOP_LIMIT`
+- `FITTING_MAX_ATTEMPTS`
+- `FITTING_MODEL_NAME`
+- `GMN_API_KEY`
+- `DISCORD_BOT_TOKEN` or `DISCORD_WEBHOOK_URL`
 
-The Astronomer CLI is maintained with love by the Astronomer team. To report a bug or suggest a change, reach out to our support.
+
+Data storage
+------------
+
+- SQLite DB path defaults to `/Users/levi/Linkedin-notifier/include/jobs.db`
+- Main tables:
+  - `jobs`
+  - `batches`
+  - `jd_queue`
+
+
+Notes
+-----
+
+- Job id normalization is required to keep DB dedupe stable (`id` is stored as numeric string).
+- Notifications run after fitting finalization, so newly finished jobs are not skipped.
