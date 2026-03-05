@@ -1,54 +1,15 @@
-from airflow.decorators import dag, task
+from airflow.sdk import dag, task
 
-from datetime import date, datetime
+from datetime import datetime
 import os
 import pandas as pd
-from dotenv import load_dotenv
 import time
 from dags import database
+from dags.runtime_utils import df_to_xcom_records, load_env, spark_to_xcom_records
+from dags.spark_runtime import get_spark_session
 
 
-def _load_env():
-    env_candidates = [
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env")),
-        os.path.abspath(os.path.join(os.path.dirname(__file__), ".env")),
-        "/usr/local/airflow/.env",
-        "/usr/local/airflow/dags/.env",
-    ]
-
-    for env_path in env_candidates:
-        try:
-            load_dotenv(env_path)
-        except Exception:
-            pass
-
-    if not os.getenv("GMN_API_KEY"):
-        for env_path in env_candidates:
-            try:
-                load_dotenv(env_path, override=True)
-            except Exception:
-                pass
-
-
-_load_env()
-
-
-def _to_xcom_safe_value(value):
-    if value is None:
-        return None
-    if isinstance(value, (pd.Timestamp, datetime, date)):
-        return value.isoformat()
-    return value
-
-
-def _df_to_xcom_records(df: pd.DataFrame):
-    if df is None or df.empty:
-        return []
-
-    safe_df = df.astype(object).where(pd.notna(df), None).copy()
-    for col in safe_df.columns:
-        safe_df[col] = safe_df[col].map(_to_xcom_safe_value)
-    return safe_df.to_dict(orient="records")
+load_env(required_keys=["GMN_API_KEY"], override_if_missing=True)
 
 
 @dag(
@@ -79,16 +40,39 @@ def linkedin_fitting_notifier():
         if jobs_df is None or jobs_df.empty:
             return []
 
-        return _df_to_xcom_records(jobs_df)
+        required_columns = ["id", "description"]
+        for col in required_columns:
+            if col not in jobs_df.columns:
+                jobs_df[col] = None
+
+        spark = None
+        try:
+            from pyspark.sql import types as T
+
+            spark = get_spark_session("linkedin_fitting_fetch_jobs")
+            fetch_schema = T.StructType(
+                [
+                    T.StructField("id", T.StringType(), True),
+                    T.StructField("description", T.StringType(), True),
+                ]
+            )
+            jobs_sdf = spark.createDataFrame(
+                df_to_xcom_records(jobs_df[required_columns]),
+                schema=fetch_schema,
+            )
+            return spark_to_xcom_records(jobs_sdf)
+        finally:
+            if spark is not None:
+                spark.stop()
 
     @task
     def match_jobs_with_resume_llm(job_records, batch_size=5):
         if not job_records:
-            return pd.DataFrame()
+            return []
 
         import json
         import requests
-        _load_env()
+        load_env(required_keys=["GMN_API_KEY"], override_if_missing=True)
 
         def _extract_output_text(response_json):
             output_text = response_json.get("output_text")
@@ -145,7 +129,7 @@ def linkedin_fitting_notifier():
                 job["llm_match"] = None
                 job["llm_match_error"] = "missing_llm_api_key"
                 _persist_one_result(job)
-            return pd.DataFrame(job_records or [])
+            return job_records or []
 
         resume_candidates = [
             os.path.abspath(os.path.join(os.path.dirname(__file__), "resume.md")),
@@ -166,7 +150,7 @@ def linkedin_fitting_notifier():
                 job["llm_match"] = None
                 job["llm_match_error"] = f"resume_read_error: {resume_error}"
                 _persist_one_result(job)
-            return pd.DataFrame(job_records or [])
+            return job_records or []
 
         jobs = job_records or []
         for i in range(0, len(jobs), batch_size):
@@ -271,30 +255,32 @@ def linkedin_fitting_notifier():
 
                 _persist_one_result(j)
 
-        return pd.DataFrame(jobs)
+        return jobs
 
     @task
-    def store_fitting_results(jobs_with_match_df):
-        if jobs_with_match_df is None or jobs_with_match_df.empty:
+    def store_fitting_results(jobs_with_match_records):
+        jobs_with_match_records = jobs_with_match_records or []
+        if not jobs_with_match_records:
             return 0
         print("LLM results already persisted per response.")
-        return len(jobs_with_match_df)
+        return len(jobs_with_match_records)
 
     @task
-    def finalize_fitting_queue(queue_items, jobs_with_match_df):
+    def finalize_fitting_queue(queue_items, jobs_with_match_records):
         if not queue_items:
             return {"done": 0, "failed": 0}
 
         max_attempts = int(os.getenv("FITTING_MAX_ATTEMPTS", "3"))
 
         results = {}
-        if jobs_with_match_df is not None and not jobs_with_match_df.empty:
-            for row in jobs_with_match_df[["id", "llm_match", "llm_match_error"]].itertuples(index=False, name=None):
-                job_id, llm_match, llm_match_error = row
-                results[job_id] = {
-                    "llm_match": llm_match,
-                    "llm_match_error": llm_match_error,
-                }
+        for row in (jobs_with_match_records or []):
+            job_id = row.get("id")
+            if not job_id:
+                continue
+            results[job_id] = {
+                "llm_match": row.get("llm_match"),
+                "llm_match_error": row.get("llm_match_error"),
+            }
 
         done = 0
         failed = 0
@@ -319,7 +305,38 @@ def linkedin_fitting_notifier():
     def select_jobs_for_notification(limit=20):
         jobs_df = database.get_jobs_to_notify(limit=limit)
         print(f"Jobs eligible for notification: {len(jobs_df)}")
-        return _df_to_xcom_records(jobs_df)
+        if jobs_df is None or jobs_df.empty:
+            return []
+
+        notify_columns = ["id", "title", "company", "fit_score", "fit_decision", "job_url", "llm_match"]
+        for col in notify_columns:
+            if col not in jobs_df.columns:
+                jobs_df[col] = None
+
+        spark = None
+        try:
+            from pyspark.sql import types as T
+
+            spark = get_spark_session("linkedin_fitting_select_notify")
+            notify_schema = T.StructType(
+                [
+                    T.StructField("id", T.StringType(), True),
+                    T.StructField("title", T.StringType(), True),
+                    T.StructField("company", T.StringType(), True),
+                    T.StructField("fit_score", T.StringType(), True),
+                    T.StructField("fit_decision", T.StringType(), True),
+                    T.StructField("job_url", T.StringType(), True),
+                    T.StructField("llm_match", T.StringType(), True),
+                ]
+            )
+            jobs_sdf = spark.createDataFrame(
+                df_to_xcom_records(jobs_df[notify_columns]),
+                schema=notify_schema,
+            )
+            return spark_to_xcom_records(jobs_sdf)
+        finally:
+            if spark is not None:
+                spark.stop()
 
     @task
     def notify_discord(jobs_to_notify):
@@ -327,7 +344,7 @@ def linkedin_fitting_notifier():
         import requests
         from datetime import datetime
 
-        _load_env()
+        load_env(required_keys=["GMN_API_KEY"], override_if_missing=True)
 
         channel_id = "1476129860450779147"
         bot_token = os.getenv("DISCORD_BOT_TOKEN")
@@ -418,9 +435,9 @@ def linkedin_fitting_notifier():
 
     queue_items = claim_fitting_tasks()
     job_records = fetch_jobs_for_fitting(queue_items)
-    jobs_with_llm_match_df = match_jobs_with_resume_llm(job_records)
-    store_result = store_fitting_results(jobs_with_llm_match_df)
-    finalize_result = finalize_fitting_queue(queue_items, jobs_with_llm_match_df)
+    jobs_with_llm_match_records = match_jobs_with_resume_llm(job_records)
+    store_result = store_fitting_results(jobs_with_llm_match_records)
+    finalize_result = finalize_fitting_queue(queue_items, jobs_with_llm_match_records)
 
     store_result >> finalize_result
 

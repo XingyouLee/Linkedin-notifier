@@ -1,11 +1,15 @@
 import json
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote_plus
 
 import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
+
+JOB_REQUIRED_COLUMNS = ["id", "site", "job_url", "title", "company"]
+JD_QUEUE_COLUMNS = ["id", "job_url"]
+LLM_RESULT_COLUMNS = ["id", "llm_match", "llm_match_error"]
 
 
 def _resolve_db_url() -> str:
@@ -34,6 +38,24 @@ def get_db_url() -> str:
 
 def _connect(row_factory=None, autocommit: bool = False):
     return psycopg.connect(get_db_url(), row_factory=row_factory, autocommit=autocommit)
+
+
+def _ensure_columns(df: pd.DataFrame, required_columns: Iterable[str]) -> pd.DataFrame:
+    normalized_df = df.copy()
+    for col in required_columns:
+        if col not in normalized_df.columns:
+            normalized_df[col] = None
+    return normalized_df
+
+
+def _extract_fit_fields(llm_match: Optional[str]) -> tuple[Optional[int], Optional[str]]:
+    if not llm_match:
+        return None, None
+    try:
+        parsed = json.loads(llm_match)
+        return parsed.get("fit_score"), parsed.get("decision")
+    except Exception:
+        return None, None
 
 
 def init_db():
@@ -149,21 +171,14 @@ def save_jobs(jobs_df: pd.DataFrame):
 
     init_db()
 
-    required_cols = ["id", "site", "job_url", "title", "company"]
-    for col in required_cols:
-        if col not in jobs_df.columns:
-            jobs_df[col] = None
-
-    filtered_df = jobs_df[required_cols]
+    filtered_df = _ensure_columns(jobs_df, JOB_REQUIRED_COLUMNS)[JOB_REQUIRED_COLUMNS]
 
     with _connect() as conn:
         with conn.cursor() as cursor:
             cursor.execute("INSERT INTO batches DEFAULT VALUES RETURNING id")
             batch_id = cursor.fetchone()[0]
 
-            records = []
-            for row in filtered_df.itertuples(index=False, name=None):
-                records.append((*row, batch_id))
+            records = [(*row, batch_id) for row in filtered_df.itertuples(index=False, name=None)]
 
             inserted_count = 0
             for record in records:
@@ -193,10 +208,8 @@ def enqueue_jd_requests(jobs_df: pd.DataFrame):
     if "id" not in jobs_df.columns or "job_url" not in jobs_df.columns:
         return 0
 
-    records = []
-    for row in jobs_df[["id", "job_url"]].itertuples(index=False, name=None):
-        job_id, job_url = row
-        records.append((job_id, job_url))
+    queue_df = _ensure_columns(jobs_df, JD_QUEUE_COLUMNS)[JD_QUEUE_COLUMNS]
+    records = [(job_id, job_url) for job_id, job_url in queue_df.itertuples(index=False, name=None)]
 
     with _connect() as conn:
         with conn.cursor() as cursor:
@@ -343,12 +356,11 @@ def count_jd_queue_status(job_ids: List[str], status: str) -> int:
     if not job_ids:
         return 0
 
-    placeholders = ",".join(["%s"] * len(job_ids))
-    query = f"SELECT COUNT(*) FROM jd_queue WHERE status = %s AND job_id IN ({placeholders})"
+    query = "SELECT COUNT(*) FROM jd_queue WHERE status = %s AND job_id = ANY(%s)"
 
     with _connect() as conn:
         with conn.cursor() as cursor:
-            cursor.execute(query, [status, *job_ids])
+            cursor.execute(query, (status, job_ids))
             count = cursor.fetchone()[0]
 
     return count
@@ -365,23 +377,12 @@ def save_llm_matches(jobs_df: pd.DataFrame):
     if "id" not in update_df.columns:
         return
 
-    if "llm_match" not in update_df.columns:
-        update_df["llm_match"] = None
-    if "llm_match_error" not in update_df.columns:
-        update_df["llm_match_error"] = None
+    update_df = _ensure_columns(update_df, LLM_RESULT_COLUMNS)
 
     records = []
-    for row in update_df[["id", "llm_match", "llm_match_error"]].itertuples(index=False, name=None):
+    for row in update_df[LLM_RESULT_COLUMNS].itertuples(index=False, name=None):
         job_id, llm_match, llm_match_error = row
-        fit_score = None
-        fit_decision = None
-        if llm_match:
-            try:
-                parsed = json.loads(llm_match)
-                fit_score = parsed.get("fit_score")
-                fit_decision = parsed.get("decision")
-            except Exception:
-                pass
+        fit_score, fit_decision = _extract_fit_fields(llm_match)
         records.append((llm_match, llm_match_error, fit_score, fit_decision, job_id))
 
     with _connect() as conn:
@@ -417,7 +418,7 @@ def get_jobs_to_notify(limit: int = 10) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def mark_job_notified(job_id: str, status: str = "sent", error: str = None):
+def mark_job_notified(job_id: str, status: str = "sent", error: Optional[str] = None):
     """Mark notification status for one job."""
     init_db()
     with _connect() as conn:
@@ -447,7 +448,11 @@ def mark_job_notified(job_id: str, status: str = "sent", error: str = None):
                 )
 
 
-def save_jd_result(job_id: str, description: str = None, description_error: str = None):
+def save_jd_result(
+    job_id: str,
+    description: Optional[str] = None,
+    description_error: Optional[str] = None,
+):
     """Persist one JD scrape result from OpenClaw worker."""
     init_db()
 
@@ -494,12 +499,11 @@ def get_jobs_by_ids(job_ids: List[str]) -> pd.DataFrame:
     if not job_ids:
         return pd.DataFrame()
 
-    placeholders = ",".join(["%s"] * len(job_ids))
-    query = f"SELECT * FROM jobs WHERE id IN ({placeholders})"
+    query = "SELECT * FROM jobs WHERE id = ANY(%s)"
 
     with _connect(row_factory=dict_row) as conn:
         with conn.cursor() as cursor:
-            cursor.execute(query, job_ids)
+            cursor.execute(query, (job_ids,))
             rows = cursor.fetchall()
     return pd.DataFrame(rows)
 
