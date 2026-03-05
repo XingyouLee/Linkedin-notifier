@@ -22,7 +22,7 @@ def _load_env():
         except Exception:
             pass
 
-    if not os.getenv("GMN_API_KEY"):
+    if not (os.getenv("YUAN_API_KEY") or os.getenv("GMN_API_KEY")):
         for env_path in env_candidates:
             try:
                 load_dotenv(env_path, override=True)
@@ -72,6 +72,20 @@ def linkedin_fitting_notifier():
         import requests
         _load_env()
 
+        def _extract_output_text(response_json):
+            output_text = response_json.get("output_text")
+            if output_text:
+                return output_text
+
+            for item in (response_json.get("output") or []):
+                if item.get("type") != "message":
+                    continue
+                for content in (item.get("content") or []):
+                    text = content.get("text")
+                    if text:
+                        return text
+            return None
+
         def _persist_one_result(job_item):
             job_id = job_item.get("id")
             if not job_id:
@@ -106,11 +120,11 @@ def linkedin_fitting_notifier():
                 f"fit_score={fit_score} decision={decision}"
             )
 
-        api_key = os.getenv("GMN_API_KEY")
+        api_key = os.getenv("YUAN_API_KEY") or os.getenv("GMN_API_KEY")
         if not api_key:
             for job in job_records or []:
                 job["llm_match"] = None
-                job["llm_match_error"] = "missing_gmn_api_key"
+                job["llm_match_error"] = "missing_llm_api_key"
                 _persist_one_result(job)
             return pd.DataFrame(job_records or [])
 
@@ -200,10 +214,10 @@ def linkedin_fitting_notifier():
                                 }
                             ],
                         }
-
+                        request_url = os.getenv("FITTING_REQUEST_URL","https://gmn.chuangzuoli.com/v1/responses")
                         try:
                             r = requests.post(
-                                "https://gmn.chuangzuoli.com/v1/responses",
+                                request_url,
                                 headers={
                                     "Content-Type": "application/json",
                                     "Authorization": f"Bearer {api_key}",
@@ -213,14 +227,15 @@ def linkedin_fitting_notifier():
                             )
                             r.raise_for_status()
                             response_json = r.json()
-                            output_text = response_json.get("output_text")
+                            output_text = _extract_output_text(response_json)
                             if not output_text:
-                                try:
-                                    output_text = response_json["output"][0]["content"][0]["text"]
-                                except Exception:
-                                    output_text = json.dumps(response_json, ensure_ascii=False)
+                                raise ValueError("response_missing_output_text")
 
                             parsed = json.loads(output_text)
+                            if not isinstance(parsed, dict):
+                                raise ValueError("response_json_not_object")
+                            if "fit_score" not in parsed or "decision" not in parsed:
+                                raise ValueError("response_missing_fit_fields")
                             break
                         except Exception as e:
                             last_error = str(e)
