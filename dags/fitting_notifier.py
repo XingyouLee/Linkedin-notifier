@@ -1,6 +1,6 @@
 from airflow.decorators import dag, task
 
-from datetime import datetime
+from datetime import date, datetime
 import os
 import pandas as pd
 from dotenv import load_dotenv
@@ -22,7 +22,7 @@ def _load_env():
         except Exception:
             pass
 
-    if not (os.getenv("YUAN_API_KEY") or os.getenv("GMN_API_KEY")):
+    if not os.getenv("GMN_API_KEY"):
         for env_path in env_candidates:
             try:
                 load_dotenv(env_path, override=True)
@@ -31,6 +31,24 @@ def _load_env():
 
 
 _load_env()
+
+
+def _to_xcom_safe_value(value):
+    if value is None:
+        return None
+    if isinstance(value, (pd.Timestamp, datetime, date)):
+        return value.isoformat()
+    return value
+
+
+def _df_to_xcom_records(df: pd.DataFrame):
+    if df is None or df.empty:
+        return []
+
+    safe_df = df.astype(object).where(pd.notna(df), None).copy()
+    for col in safe_df.columns:
+        safe_df[col] = safe_df[col].map(_to_xcom_safe_value)
+    return safe_df.to_dict(orient="records")
 
 
 @dag(
@@ -48,6 +66,7 @@ def linkedin_fitting_notifier():
 
     @task
     def fetch_jobs_for_fitting(queue_items):
+        queue_items = queue_items or []
         print("Number of queue items: ", len(queue_items))
         if not queue_items:
             return []
@@ -60,8 +79,7 @@ def linkedin_fitting_notifier():
         if jobs_df is None or jobs_df.empty:
             return []
 
-        jobs_df = jobs_df.astype(object).where(pd.notna(jobs_df), None)
-        return jobs_df.to_dict(orient="records")
+        return _df_to_xcom_records(jobs_df)
 
     @task
     def match_jobs_with_resume_llm(job_records, batch_size=5):
@@ -120,8 +138,9 @@ def linkedin_fitting_notifier():
                 f"fit_score={fit_score} decision={decision}"
             )
 
-        api_key = os.getenv("YUAN_API_KEY") or os.getenv("GMN_API_KEY")
+        api_key = os.getenv("GMN_API_KEY")
         if not api_key:
+            print("No LLM API key found. Skipping LLM matching.")
             for job in job_records or []:
                 job["llm_match"] = None
                 job["llm_match_error"] = "missing_llm_api_key"
@@ -214,7 +233,7 @@ def linkedin_fitting_notifier():
                                 }
                             ],
                         }
-                        request_url = os.getenv("FITTING_REQUEST_URL","https://gmn.chuangzuoli.com/v1/responses")
+                        request_url = os.getenv("FITTING_REQUEST_URL")
                         try:
                             r = requests.post(
                                 request_url,
@@ -300,7 +319,7 @@ def linkedin_fitting_notifier():
     def select_jobs_for_notification(limit=20):
         jobs_df = database.get_jobs_to_notify(limit=limit)
         print(f"Jobs eligible for notification: {len(jobs_df)}")
-        return jobs_df.to_dict(orient="records")
+        return _df_to_xcom_records(jobs_df)
 
     @task
     def notify_discord(jobs_to_notify):

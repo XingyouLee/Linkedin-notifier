@@ -1,4 +1,5 @@
 from airflow.decorators import dag, task
+from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
 from datetime import datetime
@@ -305,6 +306,14 @@ def linkedin_notifier():
     def filter_jobs():
         df = database.get_latest_batch_jobs()
         blocked_companies = ["Elevation Group", "Capgemini", "Jobster", "Sogeti", "CGI Nederland", "Mercor"]
+        if df is None or df.empty:
+            print("No jobs in latest batch. Skip downstream pipeline.")
+            return pd.DataFrame()
+
+        if "company" not in df.columns or "title" not in df.columns:
+            print("Missing company/title columns in latest batch. Skip downstream pipeline.")
+            return pd.DataFrame()
+
         df = df[~df['company'].isin(blocked_companies)]
         df = df[~df['title'].str.contains("Senior", na=False)]
         df = df[~df['title'].str.contains("Medior", na=False)]
@@ -317,6 +326,15 @@ def linkedin_notifier():
             return []
         clean_df = df.astype(object).where(pd.notna(df), None)
         return clean_df.to_dict(orient="records")
+
+    @task.branch
+    def branch_after_filter(job_records):
+        count = len(job_records or [])
+        if count == 0:
+            print("No new jobs after filter_jobs. End DAG run.")
+            return "finish_no_new_jobs"
+        print(f"Found {count} new jobs after filtering. Continue pipeline.")
+        return "enqueue_jd_requests"
 
     @task
     def enqueue_jd_requests(job_records):
@@ -429,8 +447,13 @@ def linkedin_notifier():
     filtered_jobs_df = filter_jobs()
     scan_meta >> filtered_jobs_df
     filtered_job_records = df_to_records(filtered_jobs_df)
+    branch_next = branch_after_filter(filtered_job_records)
+    finish_no_new_jobs = EmptyOperator(task_id="finish_no_new_jobs")
+
+    branch_next >> finish_no_new_jobs
 
     queued_job_ids = enqueue_jd_requests(filtered_job_records)
+    branch_next >> queued_job_ids
     jd_worker_meta = run_jd_worker(queued_job_ids)
     jobs_with_jd = fetch_jd_results(queued_job_ids)
 
