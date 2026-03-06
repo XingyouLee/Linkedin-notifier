@@ -12,8 +12,7 @@ from html import unescape
 
 import requests
 from dags import database
-from dags.runtime_utils import df_to_xcom_records, load_env, spark_to_xcom_records
-from dags.spark_runtime import get_spark_session
+from dags.runtime_utils import df_to_xcom_records, load_env
 
 
 load_env()
@@ -53,9 +52,13 @@ def _build_scan_config(results_wanted: int, hours_old: int) -> dict:
         "http_jitter_sec": float(os.getenv("SCAN_HTTP_JITTER_SEC", "1.5")),
         "between_req_min_sec": float(os.getenv("SCAN_BETWEEN_REQUESTS_MIN_SEC", "0.8")),
         "between_req_max_sec": float(os.getenv("SCAN_BETWEEN_REQUESTS_MAX_SEC", "1.8")),
-        "between_terms_delay_sec": float(os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0")),
+        "between_terms_delay_sec": float(
+            os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0")
+        ),
         "request_timeout_sec": int(os.getenv("SCAN_REQUEST_TIMEOUT_SEC", "45")),
-        "results_per_term": int(os.getenv("SCAN_RESULTS_PER_TERM", str(results_wanted))),
+        "results_per_term": int(
+            os.getenv("SCAN_RESULTS_PER_TERM", str(results_wanted))
+        ),
         "hours_old": int(os.getenv("SCAN_HOURS_OLD", str(hours_old))),
         "distance": int(os.getenv("SCAN_DISTANCE", "25")),
     }
@@ -160,7 +163,7 @@ def _scan_fetch_page(
 
             backoff = min(
                 scan_config["http_max_delay_sec"],
-                scan_config["http_base_delay_sec"] * (2 ** attempt),
+                scan_config["http_base_delay_sec"] * (2**attempt),
             )
             sleep_sec = backoff + random.uniform(0, scan_config["http_jitter_sec"])
             print(
@@ -185,7 +188,7 @@ def _scan_fetch_page(
             else:
                 backoff = min(
                     scan_config["http_max_delay_sec"],
-                    scan_config["http_base_delay_sec"] * (2 ** attempt),
+                    scan_config["http_base_delay_sec"] * (2**attempt),
                 )
                 sleep_sec = backoff + random.uniform(0, scan_config["http_jitter_sec"])
 
@@ -234,7 +237,9 @@ def _scan_one_term(
         request_count += 1
 
         if not page_rows:
-            print(f"term={term}, request={request_count}, start={start}, fetched=0 -> stop")
+            print(
+                f"term={term}, request={request_count}, start={start}, fetched=0 -> stop"
+            )
             break
 
         added = 0
@@ -259,8 +264,12 @@ def _scan_one_term(
 
         start += scan_config["request_page_size"]
         if scan_config["between_req_max_sec"] > 0:
-            delay_min = min(scan_config["between_req_min_sec"], scan_config["between_req_max_sec"])
-            delay_max = max(scan_config["between_req_min_sec"], scan_config["between_req_max_sec"])
+            delay_min = min(
+                scan_config["between_req_min_sec"], scan_config["between_req_max_sec"]
+            )
+            delay_max = max(
+                scan_config["between_req_min_sec"], scan_config["between_req_max_sec"]
+            )
             time.sleep(random.uniform(delay_min, delay_max))
 
     return term_rows
@@ -296,106 +305,108 @@ def _collect_scan_rows(
 
 
 def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
-    from pyspark.sql import Window
-    from pyspark.sql import functions as F
-    from pyspark.sql import types as T
+    def _normalize_optional(series: pd.Series) -> pd.Series:
+        normalized = series.fillna("").astype(str).str.strip()
+        return normalized.mask(normalized == "", None)
 
-    spark = None
-    try:
-        spark = get_spark_session("linkedin_notifier_scan")
-        scan_schema = T.StructType(
-            [
-                T.StructField("id", T.StringType(), True),
-                T.StructField("title", T.StringType(), True),
-                T.StructField("company", T.StringType(), True),
-                T.StructField("job_url", T.StringType(), True),
-                T.StructField("site", T.StringType(), True),
-                T.StructField("search_term", T.StringType(), True),
-            ]
-        )
-        jobs_sdf = spark.createDataFrame(all_rows, schema=scan_schema)
+    jobs_df = pd.DataFrame(all_rows or [])
+    raw_count = len(jobs_df)
 
-        raw_count = jobs_sdf.count()
-        normalized_sdf = (
-            jobs_sdf.select(
-                F.trim(F.coalesce(F.col("id").cast("string"), F.lit(""))).alias("id"),
-                F.nullif(F.trim(F.col("title").cast("string")), F.lit("")).alias("title"),
-                F.nullif(F.trim(F.col("company").cast("string")), F.lit("")).alias("company"),
-                F.nullif(F.trim(F.col("job_url").cast("string")), F.lit("")).alias("job_url"),
-                F.when(
-                    F.trim(F.coalesce(F.col("site").cast("string"), F.lit(""))) == "",
-                    F.lit("linkedin"),
-                ).otherwise(F.trim(F.col("site").cast("string"))).alias("site"),
-                F.nullif(F.trim(F.col("search_term").cast("string")), F.lit("")).alias("search_term"),
-            )
-            .filter(F.col("id").rlike(r"^[0-9]+$"))
-        )
-        normalized_count = normalized_sdf.count()
-        invalid_id_count = raw_count - normalized_count
+    if raw_count == 0:
+        return {
+            "scanned_raw": 0,
+            "scanned_unique": 0,
+            "scanned_duplicates": 0,
+            "scanned_invalid_ids": 0,
+        }
 
-        if normalized_count == 0:
-            print("No valid job ids found after normalization.")
-            return {
-                "scanned_raw": raw_count,
-                "scanned_unique": 0,
-                "scanned_duplicates": 0,
-                "scanned_invalid_ids": invalid_id_count,
-            }
+    normalized_df = pd.DataFrame(
+        {
+            "id": jobs_df.get("id", pd.Series(index=jobs_df.index, dtype="object"))
+            .fillna("")
+            .astype(str)
+            .str.strip(),
+            "title": _normalize_optional(
+                jobs_df.get("title", pd.Series(index=jobs_df.index, dtype="object"))
+            ),
+            "company": _normalize_optional(
+                jobs_df.get("company", pd.Series(index=jobs_df.index, dtype="object"))
+            ),
+            "job_url": _normalize_optional(
+                jobs_df.get("job_url", pd.Series(index=jobs_df.index, dtype="object"))
+            ),
+            "site": _normalize_optional(
+                jobs_df.get("site", pd.Series(index=jobs_df.index, dtype="object"))
+            ),
+            "search_term": _normalize_optional(
+                jobs_df.get(
+                    "search_term", pd.Series(index=jobs_df.index, dtype="object")
+                )
+            ),
+        }
+    )
+    normalized_df["site"] = normalized_df["site"].fillna("linkedin")
+    normalized_df = normalized_df[
+        normalized_df["id"].str.fullmatch(r"[0-9]+", na=False)
+    ]
+    normalized_count = len(normalized_df)
+    invalid_id_count = raw_count - normalized_count
 
-        per_term_rows = (
-            normalized_sdf
-            .select("search_term", "id")
-            .dropDuplicates(["search_term", "id"])
-            .groupBy("search_term")
-            .agg(F.count("id").alias("job_count"))
-            .orderBy(F.desc("job_count"))
-            .collect()
-        )
-        per_term_stats = {row["search_term"]: row["job_count"] for row in per_term_rows}
-
-        quality_score = (
-            F.when(F.col("job_url").isNotNull(), F.lit(1)).otherwise(F.lit(0))
-            + F.when(F.col("title").isNotNull(), F.lit(1)).otherwise(F.lit(0))
-            + F.when(F.col("company").isNotNull(), F.lit(1)).otherwise(F.lit(0))
-            + F.when(F.col("search_term").isNotNull(), F.lit(1)).otherwise(F.lit(0))
-        )
-        dedupe_window = Window.partitionBy("id").orderBy(
-            F.desc("quality_score"),
-            F.desc(F.length(F.coalesce(F.col("title"), F.lit("")))),
-            F.desc(F.length(F.coalesce(F.col("company"), F.lit("")))),
-        )
-        deduped_sdf = (
-            normalized_sdf
-            .withColumn("quality_score", quality_score)
-            .withColumn("row_num", F.row_number().over(dedupe_window))
-            .filter(F.col("row_num") == 1)
-            .drop("quality_score", "row_num", "search_term")
-        )
-        unique_count = deduped_sdf.count()
-        duplicate_count = normalized_count - unique_count
-
-        print(f"Per-term unique stats: {per_term_stats}")
-        print(
-            "Merged id stats: "
-            f"total={raw_count}, valid={normalized_count}, unique={unique_count}, "
-            f"duplicates={duplicate_count}, invalid_ids={invalid_id_count}"
-        )
-
-        jobs_to_save_records = spark_to_xcom_records(
-            deduped_sdf.select("id", "site", "job_url", "title", "company")
-        )
-        jobs_to_save_df = pd.DataFrame(jobs_to_save_records)
-        database.save_jobs(jobs_to_save_df)
-
+    if normalized_count == 0:
+        print("No valid job ids found after normalization.")
         return {
             "scanned_raw": raw_count,
-            "scanned_unique": unique_count,
-            "scanned_duplicates": duplicate_count,
+            "scanned_unique": 0,
+            "scanned_duplicates": 0,
             "scanned_invalid_ids": invalid_id_count,
         }
-    finally:
-        if spark is not None:
-            spark.stop()
+
+    per_term_stats = (
+        normalized_df[["search_term", "id"]]
+        .drop_duplicates(subset=["search_term", "id"])
+        .groupby("search_term", dropna=False)["id"]
+        .nunique()
+        .sort_values(ascending=False)
+        .to_dict()
+    )
+
+    normalized_df = normalized_df.assign(
+        quality_score=(
+            normalized_df["job_url"].notna().astype(int)
+            + normalized_df["title"].notna().astype(int)
+            + normalized_df["company"].notna().astype(int)
+            + normalized_df["search_term"].notna().astype(int)
+        ),
+        title_len=normalized_df["title"].fillna("").str.len(),
+        company_len=normalized_df["company"].fillna("").str.len(),
+    )
+    deduped_df = (
+        normalized_df.sort_values(
+            by=["id", "quality_score", "title_len", "company_len"],
+            ascending=[True, False, False, False],
+        )
+        .drop_duplicates(subset=["id"], keep="first")
+        .drop(columns=["quality_score", "title_len", "company_len", "search_term"])
+        .reset_index(drop=True)
+    )
+    unique_count = len(deduped_df)
+    duplicate_count = normalized_count - unique_count
+
+    print(f"Per-term unique stats: {per_term_stats}")
+    print(
+        "Merged id stats: "
+        f"total={raw_count}, valid={normalized_count}, unique={unique_count}, "
+        f"duplicates={duplicate_count}, invalid_ids={invalid_id_count}"
+    )
+
+    database.save_jobs(deduped_df[["id", "site", "job_url", "title", "company"]])
+
+    return {
+        "scanned_raw": raw_count,
+        "scanned_unique": unique_count,
+        "scanned_duplicates": duplicate_count,
+        "scanned_invalid_ids": invalid_id_count,
+    }
 
 
 @dag(
@@ -403,10 +414,9 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
     schedule="0 */12 * * *",
     catchup=False,
     is_paused_upon_creation=False,
-    tags=['linkedin_notifier'],
+    tags=["linkedin_notifier"],
 )
 def linkedin_notifier():
-
     @task
     def scan_and_save_jobs(
         search_term="Data Engineer",
@@ -418,7 +428,9 @@ def linkedin_notifier():
     ):
         """Scrape LinkedIn jobs via guest API logic and save unique rows."""
         terms = _resolve_scan_terms(search_term, search_terms)
-        scan_config = _build_scan_config(results_wanted=results_wanted, hours_old=hours_old)
+        scan_config = _build_scan_config(
+            results_wanted=results_wanted, hours_old=hours_old
+        )
 
         print(
             f"Scanning LinkedIn jobs: source=scripts_guest_api, terms={terms}, location={location}, "
@@ -447,14 +459,24 @@ def linkedin_notifier():
 
     @task
     def filter_jobs():
-        df = database.get_latest_batch_jobs()
-        blocked_companies = ["Elevation Group", "Capgemini", "Jobster", "Sogeti", "CGI Nederland", "Mercor"]
+        jd_max_attempts = int(os.getenv("JD_MAX_ATTEMPTS", "3"))
+        df = database.get_jobs_needing_jd(max_attempts=jd_max_attempts)
+        blocked_companies = [
+            "Elevation Group",
+            "Capgemini",
+            "Jobster",
+            "Sogeti",
+            "CGI Nederland",
+            "Mercor",
+        ]
         if df is None or df.empty:
-            print("No jobs in latest batch. Skip downstream pipeline.")
+            print("No jobs currently need JD. Skip JD filtering stage.")
             return []
 
         if "company" not in df.columns or "title" not in df.columns:
-            print("Missing company/title columns in latest batch. Skip downstream pipeline.")
+            print(
+                "Missing company/title columns in JD backlog query. Skip JD filtering stage."
+            )
             return []
 
         filter_columns = ["id", "site", "job_url", "title", "company"]
@@ -462,41 +484,20 @@ def linkedin_notifier():
             if col not in df.columns:
                 df[col] = None
 
-        from pyspark.sql import functions as F
-        from pyspark.sql import types as T
-
-        spark = None
-        try:
-            spark = get_spark_session("linkedin_notifier_filter")
-            records = df_to_xcom_records(df[filter_columns])
-            if not records:
-                print("No records available for filtering.")
-                return []
-
-            filter_schema = T.StructType(
-                [
-                    T.StructField("id", T.StringType(), True),
-                    T.StructField("site", T.StringType(), True),
-                    T.StructField("job_url", T.StringType(), True),
-                    T.StructField("title", T.StringType(), True),
-                    T.StructField("company", T.StringType(), True),
-                ]
-            )
-            jobs_sdf = spark.createDataFrame(records, schema=filter_schema)
-            company_col = F.coalesce(F.col("company").cast("string"), F.lit(""))
-            title_col = F.lower(F.coalesce(F.col("title").cast("string"), F.lit("")))
-            filtered_sdf = (
-                jobs_sdf
-                .filter(~company_col.isin(blocked_companies))
-                .filter(~title_col.contains("senior"))
-                .filter(~title_col.contains("medior"))
-            )
-            filtered_records = spark_to_xcom_records(filtered_sdf)
-            print("Filtered records:", len(filtered_records))
-            return filtered_records
-        finally:
-            if spark is not None:
-                spark.stop()
+        filtered_df = df[filter_columns].copy()
+        company_col = filtered_df["company"].fillna("").astype(str).str.strip()
+        title_col = filtered_df["title"].fillna("").astype(str).str.lower()
+        filtered_df = filtered_df[
+            ~company_col.isin(blocked_companies)
+            & ~title_col.str.contains("senior", na=False)
+            & ~title_col.str.contains("medior", na=False)
+        ]
+        filtered_records = df_to_xcom_records(filtered_df)
+        print(
+            f"JD backlog candidates after filters: {len(filtered_records)} "
+            f"(max_attempts={jd_max_attempts})"
+        )
+        return filtered_records
 
     @task
     def normalize_job_records(job_records):
@@ -515,9 +516,9 @@ def linkedin_notifier():
     def branch_after_filter(job_records):
         count = len(job_records or [])
         if count == 0:
-            print("No new jobs after filter_jobs. End DAG run.")
+            print("No jobs currently need JD. Skip JD stage and continue fitting sync.")
             return "finish_no_new_jobs"
-        print(f"Found {count} new jobs after filtering. Continue pipeline.")
+        print(f"Found {count} jobs needing JD after filtering. Continue JD stage.")
         return "enqueue_jd_requests"
 
     @task
@@ -538,14 +539,20 @@ def linkedin_notifier():
         if not job_ids:
             return {"processed": 0, "done": 0, "failed": 0, "pending": 0, "total": 0}
 
-        worker_batch_size = int(os.getenv("JD_WORKER_BATCH_SIZE", str(worker_batch_size)))
-        idle_loop_limit = int(os.getenv("JD_WORKER_IDLE_LOOP_LIMIT", str(idle_loop_limit)))
+        worker_batch_size = int(
+            os.getenv("JD_WORKER_BATCH_SIZE", str(worker_batch_size))
+        )
+        idle_loop_limit = int(
+            os.getenv("JD_WORKER_IDLE_LOOP_LIMIT", str(idle_loop_limit))
+        )
         worker_batch_size = max(1, worker_batch_size)
         idle_loop_limit = max(1, idle_loop_limit)
 
         total = len(job_ids)
         min_loops_needed = math.ceil(total / worker_batch_size) + idle_loop_limit
-        max_loops = int(os.getenv("JD_WORKER_MAX_LOOPS", str(max(max_loops, min_loops_needed))))
+        max_loops = int(
+            os.getenv("JD_WORKER_MAX_LOOPS", str(max(max_loops, min_loops_needed)))
+        )
         if max_loops <= 0:
             max_loops = min_loops_needed
 
@@ -604,19 +611,11 @@ def linkedin_notifier():
         return result
 
     @task
-    def fetch_jd_results(job_ids):
-        job_ids = job_ids or []
-        if not job_ids:
-            return []
+    def enqueue_fitting_tasks():
+        jobs_df = database.get_jobs_ready_for_fitting()
+        if jobs_df is None or jobs_df.empty:
+            return {"queued": 0}
 
-        jobs_df = database.get_jobs_by_ids(job_ids)
-        return df_to_xcom_records(jobs_df)
-
-    @task
-    def enqueue_fitting_tasks(job_records):
-        jobs_df = pd.DataFrame(job_records or [])
-        if "description" in jobs_df.columns:
-            jobs_df = jobs_df[jobs_df["description"].notna()]
         queued = database.enqueue_fitting_requests(jobs_df)
         print(f"Queued {queued} fitting requests")
         return {"queued": queued}
@@ -630,16 +629,21 @@ def linkedin_notifier():
     normalized_job_records = normalize_job_records(filtered_job_records)
     branch_next = branch_after_filter(normalized_job_records)
     finish_no_new_jobs = EmptyOperator(task_id="finish_no_new_jobs")
+    jd_stage_complete = EmptyOperator(
+        task_id="jd_stage_complete",
+        trigger_rule="none_failed_min_one_success",
+    )
 
     branch_next >> finish_no_new_jobs
 
     queued_job_ids = enqueue_jd_requests(normalized_job_records)
     branch_next >> queued_job_ids
     jd_worker_meta = run_jd_worker(queued_job_ids)
-    jobs_with_jd = fetch_jd_results(queued_job_ids)
+    fitting_enqueue_meta = enqueue_fitting_tasks()
 
-    jd_worker_meta >> jobs_with_jd
-    fitting_enqueue_meta = enqueue_fitting_tasks(jobs_with_jd)
+    finish_no_new_jobs >> jd_stage_complete
+    jd_worker_meta >> jd_stage_complete
+    jd_stage_complete >> fitting_enqueue_meta
 
     trigger_fitting_notifier = TriggerDagRunOperator(
         task_id="trigger_fitting_notifier",

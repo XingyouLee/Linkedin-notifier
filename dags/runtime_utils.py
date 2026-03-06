@@ -29,7 +29,11 @@ def load_env(
         except Exception:
             pass
 
-    if required_keys and override_if_missing and any(not os.getenv(key) for key in required_keys):
+    if (
+        required_keys
+        and override_if_missing
+        and any(not os.getenv(key) for key in required_keys)
+    ):
         for env_path in candidates:
             try:
                 load_dotenv(env_path, override=True)
@@ -53,14 +57,3 @@ def df_to_xcom_records(df: pd.DataFrame) -> list[dict]:
     for col in safe_df.columns:
         safe_df[col] = safe_df[col].map(to_xcom_safe_value)
     return safe_df.to_dict(orient="records")
-
-
-def spark_to_xcom_records(spark_df) -> list[dict]:
-    if spark_df is None:
-        return []
-
-    records = []
-    for row in spark_df.collect():
-        row_dict = row.asDict(recursive=True)
-        records.append({key: to_xcom_safe_value(value) for key, value in row_dict.items()})
-    return records

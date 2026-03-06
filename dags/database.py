@@ -48,7 +48,9 @@ def _ensure_columns(df: pd.DataFrame, required_columns: Iterable[str]) -> pd.Dat
     return normalized_df
 
 
-def _extract_fit_fields(llm_match: Optional[str]) -> tuple[Optional[int], Optional[str]]:
+def _extract_fit_fields(
+    llm_match: Optional[str],
+) -> tuple[Optional[int], Optional[str]]:
     if not llm_match:
         return None, None
     try:
@@ -115,20 +117,7 @@ def init_db():
 
             cursor.execute(
                 """
-                CREATE TABLE IF NOT EXISTS fitting_queue (
-                    job_id TEXT,
-                    prompt_version TEXT,
-                    model_name TEXT,
-                    status TEXT DEFAULT 'pending',
-                    attempts INTEGER DEFAULT 0,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    started_at TIMESTAMP,
-                    finished_at TIMESTAMP,
-                    last_error TEXT,
-                    PRIMARY KEY (job_id, prompt_version, model_name),
-                    FOREIGN KEY (job_id) REFERENCES jobs (id)
-                )
+                DROP TABLE IF EXISTS fitting_queue
                 """
             )
 
@@ -178,7 +167,10 @@ def save_jobs(jobs_df: pd.DataFrame):
             cursor.execute("INSERT INTO batches DEFAULT VALUES RETURNING id")
             batch_id = cursor.fetchone()[0]
 
-            records = [(*row, batch_id) for row in filtered_df.itertuples(index=False, name=None)]
+            records = [
+                (*row, batch_id)
+                for row in filtered_df.itertuples(index=False, name=None)
+            ]
 
             inserted_count = 0
             for record in records:
@@ -193,7 +185,9 @@ def save_jobs(jobs_df: pd.DataFrame):
                 inserted_count += cursor.rowcount
 
     if inserted_count > 0:
-        print(f"✅ Added {inserted_count} new jobs to the database in Batch {batch_id}.")
+        print(
+            f"✅ Added {inserted_count} new jobs to the database in Batch {batch_id}."
+        )
     else:
         print(f"No new jobs to add (all were duplicates). Batch {batch_id} is empty.")
 
@@ -209,7 +203,10 @@ def enqueue_jd_requests(jobs_df: pd.DataFrame):
         return 0
 
     queue_df = _ensure_columns(jobs_df, JD_QUEUE_COLUMNS)[JD_QUEUE_COLUMNS]
-    records = [(job_id, job_url) for job_id, job_url in queue_df.itertuples(index=False, name=None)]
+    records = [
+        (job_id, job_url)
+        for job_id, job_url in queue_df.itertuples(index=False, name=None)
+    ]
 
     with _connect() as conn:
         with conn.cursor() as cursor:
@@ -220,8 +217,10 @@ def enqueue_jd_requests(jobs_df: pd.DataFrame):
                 ON CONFLICT(job_id) DO UPDATE SET
                     job_url=EXCLUDED.job_url,
                     status='pending',
-                    attempts=0,
-                    updated_at=CURRENT_TIMESTAMP,
+                    updated_at=CASE
+                        WHEN jd_queue.status = 'pending' THEN jd_queue.updated_at
+                        ELSE CURRENT_TIMESTAMP
+                    END,
                     error=NULL
                 """,
                 records,
@@ -262,7 +261,10 @@ def enqueue_fitting_requests(jobs_df: pd.DataFrame):
                         fit_attempts = COALESCE(fit_attempts, 0)
                     WHERE id = %s
                       AND description IS NOT NULL
-                      AND COALESCE(fit_status, '') NOT IN ('pending_fit', 'fitting', 'fit_done', 'notified')
+                      AND llm_match IS NULL
+                      AND COALESCE(fit_status, '') NOT IN (
+                          'pending_fit', 'fitting', 'fit_done', 'notified', 'fit_failed', 'notify_failed'
+                      )
                     """,
                     (job_id,),
                 )
@@ -364,6 +366,64 @@ def count_jd_queue_status(job_ids: List[str], status: str) -> int:
             count = cursor.fetchone()[0]
 
     return count
+
+
+def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
+    """Fetch jobs that still need JD scraping and are eligible for retry."""
+    init_db()
+
+    query = """
+        SELECT j.id, j.site, j.job_url, j.title, j.company,
+               q.status AS jd_status,
+               COALESCE(q.attempts, 0) AS jd_attempts
+        FROM jobs j
+        LEFT JOIN jd_queue q ON q.job_id = j.id
+        WHERE j.description IS NULL
+          AND NULLIF(TRIM(COALESCE(j.job_url, '')), '') IS NOT NULL
+          AND (
+                q.job_id IS NULL
+                OR q.status = 'pending'
+                OR (q.status = 'failed' AND COALESCE(q.attempts, 0) < %s)
+                OR (q.status = 'done' AND j.description IS NULL)
+              )
+        ORDER BY
+            COALESCE(q.updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC,
+            COALESCE(j.batch_id, 0) DESC,
+            j.id ASC
+    """
+
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (int(max_attempts),))
+            rows = cursor.fetchall()
+
+    return pd.DataFrame(rows)
+
+
+def get_jobs_ready_for_fitting() -> pd.DataFrame:
+    """Fetch jobs that already have JD and still need to enter fitting."""
+    init_db()
+
+    query = """
+        SELECT id
+        FROM jobs
+        WHERE description IS NOT NULL
+          AND llm_match IS NULL
+          AND COALESCE(fit_status, '') NOT IN (
+                'pending_fit', 'fitting', 'fit_done', 'notified', 'fit_failed', 'notify_failed'
+              )
+        ORDER BY
+            COALESCE(fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC,
+            COALESCE(batch_id, 0) DESC,
+            id ASC
+    """
+
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+    return pd.DataFrame(rows)
 
 
 def save_llm_matches(jobs_df: pd.DataFrame):

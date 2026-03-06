@@ -157,24 +157,6 @@ def main():
                 ],
                 "(job_id)",
             )
-            _copy_table(
-                sqlite_conn,
-                pg_conn,
-                "fitting_queue",
-                [
-                    "job_id",
-                    "prompt_version",
-                    "model_name",
-                    "status",
-                    "attempts",
-                    "created_at",
-                    "updated_at",
-                    "started_at",
-                    "finished_at",
-                    "last_error",
-                ],
-                "(job_id, prompt_version, model_name)",
-            )
             _sync_batches_sequence(pg_conn)
 
     print("✅ Migration complete.")
