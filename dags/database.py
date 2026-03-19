@@ -10,6 +10,8 @@ from psycopg.rows import dict_row
 JOB_REQUIRED_COLUMNS = ["id", "site", "job_url", "title", "company"]
 JD_QUEUE_COLUMNS = ["id", "job_url"]
 LLM_RESULT_COLUMNS = ["id", "llm_match", "llm_match_error"]
+SCHEMA_LOCK_KEY = 620240319001
+_SCHEMA_INITIALIZED = False
 
 
 def _resolve_db_url() -> str:
@@ -61,9 +63,15 @@ def _extract_fit_fields(
 
 
 def init_db():
-    """Initializes the database and creates/migrates tables."""
+    """Ensure required tables/indexes exist without mutating hot business rows."""
+    global _SCHEMA_INITIALIZED
+    if _SCHEMA_INITIALIZED:
+        return
+
     with _connect() as conn:
         with conn.cursor() as cursor:
+            # Serialize schema bootstrap across concurrent task processes.
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS batches (
@@ -117,7 +125,15 @@ def init_db():
 
             cursor.execute(
                 """
-                DROP TABLE IF EXISTS fitting_queue
+                CREATE TABLE IF NOT EXISTS alert_state (
+                    alert_key TEXT PRIMARY KEY,
+                    is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                    last_error TEXT,
+                    first_seen_at TIMESTAMP,
+                    last_seen_at TIMESTAMP,
+                    last_sent_at TIMESTAMP,
+                    resolved_at TIMESTAMP
+                )
                 """
             )
 
@@ -134,19 +150,7 @@ def init_db():
                 ON jd_queue (status)
                 """
             )
-
-            cursor.execute(
-                """
-                UPDATE jobs
-                SET fit_status = CASE
-                    WHEN notified_at IS NOT NULL THEN 'notified'
-                    WHEN llm_match IS NOT NULL THEN 'fit_done'
-                    WHEN llm_match_error IS NOT NULL THEN 'fit_failed'
-                    ELSE fit_status
-                END
-                WHERE fit_status IS NULL
-                """
-            )
+    _SCHEMA_INITIALIZED = True
 
 
 def save_jobs(jobs_df: pd.DataFrame):
@@ -282,6 +286,7 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
         FROM jobs
         WHERE (fit_status = 'pending_fit' OR fit_status = 'fitting')
           AND description IS NOT NULL
+          AND llm_match IS NULL
         ORDER BY COALESCE(fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC
         FOR UPDATE SKIP LOCKED
     """
@@ -350,6 +355,108 @@ def mark_fitting_failed(
                 WHERE id = %s
                 """,
                 (status, error, job_id),
+            )
+
+
+def requeue_fitting_task(job_id: str, error: str = ""):
+    """Return an unprocessed fitting task to pending without spending an attempt."""
+    init_db()
+
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE jobs
+                SET fit_status = 'pending_fit',
+                    llm_match_error = NULL,
+                    fit_last_error = %s,
+                    fit_updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (error, job_id),
+            )
+
+
+def should_send_active_alert(alert_key: str, error: Optional[str] = None) -> bool:
+    """Send once per active outage; alert can reopen after resolve_active_alert."""
+    init_db()
+
+    with _connect(row_factory=dict_row) as conn:
+        with conn.transaction():
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT is_active
+                    FROM alert_state
+                    WHERE alert_key = %s
+                    FOR UPDATE
+                    """,
+                    (alert_key,),
+                )
+                row = cursor.fetchone()
+
+                if not row or not row["is_active"]:
+                    cursor.execute(
+                        """
+                        INSERT INTO alert_state (
+                            alert_key,
+                            is_active,
+                            last_error,
+                            first_seen_at,
+                            last_seen_at,
+                            last_sent_at,
+                            resolved_at
+                        )
+                        VALUES (
+                            %s,
+                            TRUE,
+                            %s,
+                            CURRENT_TIMESTAMP,
+                            CURRENT_TIMESTAMP,
+                            CURRENT_TIMESTAMP,
+                            NULL
+                        )
+                        ON CONFLICT(alert_key) DO UPDATE SET
+                            is_active = TRUE,
+                            last_error = EXCLUDED.last_error,
+                            first_seen_at = CURRENT_TIMESTAMP,
+                            last_seen_at = CURRENT_TIMESTAMP,
+                            last_sent_at = CURRENT_TIMESTAMP,
+                            resolved_at = NULL
+                        """,
+                        (alert_key, error),
+                    )
+                    return True
+
+                cursor.execute(
+                    """
+                    UPDATE alert_state
+                    SET last_error = %s,
+                        last_seen_at = CURRENT_TIMESTAMP,
+                        resolved_at = NULL
+                    WHERE alert_key = %s
+                    """,
+                    (error, alert_key),
+                )
+                return False
+
+
+def resolve_active_alert(alert_key: str):
+    """Mark an active alert as recovered so the next outage can notify again."""
+    init_db()
+
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE alert_state
+                SET is_active = FALSE,
+                    resolved_at = CURRENT_TIMESTAMP,
+                    last_seen_at = CURRENT_TIMESTAMP
+                WHERE alert_key = %s
+                  AND is_active = TRUE
+                """,
+                (alert_key,),
             )
 
 

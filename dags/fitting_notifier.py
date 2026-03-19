@@ -12,30 +12,53 @@ from dags.runtime_utils import df_to_xcom_records, load_env
 
 load_env(required_keys=["GMN_API_KEY"], override_if_missing=True)
 
+LLM_API_ALERT_KEY = "llm_api_error"
+
 
 def _build_match_task_result(
     jobs=None,
     *,
     api_error: bool = False,
     api_error_message: str | None = None,
+    requeue_job_ids=None,
+    requeue_job_errors=None,
+    stopped_early: bool = False,
 ):
+    normalized_requeue_job_ids = []
+    seen_job_ids = set()
+    for job_id in _iter_job_ids(requeue_job_ids):
+        if job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job_id)
+        normalized_requeue_job_ids.append(job_id)
+
     return {
         "jobs": jobs or [],
         "api_error": api_error,
         "api_error_message": api_error_message,
+        "requeue_job_ids": normalized_requeue_job_ids,
+        "requeue_job_errors": requeue_job_errors or {},
+        "stopped_early": stopped_early,
+        "unprocessed_job_ids": normalized_requeue_job_ids,
     }
 
 
 def _unwrap_match_task_result(match_result):
     if not match_result:
-        return [], False, None
+        return [], False, None, [], {}, False
     if isinstance(match_result, dict):
+        requeue_job_ids = match_result.get("requeue_job_ids")
+        if requeue_job_ids is None:
+            requeue_job_ids = match_result.get("unprocessed_job_ids") or []
         return (
             match_result.get("jobs") or [],
             bool(match_result.get("api_error")),
             match_result.get("api_error_message"),
+            requeue_job_ids,
+            match_result.get("requeue_job_errors") or {},
+            bool(match_result.get("stopped_early")),
         )
-    return match_result or [], False, None
+    return match_result or [], False, None, [], {}, False
 
 
 def _build_job_match_result(
@@ -68,14 +91,24 @@ def _build_uniform_error_results(job_records, error_message: str):
     return results
 
 
-def _complete_results_after_api_error(job_records, partial_results, error_message: str):
-    results = list(partial_results or [])
-    seen_ids = {row.get("id") for row in results if row.get("id")}
-    for job_id in _iter_job_ids(job_records):
-        if job_id in seen_ids:
-            continue
-        results.append(_build_job_match_result(job_id, llm_match_error=error_message))
-    return results
+def _is_transient_llm_http_status(status_code) -> bool:
+    try:
+        parsed_status_code = int(status_code)
+    except (TypeError, ValueError):
+        return False
+    return parsed_status_code == 408 or parsed_status_code == 429 or parsed_status_code >= 500
+
+
+def _summarize_api_errors(api_error_messages):
+    normalized_messages = [str(message) for message in (api_error_messages or []) if message]
+    if not normalized_messages:
+        return None
+    if len(normalized_messages) == 1:
+        return normalized_messages[0]
+    return (
+        f"transient_llm_api_errors count={len(normalized_messages)} "
+        f"sample={normalized_messages[0]}"
+    )
 
 
 def _log_job_match_result(job_result):
@@ -134,11 +167,13 @@ def _load_resume_text():
     return None, f"resume_read_error: {resume_error}"
 
 
-def _build_fit_prompt(jd_text: str, resume_text: str) -> str:
+def _build_fit_prompt(job_title: str, jd_text: str, resume_text: str) -> str:
+    normalized_job_title = str(job_title or "").strip() or "not provided"
     return (
         "If output is not valid JSON, regenerate until valid. "
         "Do not include markdown. Do not include trailing commas. "
-        "You are a strict job-fit evaluator, with years of experience in recruitment from the Netherlands. Evaluate whether the candidate fits the job description. The candidate is opening to multiple roles, like Data Engineer, Data Scientist, Data Analyst, Machine Learning Engineer, Python Developer, etc."
+        "You are a strict job-fit evaluator, with years of experience in recruitment from the Netherlands. Evaluate whether the candidate fits the job description. The candidate is opening to multiple roles, like Data Engineer, Data Scientist, Data Analyst, Machine Learning Engineer, Python Developer, etc. "
+        "Treat the job title as part of the requirement context because some language requirements appear in the title instead of the description. "
         "CRITICAL RULES: "
         "1. If the job explicitly requires Dutch (e.g., 'Dutch required', 'Fluent Dutch mandatory'): "
         "- Set language_blocker = true "
@@ -165,7 +200,9 @@ def _build_fit_prompt(jd_text: str, resume_text: str) -> str:
         '"risk_factors": [], '
         '"summary": "3-5 concise lines"'
         "} "
-        "Job Description: <<<"
+        "Job Title: <<<"
+        + normalized_job_title
+        + ">>> Job Description: <<<"
         + jd_text
         + ">>> Candidate Resume: <<<"
         + resume_text
@@ -263,33 +300,71 @@ def linkedin_fitting_notifier():
 
         load_env(required_keys=["GMN_API_KEY"], override_if_missing=True)
         matched_jobs = []
+        requeue_job_errors = {}
+        api_error_messages = []
 
-        def _return_api_error(message: str, partial_results=None):
+        def _record_transient_api_error(job_id: str, message: str):
+            normalized_job_id = str(job_id)
             error_message = str(message)
+            requeue_job_errors[normalized_job_id] = error_message
+            api_error_messages.append(error_message)
+            print(
+                f"llm_result job_id={normalized_job_id} "
+                f"status=api_error_requeue error={error_message}"
+            )
+
+        def _return_api_error(
+            message: str,
+            partial_results=None,
+            retry_job_ids=None,
+            retry_job_errors=None,
+            stopped_early: bool = True,
+        ):
+            error_message = str(message)
+            partial_results = list(partial_results or [])
+            processed_job_ids = {job_id for job_id in _iter_job_ids(partial_results)}
+            unprocessed_job_ids = [
+                job_id for job_id in job_ids if job_id not in processed_job_ids
+            ]
+            retry_job_ids = [
+                str(job_id)
+                for job_id in (retry_job_ids or [])
+                if job_id and str(job_id) not in processed_job_ids
+            ]
+            requeue_job_ids = []
+            seen_job_ids = set()
+            for job_id in retry_job_ids + unprocessed_job_ids:
+                if job_id in seen_job_ids:
+                    continue
+                seen_job_ids.add(job_id)
+                requeue_job_ids.append(job_id)
             print(f"LLM API error detected, stop early: {error_message}")
+            merged_requeue_job_errors = {}
+            for job_id, job_error in (retry_job_errors or {}).items():
+                if job_id and job_id in requeue_job_ids:
+                    merged_requeue_job_errors[str(job_id)] = str(job_error)
+            for job_id in requeue_job_ids:
+                merged_requeue_job_errors.setdefault(job_id, error_message)
             return _build_match_task_result(
-                _complete_results_after_api_error(
-                    job_ids, partial_results, error_message
-                ),
+                partial_results,
                 api_error=True,
                 api_error_message=error_message,
+                requeue_job_ids=requeue_job_ids,
+                requeue_job_errors=merged_requeue_job_errors,
+                stopped_early=stopped_early,
             )
 
         api_key = os.getenv("GMN_API_KEY")
         if not api_key:
             error_message = "missing_llm_api_key"
-            error_results = _build_uniform_error_results(job_ids, error_message)
-            for job_result in error_results:
-                _log_job_match_result(job_result)
-            return _return_api_error(error_message, error_results)
+            print(f"LLM API error detected before processing jobs: {error_message}")
+            return _return_api_error(error_message, retry_job_ids=job_ids)
 
         request_url = os.getenv("FITTING_REQUEST_URL")
         if not request_url:
             error_message = "missing_fitting_request_url"
-            error_results = _build_uniform_error_results(job_ids, error_message)
-            for job_result in error_results:
-                _log_job_match_result(job_result)
-            return _return_api_error(error_message, error_results)
+            print(f"LLM API error detected before processing jobs: {error_message}")
+            return _return_api_error(error_message, retry_job_ids=job_ids)
 
         resume_text, resume_error = _load_resume_text()
 
@@ -309,7 +384,7 @@ def linkedin_fitting_notifier():
                 _log_job_match_result(job_result)
             return _build_match_task_result(error_results)
 
-        required_columns = ["id", "description"]
+        required_columns = ["id", "title", "description"]
         for col in required_columns:
             if col not in jobs_df.columns:
                 jobs_df[col] = None
@@ -341,6 +416,7 @@ def linkedin_fitting_notifier():
                     continue
 
                 try:
+                    job_title = job_record.get("title") or ""
                     jd_text = job_record.get("description") or ""
                     if not jd_text.strip():
                         job_result = _build_job_match_result(
@@ -351,7 +427,7 @@ def linkedin_fitting_notifier():
                         _log_job_match_result(job_result)
                         continue
 
-                    base_prompt = _build_fit_prompt(jd_text, resume_text)
+                    base_prompt = _build_fit_prompt(job_title, jd_text, resume_text)
 
                     parsed = None
                     last_error = None
@@ -374,34 +450,62 @@ def linkedin_fitting_notifier():
                                 if error.response is not None
                                 else "unknown"
                             )
-                            job_result = _build_job_match_result(
-                                job_id,
-                                llm_match_error=(
-                                    f"llm_api_http_error status={status_code} "
-                                    f"job_id={job_id} error={error}"
-                                ),
+                            error_message = (
+                                f"llm_api_http_error status={status_code} "
+                                f"job_id={job_id} error={error}"
                             )
-                            matched_jobs.append(job_result)
-                            _log_job_match_result(job_result)
+                            if _is_transient_llm_http_status(status_code):
+                                if attempt < 2:
+                                    print(
+                                        f"llm_result job_id={job_id} status=api_retry "
+                                        f"attempt={attempt + 1}/3 error={error_message}"
+                                    )
+                                    time.sleep(min(2**attempt, 4))
+                                    continue
+                                _record_transient_api_error(job_id, error_message)
+                                break
+                            print(
+                                f"llm_result job_id={job_id} "
+                                f"status=api_error error={error_message}"
+                            )
                             return _return_api_error(
-                                job_result["llm_match_error"],
+                                error_message,
                                 matched_jobs,
+                                retry_job_ids=[job_id],
+                                retry_job_errors={job_id: error_message},
                             )
+                        except (requests.Timeout, requests.ConnectionError) as error:
+                            error_message = (
+                                f"llm_api_request_error job_id={job_id} error={error}"
+                            )
+                            if attempt < 2:
+                                print(
+                                    f"llm_result job_id={job_id} status=api_retry "
+                                    f"attempt={attempt + 1}/3 error={error_message}"
+                                )
+                                time.sleep(min(2**attempt, 4))
+                                continue
+                            _record_transient_api_error(job_id, error_message)
+                            break
                         except requests.RequestException as error:
-                            job_result = _build_job_match_result(
-                                job_id,
-                                llm_match_error=(
-                                    f"llm_api_request_error job_id={job_id} error={error}"
-                                ),
+                            error_message = (
+                                f"llm_api_request_error job_id={job_id} error={error}"
                             )
-                            matched_jobs.append(job_result)
-                            _log_job_match_result(job_result)
+                            print(
+                                f"llm_result job_id={job_id} "
+                                f"status=api_error error={error_message}"
+                            )
                             return _return_api_error(
-                                job_result["llm_match_error"],
+                                error_message,
                                 matched_jobs,
+                                retry_job_ids=[job_id],
+                                retry_job_errors={job_id: error_message},
                             )
                         except Exception as error:
                             last_error = str(error)
+
+                    if job_id in requeue_job_errors:
+                        continue
 
                     if parsed is not None:
                         job_result = _build_job_match_result(
@@ -422,14 +526,31 @@ def linkedin_fitting_notifier():
                 matched_jobs.append(job_result)
                 _log_job_match_result(job_result)
 
-        return _build_match_task_result(matched_jobs)
+        api_error_message = _summarize_api_errors(api_error_messages)
+        return _build_match_task_result(
+            matched_jobs,
+            api_error=bool(requeue_job_errors),
+            api_error_message=api_error_message,
+            requeue_job_ids=list(requeue_job_errors.keys()),
+            requeue_job_errors=requeue_job_errors,
+            stopped_early=False,
+        )
 
     @task.branch
     def branch_after_llm_match(match_result):
-        jobs, api_error, api_error_message = _unwrap_match_task_result(match_result)
+        (
+            jobs,
+            api_error,
+            api_error_message,
+            requeue_job_ids,
+            _,
+            stopped_early,
+        ) = _unwrap_match_task_result(match_result)
         if api_error:
+            mode = "stop_early" if stopped_early else "continue_with_requeue"
             print(
                 f"LLM API error detected after processing {len(jobs)} jobs. "
+                f"requeued_jobs={len(requeue_job_ids)} mode={mode} "
                 f"Branching to notify + finalize path: {api_error_message}"
             )
             return ["notify_llm_api_error", "store_fitting_results"]
@@ -438,7 +559,9 @@ def linkedin_fitting_notifier():
 
     @task
     def store_fitting_results(match_result):
-        jobs_with_match_records, _, _ = _unwrap_match_task_result(match_result)
+        jobs_with_match_records, api_error, _, _, _, _ = _unwrap_match_task_result(
+            match_result
+        )
         jobs_with_match_records = jobs_with_match_records or []
         if not jobs_with_match_records:
             return 0
@@ -460,40 +583,78 @@ def linkedin_fitting_notifier():
             f"Persisted LLM results: total={len(jobs_with_match_records)} "
             f"success={success_count} error={error_count}"
         )
+        if not api_error:
+            database.resolve_active_alert(LLM_API_ALERT_KEY)
         return len(jobs_with_match_records)
 
     @task
     def notify_llm_api_error(match_result):
-        jobs_with_match_records, api_error, api_error_message = (
-            _unwrap_match_task_result(match_result)
-        )
+        (
+            jobs_with_match_records,
+            api_error,
+            api_error_message,
+            requeue_job_ids,
+            _,
+            stopped_early,
+        ) = _unwrap_match_task_result(match_result)
         if not api_error:
             return {"alert_sent": False, "affected_jobs": 0}
 
         load_env()
+        should_send = database.should_send_active_alert(
+            LLM_API_ALERT_KEY,
+            error=api_error_message or "llm_api_error",
+        )
+        if not should_send:
+            print("Suppressed duplicate LLM API alert for active outage.")
+            return {
+                "alert_sent": False,
+                "alert_suppressed": True,
+                "affected_jobs": len(jobs_with_match_records or []),
+                "requeued_jobs": len(requeue_job_ids or []),
+                "stopped_early": stopped_early,
+            }
+
         alert_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        processed_jobs_label = (
+            "Processed Jobs Before Stop" if stopped_early else "Processed Jobs This Run"
+        )
+        action_message = (
+            "Action: fitting DAG stopped early and requeued pending jobs for the next trigger."
+            if stopped_early
+            else "Action: fitting DAG continued; transient API failures were requeued for the next trigger."
+        )
         message = (
             "⚠️ LLM API Alert\n"
             f"Time: {alert_time}\n"
             f"Error: {api_error_message or 'llm_api_error'}\n"
-            f"Affected Jobs: {len(jobs_with_match_records or [])}\n"
-            "Action: fitting DAG stopped early."
+            f"{processed_jobs_label}: {len(jobs_with_match_records or [])}\n"
+            f"Requeued Jobs: {len(requeue_job_ids or [])}\n"
+            f"{action_message}"
         )
         alert_sent, alert_error = _send_discord_message(message)
         if not alert_sent:
             print(f"Failed to send LLM API alert: {alert_error}")
+            database.resolve_active_alert(LLM_API_ALERT_KEY)
 
         return {
             "alert_sent": alert_sent,
             "alert_error": alert_error,
             "affected_jobs": len(jobs_with_match_records or []),
+            "requeued_jobs": len(requeue_job_ids or []),
+            "stopped_early": stopped_early,
         }
 
     @task
     def finalize_fitting_queue(queue_items, match_result):
-        jobs_with_match_records, api_error, api_error_message = (
-            _unwrap_match_task_result(match_result)
-        )
+        (
+            jobs_with_match_records,
+            api_error,
+            api_error_message,
+            requeue_job_ids,
+            requeue_job_errors,
+            _,
+        ) = _unwrap_match_task_result(match_result)
         if not queue_items:
             return {"done": 0, "failed": 0}
 
@@ -511,14 +672,24 @@ def linkedin_fitting_notifier():
 
         done = 0
         failed = 0
+        requeued = 0
         default_error = api_error_message or "missing_llm_match"
+        requeue_job_ids = {str(job_id) for job_id in (requeue_job_ids or []) if job_id}
         for item in queue_items:
-            job_id = item.get("job_id")
+            job_id = str(item.get("job_id")) if item.get("job_id") else None
+            if not job_id:
+                continue
             attempts = int(item.get("attempts") or 0)
             result = results.get(job_id)
             if result and result.get("llm_match") and not result.get("llm_match_error"):
                 database.mark_fitting_done(job_id)
                 done += 1
+            elif job_id in requeue_job_ids:
+                database.requeue_fitting_task(
+                    job_id,
+                    error=requeue_job_errors.get(job_id, default_error),
+                )
+                requeued += 1
             else:
                 error = default_error if api_error else "missing_llm_match"
                 if result and result.get("llm_match_error"):
@@ -527,7 +698,7 @@ def linkedin_fitting_notifier():
                 database.mark_fitting_failed(job_id, error=error, retry=retry)
                 failed += 1
 
-        return {"done": done, "failed": failed}
+        return {"done": done, "failed": failed, "requeued": requeued}
 
     @task
     def select_jobs_for_notification(limit=20):
