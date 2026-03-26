@@ -1,6 +1,7 @@
-astro
 .git
 .env
+dags/.env
+astro
 airflow_settings.yaml
 logs/
 .venv

@@ -29,6 +29,12 @@ Sep 2023 - May 2024
 - Developed comprehensive ETL pipeline using ADF, Databricks, and HDInsight with automated scheduling and monitoring.
 - Implemented robust CI/CD pipelines in Azure DevOps for managing artifact releases across environments.
 
+### Blog Website with Django (Oct - Nov 2025)
+- Developed a full-stack blog application using Django with class-based views, template inheritance, and ORM models to manage blog posts and user comments.
+- Designed and implemented relational database schemas with Django ORM to handle data persistence, relationships, and validation for blog content and user interactions.
+- Containerized the Django application with Docker and deployed it on Google Kubernetes Engine (GKE) and Google Cloud Run using multi-platform builds (`linux/amd64`).
+- Live: https://my-django-app-930878322600.europe-west1.run.app | Repo: https://github.com/XingyouLee/django/tree/main/my_site
+
 ### Stock Market ELT Pipeline with Apache Airflow (Jan - Feb 2026)
 - Built an Airflow DAG for a daily ELT pipeline: polling a financial API via custom Sensor, extracting and staging market data to MinIO (S3), and triggering Spark through DockerOperator for transformation.
 - Managed cross-task data passing via XCom and automated warehouse ingestion from S3-compatible storage into PostgreSQL for downstream BI reporting.

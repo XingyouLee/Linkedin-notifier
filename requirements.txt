@@ -4,6 +4,6 @@ python-jobspy
 pandas
 pyarrow
 playwright
+psycopg[binary]
 
 python-dotenv
-
