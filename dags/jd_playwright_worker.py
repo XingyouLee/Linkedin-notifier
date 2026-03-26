@@ -78,15 +78,15 @@ async def extract_description(page) -> Optional[str]:
     return None
 
 
-async def run_once(limit: int = 5) -> int:
-    pending_df = database.get_pending_jd_requests(limit=limit)
+async def run_once(limit: int = 5, job_ids=None) -> int:
+    pending_df = database.claim_pending_jd_requests(limit=limit, job_ids=job_ids)
     items = (
         []
         if pending_df.empty
         else list(pending_df[["job_id", "job_url"]].itertuples(index=False, name=None))
     )
     if not items:
-        print("No pending JD requests")
+        print("No claimable JD requests")
         return 0
 
     async with async_playwright() as p:

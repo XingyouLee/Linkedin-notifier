@@ -10,7 +10,7 @@ This project runs a two-DAG pipeline:
    - Trigger `linkedin_fitting_notifier`
 
 2. `linkedin_fitting_notifier` (`/Users/levi/Linkedin-notifier/dags/fitting_notifier.py`)
-   - Claim fitting tasks (`pending_fit` and recoverable `fitting`)
+   - Claim fitting tasks (`pending_fit` plus stale recoverable `fitting`)
    - Run LLM fitting
    - Save match result + score + decision
    - Finalize queue status
@@ -34,8 +34,9 @@ Environment variables
 For Astro local runs, keep runtime vars in:
 
 - `/Users/levi/Linkedin-notifier/dags/.env`
+- `/Users/levi/Linkedin-notifier/.env` (for host CLI tooling)
 
-(`.dockerignore` excludes root `.env`, so scheduler may not see it.)
+Ensure both files are covered by version-control and Docker ignores so secrets never leak.
 
 Common vars:
 
@@ -44,7 +45,9 @@ Common vars:
 - `SCAN_SEARCH_TERMS`: comma-separated terms (optional)
 - `SCAN_HOURS_OLD`, `SCAN_DISTANCE`
 - `JD_WORKER_BATCH_SIZE`, `JD_WORKER_MAX_LOOPS`, `JD_WORKER_IDLE_LOOP_LIMIT`
+- `JD_CLAIM_STALE_MINUTES`: reclaim stalled JD worker leases after this many minutes
 - `FITTING_MAX_ATTEMPTS`
+- `FITTING_CLAIM_STALE_MINUTES`: reclaim stalled fitting leases after this many minutes
 - `FITTING_MODEL_NAME`
 - `GMN_API_KEY`
 - `DISCORD_BOT_TOKEN` or `DISCORD_WEBHOOK_URL`

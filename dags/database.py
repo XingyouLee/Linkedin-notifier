@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 from typing import Any, Dict, Iterable, List, Optional
@@ -12,6 +14,14 @@ JD_QUEUE_COLUMNS = ["id", "job_url"]
 LLM_RESULT_COLUMNS = ["id", "llm_match", "llm_match_error"]
 SCHEMA_LOCK_KEY = 620240319001
 _SCHEMA_INITIALIZED = False
+
+
+def _get_positive_int_env(var_name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(var_name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(1, value)
 
 
 def _resolve_db_url() -> str:
@@ -176,24 +186,29 @@ def save_jobs(jobs_df: pd.DataFrame):
                 for row in filtered_df.itertuples(index=False, name=None)
             ]
 
-            inserted_count = 0
+            written_count = 0
             for record in records:
                 cursor.execute(
                     """
                     INSERT INTO jobs (id, site, job_url, title, company, batch_id)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT(id) DO NOTHING
+                    ON CONFLICT(id) DO UPDATE SET
+                        site = COALESCE(NULLIF(BTRIM(EXCLUDED.site), ''), jobs.site),
+                        job_url = COALESCE(NULLIF(BTRIM(EXCLUDED.job_url), ''), jobs.job_url),
+                        title = COALESCE(NULLIF(BTRIM(EXCLUDED.title), ''), jobs.title),
+                        company = COALESCE(NULLIF(BTRIM(EXCLUDED.company), ''), jobs.company),
+                        batch_id = EXCLUDED.batch_id
                     """,
                     record,
                 )
-                inserted_count += cursor.rowcount
+                written_count += cursor.rowcount
 
-    if inserted_count > 0:
+    if written_count > 0:
         print(
-            f"✅ Added {inserted_count} new jobs to the database in Batch {batch_id}."
+            f"✅ Upserted {written_count} jobs in Batch {batch_id}."
         )
     else:
-        print(f"No new jobs to add (all were duplicates). Batch {batch_id} is empty.")
+        print(f"No job rows changed during Batch {batch_id}.")
 
 
 def enqueue_jd_requests(jobs_df: pd.DataFrame):
@@ -280,17 +295,27 @@ def enqueue_fitting_requests(jobs_df: pd.DataFrame):
 def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     """Atomically claim pending fitting tasks for processing."""
     init_db()
+    stale_minutes = _get_positive_int_env("FITTING_CLAIM_STALE_MINUTES", 30)
 
     select_query = """
         SELECT id AS job_id, COALESCE(fit_attempts, 0) AS attempts
         FROM jobs
-        WHERE (fit_status = 'pending_fit' OR fit_status = 'fitting')
+        WHERE (
+                fit_status = 'pending_fit'
+                OR (
+                    fit_status = 'fitting'
+                    AND COALESCE(
+                        fit_updated_at,
+                        TIMESTAMP '1970-01-01 00:00:00'
+                    ) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
+                )
+              )
           AND description IS NOT NULL
           AND llm_match IS NULL
         ORDER BY COALESCE(fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC
         FOR UPDATE SKIP LOCKED
     """
-    params: List[Any] = []
+    params: List[Any] = [stale_minutes]
     if limit is not None and int(limit) > 0:
         select_query += " LIMIT %s"
         params.append(int(limit))
@@ -464,6 +489,7 @@ def count_jd_queue_status(job_ids: List[str], status: str) -> int:
     """Count how many jobs in given ids are in target status."""
     if not job_ids:
         return 0
+    init_db()
 
     query = "SELECT COUNT(*) FROM jd_queue WHERE status = %s AND job_id = ANY(%s)"
 
@@ -478,6 +504,7 @@ def count_jd_queue_status(job_ids: List[str], status: str) -> int:
 def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
     """Fetch jobs that still need JD scraping and are eligible for retry."""
     init_db()
+    stale_minutes = _get_positive_int_env("JD_CLAIM_STALE_MINUTES", 30)
 
     query = """
         SELECT j.id, j.site, j.job_url, j.title, j.company,
@@ -491,6 +518,13 @@ def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
                 q.job_id IS NULL
                 OR q.status = 'pending'
                 OR (q.status = 'failed' AND COALESCE(q.attempts, 0) < %s)
+                OR (
+                    q.status = 'processing'
+                    AND COALESCE(
+                        q.updated_at,
+                        TIMESTAMP '1970-01-01 00:00:00'
+                    ) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
+                )
                 OR (q.status = 'done' AND j.description IS NULL)
               )
         ORDER BY
@@ -501,7 +535,7 @@ def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
 
     with _connect(row_factory=dict_row) as conn:
         with conn.cursor() as cursor:
-            cursor.execute(query, (int(max_attempts),))
+            cursor.execute(query, (int(max_attempts), stale_minutes))
             rows = cursor.fetchall()
 
     return pd.DataFrame(rows)
@@ -569,6 +603,7 @@ def save_llm_matches(jobs_df: pd.DataFrame):
 
 def get_jobs_to_notify(limit: int = 10) -> pd.DataFrame:
     """Get unnotified fit results that are ready to notify."""
+    init_db()
     query = """
         SELECT *
         FROM jobs
@@ -661,10 +696,71 @@ def save_jd_result(
                 )
 
 
+def claim_pending_jd_requests(
+    limit: int = 10,
+    job_ids: Optional[List[str]] = None,
+) -> pd.DataFrame:
+    """Atomically claim pending JD requests for one worker run."""
+    init_db()
+    stale_minutes = _get_positive_int_env("JD_CLAIM_STALE_MINUTES", 30)
+    normalized_job_ids = [str(job_id) for job_id in (job_ids or []) if job_id]
+    if job_ids is not None and not normalized_job_ids:
+        return pd.DataFrame(columns=["job_id", "job_url"])
+
+    select_query = """
+        SELECT q.job_id, q.job_url
+        FROM jd_queue q
+        WHERE (
+                q.status = 'pending'
+                OR (
+                    q.status = 'processing'
+                    AND COALESCE(
+                        q.updated_at,
+                        TIMESTAMP '1970-01-01 00:00:00'
+                    ) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
+                )
+              )
+    """
+    params: List[Any] = [stale_minutes]
+    if normalized_job_ids:
+        select_query += " AND q.job_id = ANY(%s)"
+        params.append(normalized_job_ids)
+
+    select_query += """
+        ORDER BY q.updated_at ASC
+        FOR UPDATE SKIP LOCKED
+    """
+    if limit and int(limit) > 0:
+        select_query += " LIMIT %s"
+        params.append(int(limit))
+
+    with _connect(row_factory=dict_row) as conn:
+        with conn.transaction():
+            with conn.cursor() as cursor:
+                cursor.execute(select_query, params)
+                rows = cursor.fetchall()
+                if not rows:
+                    return pd.DataFrame(columns=["job_id", "job_url"])
+
+                cursor.executemany(
+                    """
+                    UPDATE jd_queue
+                    SET status = 'processing',
+                        updated_at = CURRENT_TIMESTAMP,
+                        error = NULL
+                    WHERE job_id = %s
+                    """,
+                    [(row["job_id"],) for row in rows],
+                )
+
+    return pd.DataFrame(rows)
+
+
 def get_jobs_by_ids(job_ids: List[str]) -> pd.DataFrame:
     """Fetch jobs by id list."""
     if not job_ids:
         return pd.DataFrame()
+    init_db()
 
     query = "SELECT * FROM jobs WHERE id = ANY(%s)"
 
@@ -677,6 +773,7 @@ def get_jobs_by_ids(job_ids: List[str]) -> pd.DataFrame:
 
 def get_pending_jd_requests(limit: int = 10) -> pd.DataFrame:
     """Fetch pending jd queue items for external worker."""
+    init_db()
     query = """
         SELECT q.job_id, q.job_url
         FROM jd_queue q

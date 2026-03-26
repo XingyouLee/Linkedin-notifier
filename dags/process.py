@@ -414,6 +414,7 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
     schedule="0 */12 * * *",
     catchup=False,
     is_paused_upon_creation=False,
+    max_active_runs=1,
     tags=["linkedin_notifier"],
 )
 def linkedin_notifier():
@@ -533,7 +534,7 @@ def linkedin_notifier():
         import asyncio
         import math
         import time
-        from jd_playwright_worker import run_once
+        from dags.jd_playwright_worker import run_once
 
         job_ids = job_ids or []
         if not job_ids:
@@ -577,7 +578,9 @@ def linkedin_notifier():
             if pending_count <= 0:
                 break
 
-            processed = asyncio.run(run_once(limit=worker_batch_size))
+            processed = asyncio.run(
+                run_once(limit=worker_batch_size, job_ids=job_ids)
+            )
             total_processed += processed
 
             if processed == 0:

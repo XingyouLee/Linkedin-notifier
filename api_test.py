@@ -9,10 +9,10 @@ load_dotenv(Path(__file__).with_name('.env'))
 time1 = time.time()
 API_KEY = os.getenv("GMN_API_KEY")
 payload = {
-  "model": "gpt-5.3-codex-xhigh",
+  "model": "gpt-5.4",
   "input": [
     {"type": "message", "role": "user",
-     "content": [{"type": "input_text", "text": "你是什么模型, 模型版本是多少"}]}
+     "content": [{"type": "input_text", "text": "你是在codex里吗"}]}
   ]
 }
 

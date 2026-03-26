@@ -276,6 +276,7 @@ def _send_discord_message(content: str):
     schedule=None,
     catchup=False,
     is_paused_upon_creation=False,
+    max_active_runs=1,
     tags=["linkedin_fitting_notifier"],
 )
 def linkedin_fitting_notifier():

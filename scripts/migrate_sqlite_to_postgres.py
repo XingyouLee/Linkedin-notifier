@@ -16,13 +16,25 @@ def _table_exists_sqlite(conn: sqlite3.Connection, table_name: str) -> bool:
     return row is not None
 
 
+def _get_table_columns(conn: sqlite3.Connection, table_name: str) -> List[str]:
+    sanitized_table = table_name.replace("'", "''")
+    cursor = conn.execute(f"PRAGMA table_info('{sanitized_table}')")
+    return [row[1] for row in cursor.fetchall()]
+
+
 def _fetch_sqlite_rows(
     conn: sqlite3.Connection,
     table_name: str,
     columns: Sequence[str],
 ) -> List[Tuple]:
-    col_sql = ", ".join(columns)
-    rows = conn.execute(f"SELECT {col_sql} FROM {table_name}").fetchall()
+    available_columns = set(_get_table_columns(conn, table_name))
+    select_parts = [
+        col if col in available_columns else f"NULL AS {col}"
+        for col in columns
+    ]
+    col_sql = ", ".join(select_parts)
+    sanitized_table = table_name.replace("'", "''")
+    rows = conn.execute(f"SELECT {col_sql} FROM {sanitized_table}").fetchall()
     return [tuple(row[column] for column in columns) for row in rows]
 
 
