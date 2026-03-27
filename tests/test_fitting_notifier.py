@@ -154,3 +154,16 @@ def test_filter_notification_jobs_suppresses_experience_blocker_only():
     )
 
     assert [job["id"] for job in filtered] == ["1", "3"]
+
+
+def test_sort_notification_jobs_orders_by_fit_score_desc():
+    jobs = [
+        {"id": "b", "fit_score": 61, "profile_id": 2},
+        {"id": "c", "fit_score": None, "profile_id": 1},
+        {"id": "a", "fit_score": 88, "profile_id": 1},
+        {"id": "d", "fit_score": 88, "profile_id": 3},
+    ]
+
+    sorted_jobs = fitting_notifier._sort_notification_jobs(jobs)
+
+    assert [job["id"] for job in sorted_jobs] == ["a", "d", "b", "c"]

@@ -740,6 +740,17 @@ def _filter_notification_jobs(job_records: list[dict]) -> list[dict]:
     ]
 
 
+def _sort_notification_jobs(job_records: list[dict]) -> list[dict]:
+    def _sort_key(job: dict):
+        fit_score = _coerce_number((job or {}).get("fit_score"))
+        normalized_score = fit_score if fit_score is not None else float("-inf")
+        profile_id = _coerce_number((job or {}).get("profile_id"))
+        job_id = _normalize_text((job or {}).get("id")) or ""
+        return (-normalized_score, profile_id or float("inf"), job_id)
+
+    return sorted(job_records or [], key=_sort_key)
+
+
 def _send_discord_message(
     content: str,
     *,
@@ -1450,7 +1461,7 @@ def linkedin_fitting_notifier():
 
         load_env()
 
-        jobs_to_notify = jobs_to_notify or []
+        jobs_to_notify = _sort_notification_jobs(jobs_to_notify or [])
         eligible = len(jobs_to_notify)
         sent = 0
         failed = 0
