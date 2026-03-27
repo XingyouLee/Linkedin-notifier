@@ -56,10 +56,8 @@ def build_params(args, start: int):
         "distance": str(args.distance),
         "start": str(start),
     }
-    if args.location:
-        params["location"] = args.location
-    if args.geo_id:
-        params["geoId"] = str(args.geo_id)
+    if getattr(args, "location", None):
+        params["location"] = str(args.location).strip()
     if args.hours_old > 0:
         params["f_TPR"] = f"r{args.hours_old * 3600}"
     return params
@@ -164,7 +162,6 @@ def _normalize_terms(terms) -> List[str]:
 def scrape_jobs_for_term(
     term: str,
     location: str = "Netherlands",
-    geo_id: str = "102890719",
     distance: int = 25,
     hours_old: int = 168,
     results_wanted: int = 100,
@@ -172,7 +169,6 @@ def scrape_jobs_for_term(
     args = SimpleNamespace(
         term=term,
         location=location,
-        geo_id=geo_id,
         distance=int(distance),
         hours_old=int(hours_old),
         results_wanted=max(1, int(results_wanted)),
@@ -187,7 +183,6 @@ def scrape_jobs_for_term(
 def scrape_linkedin_public_jobs(
     terms,
     location="Netherlands",
-    geo_id="102890719",
     distance=25,
     hours_old=168,
     results_wanted=100,
@@ -201,7 +196,6 @@ def scrape_linkedin_public_jobs(
         term_rows = scrape_jobs_for_term(
             term=term,
             location=location,
-            geo_id=geo_id,
             distance=distance,
             hours_old=hours_old,
             results_wanted=results_wanted,
@@ -236,17 +230,37 @@ def write_output(rows, output_path: Path):
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="LinkedIn public jobs scraper using guest pagination API.")
-    parser.add_argument("--term", required=True, help="Job search term, e.g. 'Data Engineer'.")
-    parser.add_argument("--location", default="Netherlands", help="Location string for LinkedIn search.")
-    parser.add_argument("--geo-id", default="102890719", help="LinkedIn geoId.")
+    parser = argparse.ArgumentParser(
+        description="LinkedIn public jobs scraper using guest pagination API."
+    )
+    parser.add_argument(
+        "--term", required=True, help="Job search term, e.g. 'Data Engineer'."
+    )
+    parser.add_argument(
+        "--location",
+        default="Netherlands",
+        help="Location filter passed to the LinkedIn guest jobs API.",
+    )
     parser.add_argument("--distance", type=int, default=25, help="Distance filter.")
 
-    parser.add_argument("--posted", choices=sorted(POSTED_TO_HOURS.keys()), help="Post date window.")
-    parser.add_argument("--hours-old", type=int, default=168, help="Lookback window in hours.")
+    parser.add_argument(
+        "--posted", choices=sorted(POSTED_TO_HOURS.keys()), help="Post date window."
+    )
+    parser.add_argument(
+        "--hours-old", type=int, default=168, help="Lookback window in hours."
+    )
 
-    parser.add_argument("--results-wanted", type=int, default=100, help="Total number of jobs to collect.")
-    parser.add_argument("--output", default="output/linkedin_jobs.json", help="Output file path (.json or .csv).")
+    parser.add_argument(
+        "--results-wanted",
+        type=int,
+        default=100,
+        help="Total number of jobs to collect.",
+    )
+    parser.add_argument(
+        "--output",
+        default="output/linkedin_jobs.json",
+        help="Output file path (.json or .csv).",
+    )
 
     args = parser.parse_args()
     if args.posted:

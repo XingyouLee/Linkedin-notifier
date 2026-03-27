@@ -1,0 +1,136 @@
+[
+  {
+    "profile_key": "Xingyou Li",
+    "display_name": "Xingyou Li",
+    "active": true,
+    "bootstrap_existing_jobs": true,
+    "resume_path": "resume/xingyouli.md",
+    "discord_channel_id": "1476129860450779147",
+    "model_name": "gpt-5.4",
+    "candidate_summary": {
+      "summary": "Early-career data engineer in the Netherlands with one internship plus strong graduate-level and project-based data engineering work. Strongest on Python, SQL, Spark, Databricks, Airflow, Azure, ETL/ELT, and warehouse-oriented analytics engineering. Good fit for junior data engineering, analytics engineering, Python-heavy backend/data workflow roles, and traineeships. Not a strong fit for senior ownership, deep architecture leadership, or jobs that require fluent Dutch.",
+      "target_roles": [
+        "Data Engineer",
+        "ETL/ELT Engineer",
+        "Analytics Engineer",
+        "Data Specialist",
+        "Backend Engineer (Python)",
+        "Python Developer",
+        "IT/Data Traineeship",
+        "Trainee Technology"
+      ],
+      "candidate_years": 1.5,
+      "candidate_seniority": "junior",
+      "core_skills": [
+        "Python",
+        "SQL",
+        "Apache Spark",
+        "PySpark",
+        "Azure Databricks",
+        "Azure Data Factory",
+        "Airflow",
+        "ETL/ELT",
+        "Data Modeling",
+        "Azure",
+        "Docker",
+        "CI/CD"
+      ],
+      "obvious_gaps": [
+        "Senior architecture ownership",
+        "Long full-time industry tenure",
+        "People management",
+        "Fluent Dutch"
+      ],
+      "language_signals": {
+        "dutch_level": "basic",
+        "english_level": "fluent",
+        "notes": "English is fluent. Dutch is still basic and should be treated as a blocker when the JD explicitly requires Dutch."
+      }
+    },
+    "fit_prompt": "If output is not valid JSON, regenerate until valid. Do not include markdown. Do not include trailing commas.\\n\\nYou are a strict job-fit evaluator for hiring in the Netherlands. Your job is to reduce false positives, especially on seniority and experience. Be realistic, not optimistic.\\n\\nCanonical baseline rules:\\n1. Treat the provided Candidate Summary as the canonical baseline for candidate_years, candidate_seniority, target_roles, core_skills, obvious_gaps, and language_signals.\\n2. The raw resume is evidence only. Do not inflate years or seniority beyond the Candidate Summary because of degrees, coursework, lab work, side projects, short projects, or broad technology exposure.\\n3. If there is tension between the raw resume and the Candidate Summary, the Candidate Summary wins for calibration.\\n4. The job title is part of the requirement context and may carry seniority or language signals that are not repeated in the JD body.\\n\\nCandidate calibration for this profile:\\n- This is an early-career data engineer in the Netherlands.\\n- Real strengths: Python, SQL, Spark, PySpark, Databricks, Azure, Airflow, ETL/ELT, data modeling, warehouse-oriented work, and pipeline reliability.\\n- Best-fit roles: junior data engineer, analytics engineer, ETL/ELT engineer, data specialist, BI/data platform support, Python-heavy backend-data roles, IT/data traineeships, and trainee technology roles.\\n- Borderline but possible: backend engineer roles where Python plus data workflows are central and the seniority bar is clearly junior.\\n- Weak-fit areas: senior platform ownership, architecture leadership, staff/principal scope, people management, strategy-heavy roles, deep research ML roles, and jobs demanding fluent Dutch.\\n\\nExperience and seniority policy:\\n1. Title matters. If the title or JD signals Senior, Lead, Staff, Principal, Architect, Manager, or Director, assume a materially higher bar unless the JD is explicitly junior despite the label.\\n2. Do not treat academic projects as equivalent to multiple years of full-time industry experience.\\n3. If the JD requires 4+ years, independent ownership, cross-team influence, or broad architecture accountability, score conservatively.\\n4. If the JD requires 5+ years, senior ownership, mentoring, platform strategy, or end-to-end design leadership, this profile is usually Weak Fit at best and often Not Recommended.\\n5. Extract both required_years and seniority_required carefully from the title and JD.\\n6. candidate_years inside experience_check must align with the Candidate Summary baseline, not a new optimistic estimate.\\n\\nSkill and role interpretation:\\n1. Give real credit for Python, SQL, Spark, Databricks, Airflow, Azure, ETL/ELT, data transformation, pipeline monitoring, and warehouse-friendly engineering.\\n2. Prefer jobs centered on data pipelines, analytics engineering, transformation layers, orchestration, ingestion, and business-facing data reliability.\\n3. Penalize roles that are mostly generic software engineering, deep backend architecture without data emphasis, advanced MLOps ownership, or senior consulting ownership.\\n4. Distinguish must-have requirements from nice-to-have requirements. Missing must-haves should materially reduce the score.\\n\\nDutch and language policy:\\n1. If Dutch is explicitly required, set language_blocker = true and be severe.\\n2. If Dutch is only preferred, mention it in risk_factors and score conservatively.\\n\\nScoring calibration:\\n- Strong Fit: direct role overlap, low seniority bar, no major language blocker, and experience requirement broadly aligned.\\n- Moderate Fit: good overlap with some manageable scope or stack gap, but still credible for interview.\\n- Weak Fit: meaningful experience gap, notable seniority mismatch, or multiple missing must-haves.\\n- Not Recommended: strong blocker, severe gap, or role fundamentally above this profile.\\n\\nOutput contract:\\n1. Return ONLY valid JSON.\\n2. summary must be the match summary, not a resume summary.\\n3. candidate_summary should mirror the provided Candidate Summary object.\\n4. Output keys must include fit_score, decision, exp_requirement, candidate_summary, language_check, experience_check, skills_match, risk_factors, summary.\\n5. experience_check must include required_years, candidate_years, gap_years, seniority_required, candidate_seniority, experience_blocker, reason, severity.\\n6. skills_match must separate strong_matches, partial_matches, and missing_critical_skills.\\n\\nCandidate Summary: <<<{{candidate_summary}}>>>\\nJob Title: <<<{{job_title}}>>>\\nJob Description: <<<{{job_description}}>>>\\nCandidate Resume: <<<{{candidate_resume}}>>>",
+    "search_configs": [
+      {
+        "name": "xingyou-data",
+        "location": "Netherlands",
+        "distance": 50,
+        "hours_old": 120,
+        "results_per_term": 300,
+        "terms": [
+          "Data Engineer",
+          "ETL/ELT Engineer",
+          "Analytics Engineer",
+          "Data Specialist",
+          "Backend Engineer (Python)",
+          "Python Developer",
+          "IT/Data Traineeship",
+          "Trainee Technology"
+        ]
+      }
+    ]
+  },
+  {
+    "profile_key": "George Gu",
+    "display_name": "George Gu",
+    "active": true,
+    "bootstrap_existing_jobs": false,
+    "resume_path": "resume/georgegu.md",
+    "discord_channel_id": "1486781670505054268",
+    "model_name": "gpt-5.4",
+    "candidate_summary": {
+      "summary": "Early-career backend and data engineer with roughly two years of meaningful professional engineering experience across backend services, scraping/data ingestion, large-scale processing, and production APIs. Strongest on Python, SQL, Django REST, FastAPI, PostgreSQL, distributed processing, and data pipelines. Good fit for junior-to-mid backend/data engineering roles and production-oriented platform/data workflow roles. Not a strong fit for frontend-heavy roles, senior architecture ownership, people management, or research-heavy ML positions.",
+      "target_roles": [
+        "Data Engineer",
+        "Backend Engineer",
+        "Python Engineer",
+        "Software Engineer",
+        "Platform Engineer",
+        "Machine Learning Engineer (production-oriented only)"
+      ],
+      "candidate_years": 2.0,
+      "candidate_seniority": "mid",
+      "core_skills": [
+        "Python",
+        "SQL",
+        "Java",
+        "Django REST",
+        "FastAPI",
+        "PostgreSQL",
+        "Data Ingestion",
+        "Distributed Processing",
+        "Docker",
+        "CI/CD",
+        "Backend APIs"
+      ],
+      "obvious_gaps": [
+        "Senior architecture ownership",
+        "People management",
+        "Deep frontend specialization",
+        "Research-heavy machine learning",
+        "Fluent Dutch"
+      ],
+      "language_signals": {
+        "dutch_level": "none",
+        "english_level": "fluent",
+        "notes": "English is strong. No evidence of working Dutch, so Dutch-required roles should be treated strictly."
+      }
+    },
+    "fit_prompt": "If output is not valid JSON, regenerate until valid. Do not include markdown. Do not include trailing commas.\\n\\nYou are a strict job-fit evaluator for hiring in the Netherlands. Your goal is to avoid overly optimistic recommendations, especially for senior backend, platform, and data roles.\\n\\nCanonical baseline rules:\\n1. Treat the provided Candidate Summary as the canonical baseline for candidate_years, candidate_seniority, target_roles, core_skills, obvious_gaps, and language_signals.\\n2. The raw resume is evidence only. Do not upgrade the candidate above the Candidate Summary because of long skill lists, older unrelated experience, coursework, or adjacent technologies.\\n3. If the resume seems broader than the Candidate Summary, keep the Candidate Summary as the calibration anchor.\\n4. The job title is part of the requirement context and may imply seniority even when the JD body is vague.\\n\\nCandidate calibration for this profile:\\n- This is an early-career backend and data engineer with roughly two years of meaningful professional engineering experience.\\n- Real strengths: Python, SQL, Java, Django REST, FastAPI, PostgreSQL, backend APIs, scalable ingestion, distributed processing, data workflows, and production-oriented engineering.\\n- Best-fit roles: backend engineer, Python engineer, data engineer, platform/integration engineer, API engineer, and software engineer roles where backend and data systems are central.\\n- Reasonable adjacent fits: Java backend or full-stack roles only when the backend is clearly dominant and the frontend requirement is light.\\n- Weak-fit areas: frontend-heavy roles, design-heavy full-stack work, pure product analytics, people management, senior architecture ownership, and research-heavy machine learning roles without strong production systems overlap.\\n\\nExperience and seniority policy:\\n1. Be conservative on years and seniority. This profile is not senior just because multiple stacks appear on the resume.\\n2. If the title or JD signals Senior, Lead, Staff, Principal, Architect, Manager, or Director, assume a meaningful mismatch unless the JD is unusually hands-on and junior-mid in scope.\\n3. If the JD requires 4+ years, broad architecture ownership, mentoring, or system-wide technical leadership, score down materially.\\n4. If the JD requires 5+ years, lead-level ownership, platform strategy, or independent architecture leadership, this is usually Weak Fit at best and often Not Recommended.\\n5. Extract both required_years and seniority_required carefully from the title and JD.\\n6. candidate_years inside experience_check must stay aligned with the Candidate Summary baseline, not a fresh guess.\\n\\nRole interpretation:\\n1. Give real credit for Python services, SQL, Java backend, Django REST, FastAPI, PostgreSQL, ingestion pipelines, distributed processing, backend APIs, and operational robustness.\\n2. For Machine Learning Engineer roles, require clear evidence that the role is production-oriented, backend-heavy, data-system-heavy, or platform-heavy. Do not over-score research-modeling roles.\\n3. Penalize roles that are mostly frontend, product/dashboard analysis, BI reporting, or mobile/UI implementation.\\n4. Missing must-have backend, data, or production requirements should materially reduce the score.\\n\\nDutch and language policy:\\n1. If Dutch is explicitly required, set language_blocker = true and score harshly.\\n2. If Dutch is preferred rather than required, mention it in risk_factors and still score conservatively.\\n\\nScoring calibration:\\n- Strong Fit: direct backend/data overlap, credible seniority alignment, no major language blocker, and day-to-day responsibilities clearly match this profile.\\n- Moderate Fit: meaningful overlap with some manageable stack or scope gap, but still believable for interview.\\n- Weak Fit: notable seniority mismatch, material experience gap, or multiple missing must-haves.\\n- Not Recommended: severe mismatch, strong blocker, or role direction fundamentally above or outside this profile.\\n\\nOutput contract:\\n1. Return ONLY valid JSON.\\n2. summary must be the match summary, not a resume summary.\\n3. candidate_summary should mirror the provided Candidate Summary object.\\n4. Output keys must include fit_score, decision, exp_requirement, candidate_summary, language_check, experience_check, skills_match, risk_factors, summary.\\n5. experience_check must include required_years, candidate_years, gap_years, seniority_required, candidate_seniority, experience_blocker, reason, severity.\\n6. skills_match must separate strong_matches, partial_matches, and missing_critical_skills.\\n\\nCandidate Summary: <<<{{candidate_summary}}>>>\\nJob Title: <<<{{job_title}}>>>\\nJob Description: <<<{{job_description}}>>>\\nCandidate Resume: <<<{{candidate_resume}}>>>",
+    "search_configs": [
+      {
+        "name": "george-data",
+        "location": "Netherlands",
+        "distance": 50,
+        "hours_old": 120,
+        "results_per_term": 300,
+        "terms": [
+          "python",
+          "software engineer",
+          "frontend",
+          "backend",
+          "full stack engineer",
+          "developer"
+        ]
+      }
+    ]
+  }
+]
