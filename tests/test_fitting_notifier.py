@@ -58,6 +58,18 @@ def test_build_fit_prompt_includes_candidate_summary_and_preserves_custom_prompt
     assert prompt.startswith("Return JSON only.")
 
 
+def test_build_fit_prompt_default_prompt_contains_strict_exp_requirement_instruction():
+    prompt = fitting_notifier._build_fit_prompt(
+        "Python Developer",
+        "Looking for 5+ years building backend systems.",
+        "Resume content here.",
+        _candidate_summary(),
+    )
+
+    assert "Prefer a false negative over a false positive" in prompt
+    assert "exp_requirement must be a single plain-English line" in prompt
+
+
 def test_load_candidate_summary_config_parses_json_string():
     loaded = fitting_notifier._load_candidate_summary_config(
         json.dumps(_candidate_summary(candidate_years=2.5, candidate_seniority="junior"))
@@ -167,3 +179,25 @@ def test_sort_notification_jobs_orders_by_fit_score_desc():
     sorted_jobs = fitting_notifier._sort_notification_jobs(jobs)
 
     assert [job["id"] for job in sorted_jobs] == ["a", "d", "b", "c"]
+
+
+def test_format_exp_requirement_for_discord_handles_dict_like_payload():
+    formatted = fitting_notifier._format_exp_requirement_for_discord(
+        "{'required_years': 8, 'seniority_required': 'senior', 'notes': 'Data platform leadership'}"
+    )
+
+    assert "required years: 8" in formatted
+    assert "seniority required: senior" in formatted
+    assert "notes: Data platform leadership" in formatted
+
+
+def test_normalize_exp_requirement_text_flattens_dict_like_payload_to_plain_text():
+    normalized = fitting_notifier._normalize_exp_requirement_text(
+        "{'title_signal': 'Python Developer with data/risk emphasis', 'jd_years_specified': '8-10 years', 'jd_seniority_specified': 'not applicable'}"
+    )
+
+    assert normalized == (
+        "title signal: Python Developer with data/risk emphasis; "
+        "jd years specified: 8-10 years; "
+        "jd seniority specified: not applicable"
+    )

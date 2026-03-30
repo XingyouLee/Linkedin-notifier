@@ -3,6 +3,7 @@ from __future__ import annotations
 from airflow.sdk import dag, task
 
 import ast
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 from datetime import datetime
 import os
@@ -923,6 +924,9 @@ def linkedin_fitting_notifier():
         finalize_counts = {"done": 0, "failed": 0, "requeued": 0}
         finalized_item_keys = set()
         max_attempts = int(os.getenv("FITTING_MAX_ATTEMPTS", "3"))
+        concurrency = max(
+            1, int(os.getenv("FITTING_CONCURRENCY", str(batch_size or 5)))
+        )
 
         def _persist_job_result(job_result: dict) -> None:
             save_df = pd.DataFrame([job_result])
@@ -980,6 +984,97 @@ def linkedin_fitting_notifier():
             print(
                 f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
                 f"status=api_error_requeue error={error_message}"
+            )
+
+        def _process_single_item(prepared: dict) -> tuple[dict | None, dict | None]:
+            item = prepared["item"]
+            profile_id = item["profile_id"]
+            job_id = item["job_id"]
+            profile_record = prepared["profile_record"]
+            job_title = prepared["job_title"]
+            jd_text = prepared["jd_text"]
+            resume_text = prepared["resume_text"]
+            candidate_summary = prepared["candidate_summary"]
+
+            base_prompt = _build_fit_prompt(
+                job_title,
+                jd_text,
+                resume_text,
+                candidate_summary,
+                prompt_text=profile_record.get("fit_prompt_config"),
+            )
+            model_name = profile_record.get("model_name") or os.getenv(
+                "FITTING_MODEL_NAME", "gpt-5.4"
+            )
+
+            parsed = None
+            last_error = None
+            for attempt in range(3):
+                prompt = base_prompt
+                if attempt > 0:
+                    prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
+
+                try:
+                    parsed = _request_llm_match(
+                        request_url=request_url,
+                        api_key=api_key,
+                        model_name=model_name,
+                        prompt=prompt,
+                    )
+                    parsed = _apply_fit_caps(
+                        parsed,
+                        job_title=job_title,
+                        jd_text=jd_text,
+                        candidate_summary=candidate_summary,
+                    )
+                    break
+                except requests.HTTPError as error:
+                    status_code = (
+                        error.response.status_code
+                        if error.response is not None
+                        else "unknown"
+                    )
+                    error_message = (
+                        f"llm_api_http_error status={status_code} "
+                        f"profile_id={profile_id} job_id={job_id} error={error}"
+                    )
+                    if _is_transient_llm_http_status(status_code):
+                        if attempt < 2:
+                            print(
+                                f"llm_result profile_id={profile_id} job_id={job_id} "
+                                f"status=api_retry attempt={attempt + 1}/3 error={error_message}"
+                            )
+                            time.sleep(min(2**attempt, 4))
+                            continue
+                        raise RuntimeError(f"TRANSIENT_API::{error_message}") from error
+                    raise RuntimeError(f"FATAL_API::{error_message}") from error
+                except (requests.Timeout, requests.ConnectionError) as error:
+                    error_message = f"llm_api_request_error profile_id={profile_id} job_id={job_id} error={error}"
+                    if attempt < 2:
+                        print(
+                            f"llm_result profile_id={profile_id} job_id={job_id} "
+                            f"status=api_retry attempt={attempt + 1}/3 error={error_message}"
+                        )
+                        time.sleep(min(2**attempt, 4))
+                        continue
+                    raise RuntimeError(f"TRANSIENT_API::{error_message}") from error
+                except requests.RequestException as error:
+                    error_message = f"llm_api_request_error profile_id={profile_id} job_id={job_id} error={error}"
+                    raise RuntimeError(f"FATAL_API::{error_message}") from error
+                except Exception as error:
+                    last_error = str(error)
+
+            if parsed is not None:
+                return item, _build_job_match_result(
+                    profile_id,
+                    job_id,
+                    llm_match=json.dumps(parsed, ensure_ascii=False),
+                )
+
+            return item, _build_job_match_result(
+                profile_id,
+                job_id,
+                llm_match_error=last_error or "invalid_json_response",
             )
 
         def _return_api_error(
@@ -1144,196 +1239,160 @@ def linkedin_fitting_notifier():
             if record.get("id")
         }
 
-        for i in range(0, len(claimed_items), batch_size):
-            batch_items = claimed_items[i : i + batch_size]
+        prepared_items = []
+        for item in claimed_items:
+            profile_id = item["profile_id"]
+            job_id = item["job_id"]
+            profile_record = profiles_by_id.get(profile_id)
+            if not profile_record:
+                prepared_items.append(
+                    {
+                        "item": item,
+                        "ready": False,
+                        "job_result": _build_job_match_result(
+                            profile_id,
+                            job_id,
+                            llm_match_error="missing_profile_record",
+                        ),
+                    }
+                )
+                continue
 
-            for item in batch_items:
-                profile_id = item["profile_id"]
-                job_id = item["job_id"]
-                profile_record = profiles_by_id.get(profile_id)
-                if not profile_record:
-                    job_result = _build_job_match_result(
-                        profile_id,
-                        job_id,
-                        llm_match_error="missing_profile_record",
-                    )
-                    matched_jobs.append(job_result)
-                    _log_job_match_result(job_result)
-                    continue
+            job_record = jobs_by_id.get(job_id)
+            if not job_record:
+                prepared_items.append(
+                    {
+                        "item": item,
+                        "ready": False,
+                        "job_result": _build_job_match_result(
+                            profile_id,
+                            job_id,
+                            llm_match_error="missing_job_record",
+                        ),
+                    }
+                )
+                continue
 
-                job_record = jobs_by_id.get(job_id)
-                if not job_record:
-                    job_result = _build_job_match_result(
-                        profile_id,
-                        job_id,
-                        llm_match_error="missing_job_record",
-                    )
-                    matched_jobs.append(job_result)
-                    _log_job_match_result(job_result)
-                    continue
-
-                try:
-                    claim_key = _job_ref_key(profile_id, job_id)
-                    if claim_key in requeue_job_errors:
-                        continue
-
-                    if profile_id not in resume_cache:
-                        resume_cache[profile_id] = _load_resume_text(
-                            resume_path=profile_record.get("resume_path"),
-                            resume_text=profile_record.get("resume_text"),
-                        )
-                    resume_text, resume_error = resume_cache[profile_id]
-                    if not resume_text:
-                        job_result = _build_job_match_result(
+            resume_text, resume_error = resume_cache.get(profile_id, (None, None))
+            if not resume_text:
+                prepared_items.append(
+                    {
+                        "item": item,
+                        "ready": False,
+                        "job_result": _build_job_match_result(
                             profile_id,
                             job_id,
                             llm_match_error=resume_error or "resume_read_error",
-                        )
-                        matched_jobs.append(job_result)
-                        _log_job_match_result(job_result)
-                        continue
+                        ),
+                    }
+                )
+                continue
 
-                    if profile_id in profile_summary_errors:
-                        job_result = _build_job_match_result(
+            if profile_id in profile_summary_errors:
+                prepared_items.append(
+                    {
+                        "item": item,
+                        "ready": False,
+                        "job_result": _build_job_match_result(
                             profile_id,
                             job_id,
                             llm_match_error=profile_summary_errors[profile_id],
-                        )
-                        matched_jobs.append(job_result)
-                        _log_job_match_result(job_result)
-                        continue
+                        ),
+                    }
+                )
+                continue
 
-                    candidate_summary = candidate_summary_cache.get(profile_id)
-                    if not candidate_summary:
-                        job_result = _build_job_match_result(
+            candidate_summary = candidate_summary_cache.get(profile_id)
+            if not candidate_summary:
+                prepared_items.append(
+                    {
+                        "item": item,
+                        "ready": False,
+                        "job_result": _build_job_match_result(
                             profile_id,
                             job_id,
                             llm_match_error="missing_candidate_summary_config",
-                        )
-                        matched_jobs.append(job_result)
-                        _log_job_match_result(job_result)
-                        continue
+                        ),
+                    }
+                )
+                continue
 
-                    job_title = job_record.get("title") or ""
-                    jd_text = job_record.get("description") or ""
-                    if not jd_text.strip():
-                        job_result = _build_job_match_result(
+            job_title = job_record.get("title") or ""
+            jd_text = job_record.get("description") or ""
+            if not jd_text.strip():
+                prepared_items.append(
+                    {
+                        "item": item,
+                        "ready": False,
+                        "job_result": _build_job_match_result(
                             profile_id,
                             job_id,
                             llm_match_error="missing_job_description",
-                        )
-                        matched_jobs.append(job_result)
-                        _log_job_match_result(job_result)
-                        continue
-                    base_prompt = _build_fit_prompt(
-                        job_title,
-                        jd_text,
-                        resume_text,
-                        candidate_summary,
-                        prompt_text=profile_record.get("fit_prompt_config"),
-                    )
-                    model_name = profile_record.get("model_name") or os.getenv(
-                        "FITTING_MODEL_NAME", "gpt-5.4"
-                    )
+                        ),
+                    }
+                )
+                continue
 
-                    parsed = None
-                    last_error = None
-                    for attempt in range(3):
-                        prompt = base_prompt
-                        if attempt > 0:
-                            prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
+            prepared_items.append(
+                {
+                    "item": item,
+                    "ready": True,
+                    "profile_record": profile_record,
+                    "job_title": job_title,
+                    "jd_text": jd_text,
+                    "resume_text": resume_text,
+                    "candidate_summary": candidate_summary,
+                }
+            )
 
-                        try:
-                            parsed = _request_llm_match(
-                                request_url=request_url,
-                                api_key=api_key,
-                                model_name=model_name,
-                                prompt=prompt,
-                            )
-                            parsed = _apply_fit_caps(
-                                parsed,
-                                job_title=job_title,
-                                jd_text=jd_text,
-                                candidate_summary=candidate_summary,
-                            )
-                            break
-                        except requests.HTTPError as error:
-                            status_code = (
-                                error.response.status_code
-                                if error.response is not None
-                                else "unknown"
-                            )
-                            error_message = (
-                                f"llm_api_http_error status={status_code} "
-                                f"profile_id={profile_id} job_id={job_id} error={error}"
-                            )
-                            if _is_transient_llm_http_status(status_code):
-                                if attempt < 2:
-                                    print(
-                                        f"llm_result profile_id={profile_id} job_id={job_id} "
-                                        f"status=api_retry attempt={attempt + 1}/3 error={error_message}"
-                                    )
-                                    time.sleep(min(2**attempt, 4))
-                                    continue
-                                _record_transient_api_error(item, error_message)
-                                break
-                            print(
-                                f"llm_result profile_id={profile_id} job_id={job_id} "
-                                f"status=api_error error={error_message}"
-                            )
-                            claim_key = _job_ref_key(profile_id, job_id)
-                            return _return_api_error(
-                                error_message,
-                                matched_jobs,
-                                retry_items=[item],
-                                retry_job_errors={claim_key: error_message},
-                            )
-                        except (requests.Timeout, requests.ConnectionError) as error:
-                            error_message = f"llm_api_request_error profile_id={profile_id} job_id={job_id} error={error}"
-                            if attempt < 2:
-                                print(
-                                    f"llm_result profile_id={profile_id} job_id={job_id} "
-                                    f"status=api_retry attempt={attempt + 1}/3 error={error_message}"
-                                )
-                                time.sleep(min(2**attempt, 4))
-                                continue
-                            _record_transient_api_error(item, error_message)
-                            break
-                        except requests.RequestException as error:
-                            error_message = f"llm_api_request_error profile_id={profile_id} job_id={job_id} error={error}"
-                            print(
-                                f"llm_result profile_id={profile_id} job_id={job_id} "
-                                f"status=api_error error={error_message}"
-                            )
-                            claim_key = _job_ref_key(profile_id, job_id)
-                            return _return_api_error(
-                                error_message,
-                                matched_jobs,
-                                retry_items=[item],
-                                retry_job_errors={claim_key: error_message},
-                            )
-                        except Exception as error:
-                            last_error = str(error)
+        for prepared in prepared_items:
+            if prepared["ready"]:
+                continue
+            item = prepared["item"]
+            job_result = prepared["job_result"]
+            matched_jobs.append(job_result)
+            _persist_job_result(job_result)
+            _finalize_job_result(item, job_result)
+            _log_job_match_result(job_result)
 
-                    if claim_key in requeue_job_errors:
-                        continue
+        ready_items = [prepared for prepared in prepared_items if prepared["ready"]]
 
-                    if parsed is not None:
-                        job_result = _build_job_match_result(
-                            profile_id,
-                            job_id,
-                            llm_match=json.dumps(parsed, ensure_ascii=False),
-                        )
-                    else:
-                        job_result = _build_job_match_result(
-                            profile_id,
-                            job_id,
-                            llm_match_error=last_error or "invalid_json_response",
-                        )
+        print(
+            f"Starting LLM fitting with concurrency={concurrency} jobs={len(ready_items)}"
+        )
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_to_item = {
+                executor.submit(_process_single_item, prepared): prepared["item"]
+                for prepared in ready_items
+            }
+            for future in as_completed(future_to_item):
+                item = future_to_item[future]
+                try:
+                    _, job_result = future.result()
                 except Exception as error:
+                    error_text = str(error)
+                    if error_text.startswith("TRANSIENT_API::"):
+                        _record_transient_api_error(
+                            item,
+                            error_text.removeprefix("TRANSIENT_API::"),
+                        )
+                        continue
+                    if error_text.startswith("FATAL_API::"):
+                        fatal_error = error_text.removeprefix("FATAL_API::")
+                        claim_key = _job_ref_key(item["profile_id"], item["job_id"])
+                        print(
+                            f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
+                            f"status=api_error error={fatal_error}"
+                        )
+                        return _return_api_error(
+                            fatal_error,
+                            matched_jobs,
+                            retry_items=[item],
+                            retry_job_errors={claim_key: fatal_error},
+                        )
                     job_result = _build_job_match_result(
-                        profile_id,
-                        job_id,
+                        item["profile_id"],
+                        item["job_id"],
                         llm_match_error=f"unexpected_job_error: {error}",
                     )
 
