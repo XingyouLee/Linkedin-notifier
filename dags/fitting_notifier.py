@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from airflow.sdk import dag, task
 
+import ast
 import json
 from datetime import datetime
 import os
@@ -64,6 +65,8 @@ def _build_match_task_result(
     requeue_items=None,
     requeue_job_errors=None,
     stopped_early: bool = False,
+    persisted_immediately: bool = False,
+    finalize_counts=None,
 ):
     normalized_requeue_items = []
     seen_keys = set()
@@ -81,13 +84,24 @@ def _build_match_task_result(
         "requeue_items": normalized_requeue_items,
         "requeue_job_errors": requeue_job_errors or {},
         "stopped_early": stopped_early,
+        "persisted_immediately": persisted_immediately,
+        "finalize_counts": finalize_counts or {"done": 0, "failed": 0, "requeued": 0},
         "unprocessed_items": normalized_requeue_items,
     }
 
 
 def _unwrap_match_task_result(match_result):
     if not match_result:
-        return [], False, None, [], {}, False
+        return (
+            [],
+            False,
+            None,
+            [],
+            {},
+            False,
+            False,
+            {"done": 0, "failed": 0, "requeued": 0},
+        )
     if isinstance(match_result, dict):
         requeue_items = match_result.get("requeue_items")
         if requeue_items is None:
@@ -99,8 +113,20 @@ def _unwrap_match_task_result(match_result):
             requeue_items,
             match_result.get("requeue_job_errors") or {},
             bool(match_result.get("stopped_early")),
+            bool(match_result.get("persisted_immediately")),
+            match_result.get("finalize_counts")
+            or {"done": 0, "failed": 0, "requeued": 0},
         )
-    return match_result or [], False, None, [], {}, False
+    return (
+        match_result or [],
+        False,
+        None,
+        [],
+        {},
+        False,
+        False,
+        {"done": 0, "failed": 0, "requeued": 0},
+    )
 
 
 def _build_job_match_result(
@@ -543,6 +569,29 @@ def _append_unique_reason(reasons: list[str], reason: str | None) -> None:
     reasons.append(text)
 
 
+def _parse_structured_value(value):
+    if isinstance(value, (dict, list)):
+        return value
+    text = _normalize_text(value)
+    if not text or not (text.startswith("{") or text.startswith("[")):
+        return None
+    try:
+        return json.loads(text)
+    except Exception:
+        try:
+            return ast.literal_eval(text)
+        except Exception:
+            return None
+
+
+def _normalize_exp_requirement_text(exp_requirement) -> str:
+    parsed = _parse_structured_value(exp_requirement)
+    if parsed is not None:
+        return _format_exp_requirement_for_discord(parsed)
+    text = _normalize_text(exp_requirement)
+    return text or "not specified"
+
+
 def _apply_fit_caps(
     parsed_match: dict,
     *,
@@ -572,7 +621,9 @@ def _apply_fit_caps(
         fallback_to_years=False,
     )
     required_years = _coerce_number(experience_check.get("required_years"))
-    exp_requirement = _normalize_text(parsed_match.get("exp_requirement")) or "not specified"
+    exp_requirement = _normalize_exp_requirement_text(
+        parsed_match.get("exp_requirement")
+    )
     if required_years is None:
         required_years = _extract_required_years(exp_requirement, job_title, jd_text)
 
@@ -601,7 +652,9 @@ def _apply_fit_caps(
 
     def _tighten_cap(new_score_cap: int, new_decision_cap: str | None = None) -> None:
         nonlocal score_cap, decision_cap
-        score_cap = new_score_cap if score_cap is None else min(score_cap, new_score_cap)
+        score_cap = (
+            new_score_cap if score_cap is None else min(score_cap, new_score_cap)
+        )
         if new_decision_cap:
             if not decision_cap:
                 decision_cap = new_decision_cap
@@ -674,7 +727,9 @@ def _apply_fit_caps(
         "seniority_required": required_seniority,
         "candidate_seniority": candidate_seniority,
         "experience_blocker": experience_blocker,
-        "reason": "; ".join(reasons) if reasons else "No material experience blocker detected.",
+        "reason": "; ".join(reasons)
+        if reasons
+        else "No material experience blocker detected.",
         "severity": severity,
     }
     return normalized_match
@@ -736,8 +791,46 @@ def _has_experience_blocker(llm_match) -> bool:
 
 def _filter_notification_jobs(job_records: list[dict]) -> list[dict]:
     return [
-        job for job in (job_records or []) if not _has_experience_blocker(job.get("llm_match"))
+        job
+        for job in (job_records or [])
+        if not _has_experience_blocker(job.get("llm_match"))
     ]
+
+
+def _format_exp_requirement_for_discord(exp_requirement) -> str:
+    if exp_requirement is None:
+        return "not specified"
+    if isinstance(exp_requirement, dict):
+        parts = []
+        for key, value in exp_requirement.items():
+            text = _normalize_text(value)
+            if text is None:
+                text = str(value).strip() if value is not None else ""
+            if not text:
+                continue
+            label = str(key).replace("_", " ").strip()
+            parts.append(f"{label}: {text}")
+        return "; ".join(parts) if parts else "not specified"
+    if isinstance(exp_requirement, list):
+        parts = [_format_exp_requirement_for_discord(item) for item in exp_requirement]
+        parts = [part for part in parts if part and part != "not specified"]
+        return "; ".join(parts) if parts else "not specified"
+
+    text = _normalize_text(exp_requirement)
+    if not text:
+        return "not specified"
+    if text.startswith("{") or text.startswith("["):
+        parsed = None
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            try:
+                parsed = ast.literal_eval(text)
+            except Exception:
+                parsed = None
+        if parsed is not None:
+            return _format_exp_requirement_for_discord(parsed)
+    return text
 
 
 def _sort_notification_jobs(job_records: list[dict]) -> list[dict]:
@@ -806,7 +899,11 @@ def linkedin_fitting_notifier():
             job_id = item.get("job_id")
             if profile_id is None or not job_id:
                 continue
-            claim = {"profile_id": int(profile_id), "job_id": str(job_id)}
+            claim = {
+                "profile_id": int(profile_id),
+                "job_id": str(job_id),
+                "attempts": int(item.get("attempts") or 0),
+            }
             claim_key = _job_ref_key(claim["profile_id"], claim["job_id"])
             if claim_key in seen_claims:
                 continue
@@ -823,12 +920,63 @@ def linkedin_fitting_notifier():
         resume_cache = {}
         candidate_summary_cache = {}
         profile_summary_errors = {}
+        finalize_counts = {"done": 0, "failed": 0, "requeued": 0}
+        finalized_item_keys = set()
+        max_attempts = int(os.getenv("FITTING_MAX_ATTEMPTS", "3"))
+
+        def _persist_job_result(job_result: dict) -> None:
+            save_df = pd.DataFrame([job_result])
+            database.save_llm_matches(
+                save_df[["profile_id", "job_id", "llm_match", "llm_match_error"]]
+            )
+
+        def _finalize_job_result(
+            item: dict,
+            job_result: dict | None = None,
+            *,
+            requeue_error: str | None = None,
+        ) -> None:
+            profile_id = int(item["profile_id"])
+            job_id = str(item["job_id"])
+            item_key = _job_ref_key(profile_id, job_id)
+            if item_key in finalized_item_keys:
+                return
+            attempts = int(item.get("attempts") or 0)
+            if requeue_error is not None:
+                database.requeue_fitting_task(profile_id, job_id, error=requeue_error)
+                finalized_item_keys.add(item_key)
+                finalize_counts["requeued"] += 1
+                return
+
+            if (
+                job_result
+                and job_result.get("llm_match")
+                and not job_result.get("llm_match_error")
+            ):
+                database.mark_fitting_done(profile_id, job_id)
+                finalized_item_keys.add(item_key)
+                finalize_counts["done"] += 1
+                return
+
+            error = "missing_llm_match"
+            if job_result and job_result.get("llm_match_error"):
+                error = str(job_result["llm_match_error"])
+            retry = (attempts + 1) < max_attempts
+            database.mark_fitting_failed(
+                profile_id,
+                job_id,
+                error=error,
+                retry=retry,
+            )
+            finalized_item_keys.add(item_key)
+            finalize_counts["failed"] += 1
 
         def _record_transient_api_error(item, message: str):
             claim_key = _job_ref_key(item["profile_id"], item["job_id"])
             error_message = str(message)
             requeue_job_errors[claim_key] = error_message
             api_error_messages.append(error_message)
+            _finalize_job_result(item, requeue_error=error_message)
             print(
                 f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
                 f"status=api_error_requeue error={error_message}"
@@ -876,6 +1024,14 @@ def linkedin_fitting_notifier():
             for item in requeue_items:
                 claim_key = _job_ref_key(item["profile_id"], item["job_id"])
                 merged_requeue_job_errors.setdefault(claim_key, error_message)
+            for item in requeue_items:
+                claim_key = _job_ref_key(item["profile_id"], item["job_id"])
+                _finalize_job_result(
+                    item,
+                    requeue_error=merged_requeue_job_errors.get(
+                        claim_key, error_message
+                    ),
+                )
             return _build_match_task_result(
                 partial_results,
                 api_error=True,
@@ -883,9 +1039,11 @@ def linkedin_fitting_notifier():
                 requeue_items=requeue_items,
                 requeue_job_errors=merged_requeue_job_errors,
                 stopped_early=stopped_early,
+                persisted_immediately=True,
+                finalize_counts=finalize_counts,
             )
 
-        api_key = os.getenv("GMN_API_KEY")
+        api_key = os.getenv("LLM_API_KEY")
         if not api_key:
             error_message = "missing_llm_api_key"
             print(f"LLM API error detected before processing jobs: {error_message}")
@@ -959,8 +1117,16 @@ def linkedin_fitting_notifier():
                 "missing_job_record",
             )
             for job_result in error_results:
+                _persist_job_result(job_result)
+            for item, job_result in zip(claimed_items, error_results):
+                _finalize_job_result(item, job_result)
+            for job_result in error_results:
                 _log_job_match_result(job_result)
-            return _build_match_task_result(error_results)
+            return _build_match_task_result(
+                error_results,
+                persisted_immediately=True,
+                finalize_counts=finalize_counts,
+            )
 
         required_job_columns = ["id", "title", "description"]
         for col in required_job_columns:
@@ -1059,7 +1225,6 @@ def linkedin_fitting_notifier():
                         matched_jobs.append(job_result)
                         _log_job_match_result(job_result)
                         continue
-
                     base_prompt = _build_fit_prompt(
                         job_title,
                         jd_text,
@@ -1173,6 +1338,8 @@ def linkedin_fitting_notifier():
                     )
 
                 matched_jobs.append(job_result)
+                _persist_job_result(job_result)
+                _finalize_job_result(item, job_result)
                 _log_job_match_result(job_result)
 
         api_error_message = _summarize_api_errors(api_error_messages)
@@ -1181,6 +1348,13 @@ def linkedin_fitting_notifier():
             for item in claimed_items
             if _job_ref_key(item["profile_id"], item["job_id"]) in requeue_job_errors
         ]
+        print(
+            "Inline fitting persistence summary: "
+            f"processed={len(matched_jobs)} "
+            f"done={finalize_counts['done']} "
+            f"failed={finalize_counts['failed']} "
+            f"requeued={finalize_counts['requeued']}"
+        )
         return _build_match_task_result(
             matched_jobs,
             api_error=bool(requeue_job_errors),
@@ -1188,6 +1362,8 @@ def linkedin_fitting_notifier():
             requeue_items=requeue_items,
             requeue_job_errors=requeue_job_errors,
             stopped_early=False,
+            persisted_immediately=True,
+            finalize_counts=finalize_counts,
         )
 
     @task.branch
@@ -1199,6 +1375,8 @@ def linkedin_fitting_notifier():
             requeue_items,
             _,
             stopped_early,
+            _,
+            _,
         ) = _unwrap_match_task_result(match_result)
         if api_error:
             mode = "stop_early" if stopped_early else "continue_with_requeue"
@@ -1213,12 +1391,39 @@ def linkedin_fitting_notifier():
 
     @task
     def store_fitting_results(match_result):
-        jobs_with_match_records, api_error, _, _, _, _ = _unwrap_match_task_result(
-            match_result
-        )
+        (
+            jobs_with_match_records,
+            api_error,
+            _,
+            _,
+            _,
+            _,
+            persisted_immediately,
+            _,
+        ) = _unwrap_match_task_result(match_result)
         jobs_with_match_records = jobs_with_match_records or []
         if not jobs_with_match_records:
             return 0
+
+        if persisted_immediately:
+            success_count = sum(
+                1
+                for row in jobs_with_match_records
+                if row.get("llm_match") and not row.get("llm_match_error")
+            )
+            error_count = len(jobs_with_match_records) - success_count
+            print(
+                f"LLM results already persisted inline: total={len(jobs_with_match_records)} "
+                f"success={success_count} error={error_count}"
+            )
+            if not api_error:
+                for profile_id in {
+                    int(row.get("profile_id"))
+                    for row in jobs_with_match_records
+                    if row.get("profile_id") is not None
+                }:
+                    database.resolve_active_alert(f"{LLM_API_ALERT_KEY}:{profile_id}")
+            return len(jobs_with_match_records)
 
         save_df = pd.DataFrame(jobs_with_match_records)
         for column in ["profile_id", "job_id", "llm_match", "llm_match_error"]:
@@ -1257,6 +1462,8 @@ def linkedin_fitting_notifier():
             requeue_items,
             _,
             stopped_early,
+            _,
+            _,
         ) = _unwrap_match_task_result(match_result)
         if not api_error:
             return {"alert_sent": False, "affected_jobs": 0}
@@ -1361,9 +1568,24 @@ def linkedin_fitting_notifier():
             requeue_items,
             requeue_job_errors,
             _,
+            persisted_immediately,
+            finalize_counts,
         ) = _unwrap_match_task_result(match_result)
         if not queue_items:
             return {"done": 0, "failed": 0}
+
+        if persisted_immediately:
+            print(
+                "Inline fitting finalization already completed: "
+                f"done={int(finalize_counts.get('done') or 0)} "
+                f"failed={int(finalize_counts.get('failed') or 0)} "
+                f"requeued={int(finalize_counts.get('requeued') or 0)}"
+            )
+            return {
+                "done": int(finalize_counts.get("done") or 0),
+                "failed": int(finalize_counts.get("failed") or 0),
+                "requeued": int(finalize_counts.get("requeued") or 0),
+            }
 
         max_attempts = int(os.getenv("FITTING_MAX_ATTEMPTS", "3"))
 
@@ -1509,7 +1731,9 @@ def linkedin_fitting_notifier():
                         if isinstance(llm_match, dict)
                         else json.loads(llm_match)
                     )
-                    exp_requirement = parsed.get("exp_requirement") or "not specified"
+                    exp_requirement = _format_exp_requirement_for_discord(
+                        parsed.get("exp_requirement")
+                    )
                 except Exception:
                     pass
 
