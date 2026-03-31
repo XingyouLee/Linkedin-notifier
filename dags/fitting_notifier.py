@@ -15,7 +15,7 @@ from dags import database
 from dags.runtime_utils import df_to_xcom_records, load_env
 
 
-load_env(required_keys=["GMN_API_KEY"], override_if_missing=True)
+load_env(override_if_missing=True)
 
 LLM_API_ALERT_KEY = "llm_api_error"
 MATCH_DECISION_ORDER = [
@@ -555,6 +555,102 @@ def _request_llm_json(
     return parsed
 
 
+def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
+    endpoints_json = _normalize_text(os.getenv("LLM_ENDPOINTS_JSON"))
+    endpoints: list[dict[str, str]] = []
+    if endpoints_json:
+        try:
+            parsed = json.loads(endpoints_json)
+        except Exception as error:
+            raise ValueError(f"invalid_llm_endpoints_json: {error}") from error
+        if not isinstance(parsed, list):
+            raise ValueError("invalid_llm_endpoints_json: root must be a list")
+        for index, entry in enumerate(parsed):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"invalid_llm_endpoints_json: entry {index} must be an object"
+                )
+            request_url = _normalize_text(entry.get("request_url") or entry.get("url"))
+            api_key = _normalize_text(entry.get("api_key"))
+            api_key_env = _normalize_text(entry.get("api_key_env"))
+            name = _normalize_text(entry.get("name")) or f"endpoint_{index + 1}"
+            if api_key is None and api_key_env:
+                api_key = _normalize_text(os.getenv(api_key_env))
+            if not request_url or not api_key:
+                raise ValueError(
+                    f"invalid_llm_endpoints_json: entry {index} requires request_url and api_key/api_key_env"
+                )
+            endpoints.append(
+                {
+                    "name": name,
+                    "request_url": request_url,
+                    "api_key": api_key,
+                }
+            )
+
+    if endpoints:
+        return endpoints
+
+    request_url = _normalize_text(os.getenv("FITTING_REQUEST_URL"))
+    api_key = _normalize_text(os.getenv("LLM_API_KEY")) or _normalize_text(
+        os.getenv("GMN_API_KEY")
+    )
+    if request_url and api_key:
+        return [
+            {
+                "name": "primary",
+                "request_url": request_url,
+                "api_key": api_key,
+            }
+        ]
+
+    return []
+
+
+def _request_llm_json_with_fallback(
+    *, endpoints: list[dict[str, str]], model_name: str, prompt: str
+) -> dict:
+    transient_errors: list[str] = []
+    fatal_errors: list[str] = []
+
+    for endpoint in endpoints:
+        endpoint_name = (
+            endpoint.get("name") or endpoint.get("request_url") or "endpoint"
+        )
+        try:
+            return _request_llm_json(
+                request_url=endpoint["request_url"],
+                api_key=endpoint["api_key"],
+                model_name=model_name,
+                prompt=prompt,
+            )
+        except requests.HTTPError as error:
+            status_code = (
+                error.response.status_code if error.response is not None else "unknown"
+            )
+            message = f"endpoint={endpoint_name} status={status_code} error={error}"
+            if _is_transient_llm_http_status(status_code):
+                transient_errors.append(message)
+                continue
+            fatal_errors.append(message)
+            continue
+        except (requests.Timeout, requests.ConnectionError) as error:
+            transient_errors.append(f"endpoint={endpoint_name} error={error}")
+            continue
+        except requests.RequestException as error:
+            fatal_errors.append(f"endpoint={endpoint_name} error={error}")
+            continue
+
+    if transient_errors and not fatal_errors:
+        raise RuntimeError("TRANSIENT_API::" + " | ".join(transient_errors))
+
+    all_errors = fatal_errors + transient_errors
+    if all_errors:
+        raise RuntimeError("FATAL_API::" + " | ".join(all_errors))
+
+    raise RuntimeError("FATAL_API::no_llm_endpoints_available")
+
+
 def _cap_decision(decision: str, max_decision: str | None) -> str:
     if not max_decision:
         return decision
@@ -914,7 +1010,7 @@ def linkedin_fitting_notifier():
         if not claimed_items:
             return _build_match_task_result([])
 
-        load_env(required_keys=["GMN_API_KEY"], override_if_missing=True)
+        load_env(override_if_missing=True)
         matched_jobs = []
         requeue_job_errors = {}
         api_error_messages = []
@@ -1015,9 +1111,8 @@ def linkedin_fitting_notifier():
                     prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
 
                 try:
-                    parsed = _request_llm_match(
-                        request_url=request_url,
-                        api_key=api_key,
+                    parsed = _request_llm_json_with_fallback(
+                        endpoints=llm_endpoints,
                         model_name=model_name,
                         prompt=prompt,
                     )
@@ -1028,39 +1123,16 @@ def linkedin_fitting_notifier():
                         candidate_summary=candidate_summary,
                     )
                     break
-                except requests.HTTPError as error:
-                    status_code = (
-                        error.response.status_code
-                        if error.response is not None
-                        else "unknown"
-                    )
-                    error_message = (
-                        f"llm_api_http_error status={status_code} "
-                        f"profile_id={profile_id} job_id={job_id} error={error}"
-                    )
-                    if _is_transient_llm_http_status(status_code):
-                        if attempt < 2:
-                            print(
-                                f"llm_result profile_id={profile_id} job_id={job_id} "
-                                f"status=api_retry attempt={attempt + 1}/3 error={error_message}"
-                            )
-                            time.sleep(min(2**attempt, 4))
-                            continue
-                        raise RuntimeError(f"TRANSIENT_API::{error_message}") from error
-                    raise RuntimeError(f"FATAL_API::{error_message}") from error
-                except (requests.Timeout, requests.ConnectionError) as error:
-                    error_message = f"llm_api_request_error profile_id={profile_id} job_id={job_id} error={error}"
-                    if attempt < 2:
+                except RuntimeError as error:
+                    error_message = str(error)
+                    if error_message.startswith("TRANSIENT_API::") and attempt < 2:
                         print(
                             f"llm_result profile_id={profile_id} job_id={job_id} "
-                            f"status=api_retry attempt={attempt + 1}/3 error={error_message}"
+                            f"status=api_retry attempt={attempt + 1}/3 error={error_message.removeprefix('TRANSIENT_API::')}"
                         )
                         time.sleep(min(2**attempt, 4))
                         continue
-                    raise RuntimeError(f"TRANSIENT_API::{error_message}") from error
-                except requests.RequestException as error:
-                    error_message = f"llm_api_request_error profile_id={profile_id} job_id={job_id} error={error}"
-                    raise RuntimeError(f"FATAL_API::{error_message}") from error
+                    raise
                 except Exception as error:
                     last_error = str(error)
 
@@ -1138,15 +1210,15 @@ def linkedin_fitting_notifier():
                 finalize_counts=finalize_counts,
             )
 
-        api_key = os.getenv("LLM_API_KEY")
-        if not api_key:
-            error_message = "missing_llm_api_key"
+        try:
+            llm_endpoints = _parse_llm_endpoints_from_env()
+        except Exception as error:
+            error_message = str(error)
             print(f"LLM API error detected before processing jobs: {error_message}")
             return _return_api_error(error_message, retry_items=claimed_items)
 
-        request_url = os.getenv("FITTING_REQUEST_URL")
-        if not request_url:
-            error_message = "missing_fitting_request_url"
+        if not llm_endpoints:
+            error_message = "missing_llm_endpoints"
             print(f"LLM API error detected before processing jobs: {error_message}")
             return _return_api_error(error_message, retry_items=claimed_items)
 
