@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import quote_plus
 
@@ -12,8 +13,61 @@ from psycopg.rows import dict_row
 JOB_REQUIRED_COLUMNS = ["id", "site", "job_url", "title", "company"]
 JD_QUEUE_COLUMNS = ["id", "job_url"]
 LLM_RESULT_COLUMNS = ["id", "llm_match", "llm_match_error"]
+PROFILE_JOB_COLUMNS = ["profile_id", "job_id", "search_config_id", "matched_term"]
+PROFILE_JOB_RESULT_COLUMNS = ["profile_id", "job_id", "llm_match", "llm_match_error"]
 SCHEMA_LOCK_KEY = 620240319001
+DEFAULT_PROFILE_SOURCE_SIGNATURE = ("__default_profile__", 0, 0)
+USER_INFO_DIR = Path(__file__).resolve().parent.parent / "user_info"
+INCLUDE_USER_INFO_DIR = Path(__file__).resolve().parent.parent / "include" / "user_info"
+BOOTSTRAP_EXISTING_JOBS_KEY = "existing_jobs_v1"
 _SCHEMA_INITIALIZED = False
+_PROFILE_SOURCE_SIGNATURE: tuple[str, int, int] | None = None
+
+DEFAULT_FIT_PROMPT_TEXT = (
+    "If output is not valid JSON, regenerate until valid. "
+    "Do not include markdown. Do not include trailing commas. "
+    "You are a strict job-fit evaluator for hiring in the Netherlands. "
+    "Your priority is to reduce false positives. "
+    "Prefer a false negative over a false positive when years of experience, seniority, ownership scope, language requirements, or core must-have skills are not convincingly aligned. "
+    "Use the provided candidate summary as the canonical baseline for candidate_years, candidate_seniority, target role direction, core strengths, obvious gaps, and language signals. "
+    "The raw resume remains the factual evidence source, but it must not be used to inflate the candidate above the candidate summary baseline. "
+    "Do not convert internships, academic work, side projects, coursework, part-time school work, or short project exposure into multiple years of full-time industry seniority. "
+    "Treat the job title as part of the requirement context because seniority, language, and scope requirements often appear in the title or metadata rather than in a clean JD paragraph. "
+    "Read the entire supplied text carefully, including title-like fragments, metadata-like fragments, bullet lists, and short snippets. "
+    "If the supplied job text contains any explicit year range or seniority cue anywhere, extract it. "
+    "If the supplied job text is vague, sparse, or ambiguous, do not invent a favorable interpretation. "
+    "Uncertainty should make you more conservative, not more optimistic. "
+    "Decision policy: "
+    "1. If the job explicitly requires Dutch or fluent Dutch, set language_blocker = true and score harshly. "
+    "2. Be conservative on years of experience and seniority. "
+    "3. Extract both required_years and seniority_required whenever the title or JD provides any credible signal. "
+    "4. Titles such as Senior, Lead, Staff, Principal, Architect, Manager, Director, and Mid-Senior should be treated as meaningful requirement signals unless the JD explicitly contradicts them. "
+    "5. Generic titles such as Software Engineer, Developer, Engineer, or Python Developer are not enough for a favorable result unless the responsibilities and scope clearly match the candidate. "
+    "6. Required skills, years of experience, seniority, language requirements, ownership scope, and domain relevance matter more than superficial keyword overlap. "
+    "7. If the JD asks for 4+ years, strong independent ownership, mentoring, architecture responsibility, or cross-team technical leadership, be very skeptical for an early-career candidate. "
+    "8. If the JD asks for 5+ years, senior ownership, lead-level accountability, or platform or architecture leadership, a favorable recommendation should be rare and requires unusually strong contradictory evidence in the JD itself. "
+    "9. Before finalizing a Strong Fit or Moderate Fit, actively audit for false-positive risk: unaddressed experience gap, seniority mismatch, Dutch requirement, vague title-only overlap, or missing must-have skills. If any of those remain material, downgrade. "
+    "exp_requirement must be a single plain-English line, never a JSON object, array, Python dict, or key-value dump. "
+    "It should summarize the best evidence you found about JD experience and seniority requirements, for example explicit years, senior title, or that the JD does not state a reliable requirement. "
+    "If not explicitly stated, set exp_requirement to a short plain-English sentence such as 'No explicit years requirement found; title and scope are the main signals.' "
+    "Return ONLY valid JSON. No explanations outside JSON. No markdown. No comments. "
+    "JSON structure: "
+    "{"
+    '"fit_score": 0-100, '
+    '"decision": "Strong Fit | Moderate Fit | Weak Fit | Not Recommended", '
+    '"exp_requirement": "one-line JD experience requirement", '
+    '"candidate_summary": {"summary": "2-4 concise lines", "target_roles": [], "candidate_years": number, "candidate_seniority": "entry | junior | mid | senior | lead | staff | principal | architect | manager | director | unknown", "core_skills": [], "obvious_gaps": [], "language_signals": {"dutch_level": "none | basic | working | fluent | unknown", "english_level": "none | basic | working | fluent | unknown", "notes": "short explanation"}}, '
+    '"language_check": {"dutch_required": true/false, "language_blocker": true/false, "impact": "short explanation"}, '
+    '"experience_check": {"required_years": number|null, "candidate_years": number|null, "gap_years": number|null, "seniority_required": "entry | junior | mid | senior | lead | staff | principal | architect | manager | director | unknown", "candidate_seniority": "entry | junior | mid | senior | lead | staff | principal | architect | manager | director | unknown", "experience_blocker": true/false, "reason": "short explanation", "severity": "none | minor | moderate | severe"}, '
+    '"skills_match": {"strong_matches": [], "partial_matches": [], "missing_critical_skills": []}, '
+    '"risk_factors": [], '
+    '"summary": "3-5 concise lines"'
+    "} "
+    "Candidate Summary: <<<{{candidate_summary}}>>> "
+    "Job Title: <<<{{job_title}}>>> "
+    "Job Description: <<<{{job_description}}>>> "
+    "Candidate Resume: <<<{{candidate_resume}}>>>"
+)
 
 
 def _get_positive_int_env(var_name: str, default: int) -> int:
@@ -22,6 +76,14 @@ def _get_positive_int_env(var_name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(1, value)
+
+
+def _coerce_nonnegative_int(value, default: int) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, coerced)
 
 
 def _resolve_db_url() -> str:
@@ -70,6 +132,545 @@ def _extract_fit_fields(
         return parsed.get("fit_score"), parsed.get("decision")
     except Exception:
         return None, None
+
+
+def _default_resume_path_candidates() -> list[str]:
+    dags_dir = Path(__file__).resolve().parent
+    return [
+        str((dags_dir / "resume.md").resolve()),
+        str((dags_dir.parent / "resume.md").resolve()),
+    ]
+
+
+def _resolve_default_resume_path() -> Optional[str]:
+    configured_path = os.getenv("RESUME_PATH")
+    candidates = [configured_path] if configured_path else []
+    candidates.extend(_default_resume_path_candidates())
+    for candidate in candidates:
+        if not candidate:
+            continue
+        resolved = Path(candidate).expanduser().resolve()
+        if resolved.exists():
+            return str(resolved)
+    return configured_path
+
+
+def _parse_terms(terms_input) -> list[str]:
+    if isinstance(terms_input, str):
+        terms = [term.strip() for term in terms_input.split(",") if term.strip()]
+    else:
+        terms = [str(term).strip() for term in (terms_input or []) if str(term).strip()]
+    return terms
+
+
+def _coerce_bool(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _serialize_candidate_summary_config(candidate_summary_config) -> str | None:
+    if candidate_summary_config is None:
+        return None
+    if isinstance(candidate_summary_config, str):
+        return candidate_summary_config
+    return json.dumps(candidate_summary_config, ensure_ascii=False)
+
+
+def _normalize_fit_prompt_text(prompt_text) -> str:
+    normalized_prompt = str(prompt_text or "").strip()
+    if not normalized_prompt:
+        normalized_prompt = DEFAULT_FIT_PROMPT_TEXT
+
+    if "{{job_title}}" not in normalized_prompt:
+        normalized_prompt += " Job Title: <<<{{job_title}}>>>"
+    if "{{job_description}}" not in normalized_prompt:
+        normalized_prompt += " Job Description: <<<{{job_description}}>>>"
+    if "{{candidate_resume}}" not in normalized_prompt:
+        normalized_prompt += " Candidate Resume: <<<{{candidate_resume}}>>>"
+    if "{{candidate_summary}}" not in normalized_prompt:
+        normalized_prompt += " Candidate Summary: <<<{{candidate_summary}}>>>"
+
+    return normalized_prompt
+
+
+def _resolve_profiles_config_path() -> Path:
+    configured_path = os.getenv("PROFILE_CONFIG_PATH")
+    if configured_path:
+        return Path(configured_path).expanduser().resolve()
+
+    candidate_paths = [
+        (INCLUDE_USER_INFO_DIR / "profiles.json").resolve(),
+        (USER_INFO_DIR / "profiles.json").resolve(),
+    ]
+    for candidate_path in candidate_paths:
+        if candidate_path.exists():
+            return candidate_path
+
+    return candidate_paths[0]
+
+
+def _resolve_profile_resume_path(
+    resume_path: Optional[str], *, base_dir: Path
+) -> Optional[str]:
+    if not resume_path:
+        return resume_path
+    resolved = Path(str(resume_path)).expanduser()
+    if not resolved.is_absolute():
+        resolved = (base_dir / resolved).resolve()
+    return str(resolved)
+
+
+def _load_profile_configs_from_file(config_path: Path) -> list[dict[str, Any]]:
+    with config_path.open("r", encoding="utf-8") as file_handle:
+        raw_configs = json.load(file_handle)
+
+    if not isinstance(raw_configs, list):
+        raise ValueError(f"Profile config must be a JSON array: {config_path}")
+
+    base_dir = config_path.parent
+    profile_configs = []
+    for profile_config in raw_configs:
+        if not isinstance(profile_config, dict):
+            continue
+        normalized_profile = dict(profile_config)
+        normalized_profile["resume_path"] = _resolve_profile_resume_path(
+            profile_config.get("resume_path"),
+            base_dir=base_dir,
+        )
+        profile_configs.append(normalized_profile)
+    return profile_configs
+
+
+def _compute_profile_source_signature(config_path: Path) -> tuple[str, int, int]:
+    if not config_path.exists():
+        return DEFAULT_PROFILE_SOURCE_SIGNATURE
+    stat_result = config_path.stat()
+    return (str(config_path), int(stat_result.st_mtime_ns), int(stat_result.st_size))
+
+
+def _default_profile_config() -> dict[str, Any]:
+    results_default = _get_positive_int_env(
+        "SCAN_RESULTS_PER_TERM",
+        _get_positive_int_env("SCAN_RESULTS_WANTED", 10),
+    )
+    return {
+        "profile_key": os.getenv("DEFAULT_PROFILE_KEY", "default"),
+        "display_name": os.getenv("DEFAULT_PROFILE_NAME", "Default Profile"),
+        "bootstrap_existing_jobs": True,
+        "resume_path": _resolve_default_resume_path(),
+        "resume_text": None,
+        "candidate_summary_config": os.getenv("DEFAULT_CANDIDATE_SUMMARY_JSON")
+        or os.getenv("CANDIDATE_SUMMARY_JSON"),
+        "fit_prompt_text": _normalize_fit_prompt_text(None),
+        "discord_channel_id": os.getenv("DISCORD_CHANNEL_ID"),
+        "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL"),
+        "model_name": os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
+        "is_active": True,
+        "search_configs": [
+            {
+                "name": os.getenv("DEFAULT_SEARCH_CONFIG_NAME", "default"),
+                "location": os.getenv("SCAN_LOCATION", "Netherlands"),
+                "distance": _get_positive_int_env("SCAN_DISTANCE", 25),
+                "hours_old": _get_positive_int_env("SCAN_HOURS_OLD", 168),
+                "results_per_term": results_default,
+                "is_active": True,
+                "terms": _parse_terms(os.getenv("SCAN_SEARCH_TERMS", ""))
+                or [os.getenv("SCAN_SEARCH_TERM", "Data Engineer")],
+            }
+        ],
+    }
+
+
+def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
+    normalized_profiles = []
+    for profile_config in profile_configs or []:
+        if not isinstance(profile_config, dict):
+            continue
+        profile_key = str(profile_config.get("profile_key") or "").strip()
+        if not profile_key:
+            continue
+        profile_is_active = _coerce_bool(
+            profile_config.get("active")
+            if "active" in profile_config
+            else profile_config.get("is_active"),
+            True,
+        )
+        bootstrap_existing_jobs = _coerce_bool(
+            profile_config.get("bootstrap_existing_jobs"),
+            False,
+        )
+        search_configs = []
+        for search_config in profile_config.get("search_configs") or []:
+            if not isinstance(search_config, dict):
+                continue
+            config_name = (
+                str(search_config.get("name") or "default").strip() or "default"
+            )
+            terms = _parse_terms(search_config.get("terms"))
+            if not terms:
+                continue
+            if "results_per_term" not in search_config or search_config.get(
+                "results_per_term"
+            ) is None:
+                raise ValueError(
+                    "search_config.results_per_term is required for "
+                    f"profile={profile_key} config={config_name}"
+                )
+            search_configs.append(
+                {
+                    "name": config_name,
+                    "location": str(
+                        search_config.get("location") or "Netherlands"
+                    ).strip()
+                    or "Netherlands",
+                    "distance": int(search_config.get("distance") or 25),
+                    "hours_old": int(search_config.get("hours_old") or 168),
+                    "results_per_term": _coerce_nonnegative_int(
+                        search_config.get("results_per_term"),
+                        10,
+                    ),
+                    "is_active": _coerce_bool(
+                        search_config.get("active")
+                        if "active" in search_config
+                        else search_config.get("is_active"),
+                        True,
+                    ),
+                    "terms": terms,
+                }
+            )
+        if not search_configs:
+            continue
+        normalized_profiles.append(
+            {
+                "profile_key": profile_key,
+                "display_name": profile_config.get("display_name") or profile_key,
+                "bootstrap_existing_jobs": bootstrap_existing_jobs,
+                "resume_path": profile_config.get("resume_path"),
+                "resume_text": profile_config.get("resume_text"),
+                "candidate_summary_config": profile_config.get("candidate_summary")
+                or profile_config.get("candidate_summary_config"),
+                "fit_prompt_text": _normalize_fit_prompt_text(
+                    profile_config.get("fit_prompt")
+                    or profile_config.get("fit_prompt_text")
+                    or profile_config.get("fit_prompt_config")
+                ),
+                "discord_channel_id": profile_config.get("discord_channel_id"),
+                "discord_webhook_url": profile_config.get("discord_webhook_url"),
+                "model_name": profile_config.get("model_name")
+                or os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
+                "is_active": profile_is_active,
+                "search_configs": search_configs,
+            }
+        )
+    return normalized_profiles
+
+
+def _sync_profile_configs(
+    cursor,
+    profile_configs,
+    *,
+    already_normalized: bool = False,
+) -> int:
+    normalized_profiles = (
+        list(profile_configs or [])
+        if already_normalized
+        else _coerce_profile_configs(profile_configs)
+    )
+    synced_profiles = 0
+    for profile_config in normalized_profiles:
+        cursor.execute(
+            """
+            INSERT INTO profiles (
+                profile_key,
+                display_name,
+                resume_path,
+                resume_text,
+                candidate_summary_config,
+                fit_prompt_config,
+                discord_channel_id,
+                discord_webhook_url,
+                model_name,
+                is_active,
+                updated_at
+            )
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT(profile_key) DO UPDATE SET
+                display_name = EXCLUDED.display_name,
+                resume_path = EXCLUDED.resume_path,
+                resume_text = EXCLUDED.resume_text,
+                candidate_summary_config = EXCLUDED.candidate_summary_config,
+                fit_prompt_config = EXCLUDED.fit_prompt_config,
+                discord_channel_id = EXCLUDED.discord_channel_id,
+                discord_webhook_url = EXCLUDED.discord_webhook_url,
+                model_name = EXCLUDED.model_name,
+                is_active = EXCLUDED.is_active,
+                updated_at = CURRENT_TIMESTAMP
+            RETURNING id
+            """,
+            (
+                profile_config["profile_key"],
+                profile_config["display_name"],
+                profile_config.get("resume_path"),
+                profile_config.get("resume_text"),
+                _serialize_candidate_summary_config(
+                    profile_config.get("candidate_summary_config")
+                ),
+                profile_config.get("fit_prompt_text"),
+                profile_config.get("discord_channel_id"),
+                profile_config.get("discord_webhook_url"),
+                profile_config.get("model_name"),
+                profile_config.get("is_active", True),
+            ),
+        )
+        profile_id = cursor.fetchone()[0]
+        synced_profiles += 1
+
+        for search_config in profile_config["search_configs"]:
+            cursor.execute(
+                """
+                INSERT INTO search_configs (
+                    profile_id,
+                    name,
+                    location,
+                    distance,
+                    hours_old,
+                    results_per_term,
+                    is_active,
+                    updated_at
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                ON CONFLICT(profile_id, name) DO UPDATE SET
+                    location = EXCLUDED.location,
+                    distance = EXCLUDED.distance,
+                    hours_old = EXCLUDED.hours_old,
+                    results_per_term = EXCLUDED.results_per_term,
+                    is_active = EXCLUDED.is_active,
+                    updated_at = CURRENT_TIMESTAMP
+                RETURNING id
+                """,
+                (
+                    profile_id,
+                    search_config["name"],
+                    search_config.get("location"),
+                    search_config.get("distance"),
+                    search_config.get("hours_old"),
+                    search_config.get("results_per_term"),
+                    search_config.get("is_active", True),
+                ),
+            )
+            search_config_id = cursor.fetchone()[0]
+            cursor.execute(
+                "DELETE FROM search_terms WHERE search_config_id = %s",
+                (search_config_id,),
+            )
+            cursor.executemany(
+                """
+                INSERT INTO search_terms (search_config_id, term)
+                VALUES (%s, %s)
+                ON CONFLICT(search_config_id, term) DO NOTHING
+                """,
+                [(search_config_id, term) for term in search_config["terms"]],
+            )
+
+        cursor.execute(
+            """
+            UPDATE search_configs
+            SET is_active = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE profile_id = %s
+              AND NOT (name = ANY(%s))
+            """,
+            (
+                profile_id,
+                [
+                    search_config["name"]
+                    for search_config in profile_config["search_configs"]
+                ],
+            ),
+        )
+
+    return synced_profiles
+
+
+def _backfill_profile_jobs_from_existing_jobs(cursor, profile_id: int):
+    cursor.execute(
+        """
+        INSERT INTO profile_jobs (
+            profile_id,
+            job_id,
+            discovered_at,
+            last_seen_at,
+            fit_status,
+            fit_attempts,
+            fit_last_error,
+            fit_updated_at,
+            llm_match,
+            llm_match_error,
+            fit_score,
+            fit_decision,
+            notified_at,
+            notify_status,
+            notify_error
+        )
+        SELECT
+            %s,
+            j.id,
+            COALESCE(j.fit_updated_at, CURRENT_TIMESTAMP),
+            CURRENT_TIMESTAMP,
+            j.fit_status,
+            COALESCE(j.fit_attempts, 0),
+            j.fit_last_error,
+            j.fit_updated_at,
+            j.llm_match,
+            j.llm_match_error,
+            j.fit_score,
+            j.fit_decision,
+            j.notified_at,
+            j.notify_status,
+            j.notify_error
+        FROM jobs j
+        ON CONFLICT(profile_id, job_id) DO NOTHING
+        """,
+        (profile_id,),
+    )
+
+
+def _backfill_default_profile_jobs(cursor, profile_key: str):
+    cursor.execute(
+        "SELECT id FROM profiles WHERE profile_key = %s",
+        (profile_key,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return
+    _backfill_profile_jobs_from_existing_jobs(cursor, int(row[0]))
+
+
+def _deactivate_missing_profiles(cursor, active_profile_keys: list[str]):
+    if active_profile_keys:
+        cursor.execute(
+            """
+            UPDATE profiles
+            SET is_active = FALSE,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE NOT (profile_key = ANY(%s))
+            """,
+            (active_profile_keys,),
+        )
+        return
+
+    cursor.execute(
+        """
+        UPDATE profiles
+        SET is_active = FALSE,
+            updated_at = CURRENT_TIMESTAMP
+        """
+    )
+
+
+def _bootstrap_flagged_profiles(
+    cursor, normalized_profiles: list[dict[str, Any]]
+) -> int:
+    flagged_profile_keys = [
+        profile_config["profile_key"]
+        for profile_config in normalized_profiles
+        if profile_config.get("bootstrap_existing_jobs")
+    ]
+    if not flagged_profile_keys:
+        return 0
+
+    cursor.execute(
+        "SELECT id, profile_key FROM profiles WHERE profile_key = ANY(%s)",
+        (flagged_profile_keys,),
+    )
+    profile_rows = cursor.fetchall() or []
+    if not profile_rows:
+        return 0
+
+    profile_ids = [int(row[0]) for row in profile_rows]
+    cursor.execute(
+        """
+        SELECT profile_id
+        FROM profile_bootstrap_state
+        WHERE bootstrap_key = %s
+          AND profile_id = ANY(%s)
+        """,
+        (BOOTSTRAP_EXISTING_JOBS_KEY, profile_ids),
+    )
+    completed_profile_ids = {
+        int(row[0]) for row in (cursor.fetchall() or []) if row and row[0] is not None
+    }
+
+    bootstrapped_profiles = 0
+    for profile_id, _profile_key in profile_rows:
+        normalized_profile_id = int(profile_id)
+        if normalized_profile_id in completed_profile_ids:
+            continue
+        _backfill_profile_jobs_from_existing_jobs(cursor, normalized_profile_id)
+        cursor.execute(
+            """
+            INSERT INTO profile_bootstrap_state (
+                profile_id,
+                bootstrap_key,
+                completed_at
+            )
+            VALUES (%s, %s, CURRENT_TIMESTAMP)
+            ON CONFLICT(profile_id, bootstrap_key) DO NOTHING
+            """,
+            (normalized_profile_id, BOOTSTRAP_EXISTING_JOBS_KEY),
+        )
+        bootstrapped_profiles += 1
+
+    return bootstrapped_profiles
+
+
+def _sync_profiles_from_source(cursor, *, force: bool = False) -> int:
+    global _PROFILE_SOURCE_SIGNATURE
+
+    config_path = _resolve_profiles_config_path()
+    source_signature = _compute_profile_source_signature(config_path)
+    if not force and source_signature == _PROFILE_SOURCE_SIGNATURE:
+        return 0
+
+    if config_path.exists():
+        profile_configs = _load_profile_configs_from_file(config_path)
+        normalized_profiles = _coerce_profile_configs(profile_configs)
+        synced_profiles = _sync_profile_configs(
+            cursor,
+            normalized_profiles,
+            already_normalized=True,
+        )
+        _deactivate_missing_profiles(
+            cursor,
+            [profile_config["profile_key"] for profile_config in normalized_profiles],
+        )
+        _bootstrap_flagged_profiles(cursor, normalized_profiles)
+        _PROFILE_SOURCE_SIGNATURE = source_signature
+        return synced_profiles
+
+    default_profile_config = _default_profile_config()
+    synced_profiles = _sync_profile_configs(cursor, [default_profile_config])
+    _deactivate_missing_profiles(cursor, [default_profile_config["profile_key"]])
+    _backfill_default_profile_jobs(cursor, default_profile_config["profile_key"])
+    _PROFILE_SOURCE_SIGNATURE = source_signature
+    return synced_profiles
+
+
+def sync_profiles_from_source(force: bool = False) -> int:
+    """Sync profile/search config state from user_info or fallback env defaults."""
+    init_db()
+
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            return _sync_profiles_from_source(cursor, force=force)
 
 
 def init_db():
@@ -149,6 +750,113 @@ def init_db():
 
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS profiles (
+                    id BIGSERIAL PRIMARY KEY,
+                    profile_key TEXT NOT NULL UNIQUE,
+                    display_name TEXT NOT NULL,
+                    resume_path TEXT,
+                    resume_text TEXT,
+                    candidate_summary_config TEXT,
+                    fit_prompt_config TEXT,
+                    discord_channel_id TEXT,
+                    discord_webhook_url TEXT,
+                    model_name TEXT,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE profiles
+                ADD COLUMN IF NOT EXISTS candidate_summary_config TEXT
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE profiles
+                ADD COLUMN IF NOT EXISTS fit_prompt_config TEXT
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS search_configs (
+                    id BIGSERIAL PRIMARY KEY,
+                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+                    name TEXT NOT NULL,
+                    location TEXT,
+                    distance INTEGER,
+                    hours_old INTEGER,
+                    results_per_term INTEGER,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (profile_id, name)
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE search_configs
+                ADD COLUMN IF NOT EXISTS location TEXT
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS search_terms (
+                    id BIGSERIAL PRIMARY KEY,
+                    search_config_id BIGINT NOT NULL REFERENCES search_configs (id) ON DELETE CASCADE,
+                    term TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (search_config_id, term)
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS profile_jobs (
+                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+                    job_id TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+                    search_config_id BIGINT REFERENCES search_configs (id) ON DELETE SET NULL,
+                    matched_term TEXT,
+                    discovered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    llm_match TEXT,
+                    llm_match_error TEXT,
+                    fit_score INTEGER,
+                    fit_decision TEXT,
+                    notified_at TIMESTAMP,
+                    notify_status TEXT,
+                    notify_error TEXT,
+                    fit_status TEXT,
+                    fit_attempts INTEGER DEFAULT 0,
+                    fit_last_error TEXT,
+                    fit_updated_at TIMESTAMP,
+                    PRIMARY KEY (profile_id, job_id)
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS profile_bootstrap_state (
+                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+                    bootstrap_key TEXT NOT NULL,
+                    completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (profile_id, bootstrap_key)
+                )
+                """
+            )
+
+            cursor.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_jobs_fit_status
                 ON jobs (fit_status)
                 """
@@ -160,6 +868,50 @@ def init_db():
                 ON jd_queue (status)
                 """
             )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_profiles_is_active
+                ON profiles (is_active)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_search_configs_profile_active
+                ON search_configs (profile_id, is_active)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_search_terms_config_id
+                ON search_terms (search_config_id)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_profile_jobs_fit_status
+                ON profile_jobs (fit_status)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_profile_jobs_notify_status
+                ON profile_jobs (notified_at, fit_status)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_profile_jobs_job_id
+                ON profile_jobs (job_id)
+                """
+            )
+
+            _sync_profiles_from_source(cursor)
     _SCHEMA_INITIALIZED = True
 
 
@@ -204,15 +956,145 @@ def save_jobs(jobs_df: pd.DataFrame):
                 written_count += cursor.rowcount
 
     if written_count > 0:
-        print(
-            f"✅ Upserted {written_count} jobs in Batch {batch_id}."
-        )
+        print(f"✅ Upserted {written_count} jobs in Batch {batch_id}.")
     else:
         print(f"No job rows changed during Batch {batch_id}.")
 
 
+def upsert_profile_configs(profile_configs) -> int:
+    """Upsert profile metadata and search configurations."""
+    init_db()
+
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            return _sync_profile_configs(cursor, profile_configs)
+
+
+def get_active_search_configs() -> list[dict[str, Any]]:
+    """Return active search configs with their owning profile and terms."""
+    sync_profiles_from_source()
+
+    query = """
+        SELECT
+            p.id AS profile_id,
+            p.profile_key,
+            p.display_name,
+            p.resume_path,
+            p.resume_text,
+            p.discord_channel_id,
+            p.discord_webhook_url,
+            p.model_name,
+            c.id AS search_config_id,
+            c.name AS search_config_name,
+            c.location,
+            c.distance,
+            c.hours_old,
+            c.results_per_term,
+            t.term
+        FROM profiles p
+        JOIN search_configs c ON c.profile_id = p.id
+        JOIN search_terms t ON t.search_config_id = c.id
+        WHERE p.is_active = TRUE
+          AND c.is_active = TRUE
+        ORDER BY p.id ASC, c.id ASC, t.id ASC
+    """
+
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+
+    configs_by_id: dict[int, dict[str, Any]] = {}
+    ordered_configs: list[dict[str, Any]] = []
+    for row in rows:
+        search_config_id = row["search_config_id"]
+        config = configs_by_id.get(search_config_id)
+        if config is None:
+            config = {
+                "profile_id": row["profile_id"],
+                "profile_key": row["profile_key"],
+                "display_name": row["display_name"],
+                "resume_path": row["resume_path"],
+                "resume_text": row["resume_text"],
+                "discord_channel_id": row["discord_channel_id"],
+                "discord_webhook_url": row["discord_webhook_url"],
+                "model_name": row["model_name"]
+                or os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
+                "search_config_id": search_config_id,
+                "search_config_name": row["search_config_name"],
+                "location": row["location"]
+                or os.getenv("SCAN_LOCATION", "Netherlands"),
+                "distance": row["distance"]
+                if row["distance"] is not None
+                else _get_positive_int_env("SCAN_DISTANCE", 25),
+                "hours_old": row["hours_old"]
+                if row["hours_old"] is not None
+                else _get_positive_int_env("SCAN_HOURS_OLD", 168),
+                "results_per_term": row["results_per_term"]
+                if row["results_per_term"] is not None
+                else _get_positive_int_env("SCAN_RESULTS_PER_TERM", 10),
+                "terms": [],
+            }
+            configs_by_id[search_config_id] = config
+            ordered_configs.append(config)
+        if row["term"]:
+            config["terms"].append(str(row["term"]).strip())
+
+    return ordered_configs
+
+
+def upsert_profile_jobs(profile_jobs_df: pd.DataFrame) -> int:
+    """Create or refresh profile-job links without resetting fit state."""
+    if profile_jobs_df is None or profile_jobs_df.empty:
+        return 0
+
+    init_db()
+
+    link_df = _ensure_columns(profile_jobs_df, PROFILE_JOB_COLUMNS)[
+        PROFILE_JOB_COLUMNS
+    ].copy()
+    link_df = link_df.dropna(subset=["profile_id", "job_id"])
+    if link_df.empty:
+        return 0
+
+    link_df["profile_id"] = link_df["profile_id"].astype(int)
+    link_df["job_id"] = link_df["job_id"].astype(str)
+    link_df["matched_term"] = (
+        link_df["matched_term"].fillna("").astype(str).str.strip().replace({"": None})
+    )
+    link_df = link_df.drop_duplicates(subset=["profile_id", "job_id"], keep="first")
+    safe_link_df = link_df.astype(object).where(pd.notna(link_df), None)
+    records = list(safe_link_df.itertuples(index=False, name=None))
+
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO profile_jobs (
+                    profile_id,
+                    job_id,
+                    search_config_id,
+                    matched_term,
+                    discovered_at,
+                    last_seen_at
+                )
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT(profile_id, job_id) DO UPDATE SET
+                    search_config_id = COALESCE(EXCLUDED.search_config_id, profile_jobs.search_config_id),
+                    matched_term = COALESCE(
+                        NULLIF(BTRIM(EXCLUDED.matched_term), ''),
+                        profile_jobs.matched_term
+                    ),
+                    last_seen_at = CURRENT_TIMESTAMP
+                """,
+                records,
+            )
+
+    return len(records)
+
+
 def enqueue_jd_requests(jobs_df: pd.DataFrame):
-    """Upsert pending JD requests for OpenClaw worker."""
+    """Upsert pending JD requests for the LinkedIn jobPosting API worker."""
     if jobs_df is None or jobs_df.empty:
         return 0
 
@@ -249,43 +1131,45 @@ def enqueue_jd_requests(jobs_df: pd.DataFrame):
 
 
 def enqueue_fitting_requests(jobs_df: pd.DataFrame):
-    """Mark jobs as pending for one-time fitting at job level."""
+    """Mark profile jobs as pending for one-time fitting."""
     if jobs_df is None or jobs_df.empty:
         return 0
 
     init_db()
 
-    if "id" not in jobs_df.columns:
+    if "profile_id" not in jobs_df.columns or "job_id" not in jobs_df.columns:
         return 0
 
-    filtered_df = jobs_df.copy()
-    if "description" in filtered_df.columns:
-        filtered_df = filtered_df[filtered_df["description"].notna()]
-
+    filtered_df = jobs_df[["profile_id", "job_id"]].copy().dropna()
     if filtered_df.empty:
         return 0
 
-    job_ids = filtered_df["id"].astype(str).unique().tolist()
+    filtered_df["profile_id"] = filtered_df["profile_id"].astype(int)
+    filtered_df["job_id"] = filtered_df["job_id"].astype(str)
+    records = list(filtered_df.drop_duplicates().itertuples(index=False, name=None))
 
     with _connect() as conn:
         with conn.cursor() as cursor:
             queued = 0
-            for job_id in job_ids:
+            for profile_id, job_id in records:
                 cursor.execute(
                     """
-                    UPDATE jobs
+                    UPDATE profile_jobs pj
                     SET fit_status = 'pending_fit',
                         fit_updated_at = CURRENT_TIMESTAMP,
                         fit_last_error = NULL,
-                        fit_attempts = COALESCE(fit_attempts, 0)
-                    WHERE id = %s
-                      AND description IS NOT NULL
-                      AND llm_match IS NULL
-                      AND COALESCE(fit_status, '') NOT IN (
-                          'pending_fit', 'fitting', 'fit_done', 'notified', 'fit_failed', 'notify_failed'
-                      )
+                        fit_attempts = COALESCE(pj.fit_attempts, 0)
+                    FROM jobs j
+                    WHERE pj.profile_id = %s
+                      AND pj.job_id = %s
+                      AND j.id = pj.job_id
+                      AND j.description IS NOT NULL
+                      AND pj.llm_match IS NULL
+                      AND COALESCE(pj.fit_status, '') NOT IN (
+                           'pending_fit', 'fitting', 'fit_done', 'notified', 'fit_failed', 'notify_failed'
+                       )
                     """,
-                    (job_id,),
+                    (profile_id, job_id),
                 )
                 queued += cursor.rowcount
 
@@ -294,25 +1178,28 @@ def enqueue_fitting_requests(jobs_df: pd.DataFrame):
 
 def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     """Atomically claim pending fitting tasks for processing."""
-    init_db()
+    sync_profiles_from_source()
     stale_minutes = _get_positive_int_env("FITTING_CLAIM_STALE_MINUTES", 30)
 
     select_query = """
-        SELECT id AS job_id, COALESCE(fit_attempts, 0) AS attempts
-        FROM jobs
+        SELECT pj.profile_id, pj.job_id, COALESCE(pj.fit_attempts, 0) AS attempts
+        FROM profile_jobs pj
+        JOIN jobs j ON j.id = pj.job_id
+        JOIN profiles p ON p.id = pj.profile_id
         WHERE (
-                fit_status = 'pending_fit'
+                pj.fit_status = 'pending_fit'
                 OR (
-                    fit_status = 'fitting'
+                    pj.fit_status = 'fitting'
                     AND COALESCE(
-                        fit_updated_at,
+                        pj.fit_updated_at,
                         TIMESTAMP '1970-01-01 00:00:00'
                     ) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
                 )
               )
-          AND description IS NOT NULL
-          AND llm_match IS NULL
-        ORDER BY COALESCE(fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC
+          AND p.is_active = TRUE
+          AND j.description IS NOT NULL
+          AND pj.llm_match IS NULL
+        ORDER BY COALESCE(pj.fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC
         FOR UPDATE SKIP LOCKED
     """
     params: List[Any] = [stale_minutes]
@@ -330,18 +1217,26 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
 
                 cursor.executemany(
                     """
-                    UPDATE jobs
+                    UPDATE profile_jobs
                     SET fit_status = 'fitting',
                         fit_updated_at = CURRENT_TIMESTAMP
-                    WHERE id = %s
+                    WHERE profile_id = %s
+                      AND job_id = %s
                     """,
-                    [(row["job_id"],) for row in rows],
+                    [(row["profile_id"], row["job_id"]) for row in rows],
                 )
 
-    return [{"job_id": row["job_id"], "attempts": row["attempts"]} for row in rows]
+    return [
+        {
+            "profile_id": row["profile_id"],
+            "job_id": row["job_id"],
+            "attempts": row["attempts"],
+        }
+        for row in rows
+    ]
 
 
-def mark_fitting_done(job_id: str):
+def mark_fitting_done(profile_id: int, job_id: str):
     """Mark fitting task as completed."""
     init_db()
 
@@ -349,17 +1244,19 @@ def mark_fitting_done(job_id: str):
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                UPDATE jobs
+                UPDATE profile_jobs
                 SET fit_status = 'fit_done',
                     fit_updated_at = CURRENT_TIMESTAMP,
                     fit_last_error = NULL
-                WHERE id = %s
+                WHERE profile_id = %s
+                  AND job_id = %s
                 """,
-                (job_id,),
+                (profile_id, job_id),
             )
 
 
 def mark_fitting_failed(
+    profile_id: int,
     job_id: str,
     error: str = "",
     retry: bool = True,
@@ -372,18 +1269,19 @@ def mark_fitting_failed(
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                UPDATE jobs
+                UPDATE profile_jobs
                 SET fit_status = %s,
                     fit_attempts = COALESCE(fit_attempts, 0) + 1,
                     fit_last_error = %s,
                     fit_updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
+                WHERE profile_id = %s
+                  AND job_id = %s
                 """,
-                (status, error, job_id),
+                (status, error, profile_id, job_id),
             )
 
 
-def requeue_fitting_task(job_id: str, error: str = ""):
+def requeue_fitting_task(profile_id: int, job_id: str, error: str = ""):
     """Return an unprocessed fitting task to pending without spending an attempt."""
     init_db()
 
@@ -391,14 +1289,15 @@ def requeue_fitting_task(job_id: str, error: str = ""):
         with conn.cursor() as cursor:
             cursor.execute(
                 """
-                UPDATE jobs
+                UPDATE profile_jobs
                 SET fit_status = 'pending_fit',
                     llm_match_error = NULL,
                     fit_last_error = %s,
                     fit_updated_at = CURRENT_TIMESTAMP
-                WHERE id = %s
+                WHERE profile_id = %s
+                  AND job_id = %s
                 """,
-                (error, job_id),
+                (error, profile_id, job_id),
             )
 
 
@@ -541,22 +1440,25 @@ def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def get_jobs_ready_for_fitting() -> pd.DataFrame:
-    """Fetch jobs that already have JD and still need to enter fitting."""
-    init_db()
+def get_profile_jobs_ready_for_fitting() -> pd.DataFrame:
+    """Fetch profile jobs that already have JD and still need to enter fitting."""
+    sync_profiles_from_source()
 
     query = """
-        SELECT id
-        FROM jobs
-        WHERE description IS NOT NULL
-          AND llm_match IS NULL
-          AND COALESCE(fit_status, '') NOT IN (
+        SELECT pj.profile_id, pj.job_id
+        FROM profile_jobs pj
+        JOIN jobs j ON j.id = pj.job_id
+        JOIN profiles p ON p.id = pj.profile_id
+        WHERE j.description IS NOT NULL
+          AND p.is_active = TRUE
+          AND pj.llm_match IS NULL
+          AND COALESCE(pj.fit_status, '') NOT IN (
                 'pending_fit', 'fitting', 'fit_done', 'notified', 'fit_failed', 'notify_failed'
               )
         ORDER BY
-            COALESCE(fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC,
-            COALESCE(batch_id, 0) DESC,
-            id ASC
+            COALESCE(pj.fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC,
+            pj.profile_id ASC,
+            pj.job_id ASC
     """
 
     with _connect(row_factory=dict_row) as conn:
@@ -567,86 +1469,144 @@ def get_jobs_ready_for_fitting() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def get_jobs_ready_for_fitting() -> pd.DataFrame:
+    """Compatibility wrapper for profile-based fitting queue selection."""
+    return get_profile_jobs_ready_for_fitting()
+
+
+def get_profiles_by_ids(profile_ids: List[int]) -> pd.DataFrame:
+    """Fetch profiles by id list."""
+    if not profile_ids:
+        return pd.DataFrame()
+    sync_profiles_from_source()
+
+    normalized_ids = [int(profile_id) for profile_id in profile_ids]
+    query = "SELECT * FROM profiles WHERE id = ANY(%s)"
+
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (normalized_ids,))
+            rows = cursor.fetchall()
+    return pd.DataFrame(rows)
+
+
 def save_llm_matches(jobs_df: pd.DataFrame):
-    """Persist LLM fit results back to jobs table."""
+    """Persist LLM fit results back to profile job rows."""
     if jobs_df is None or jobs_df.empty:
         return
 
     init_db()
 
     update_df = jobs_df.copy()
-    if "id" not in update_df.columns:
+    if "profile_id" not in update_df.columns or "job_id" not in update_df.columns:
         return
 
-    update_df = _ensure_columns(update_df, LLM_RESULT_COLUMNS)
+    update_df = _ensure_columns(update_df, PROFILE_JOB_RESULT_COLUMNS)
 
     records = []
-    for row in update_df[LLM_RESULT_COLUMNS].itertuples(index=False, name=None):
-        job_id, llm_match, llm_match_error = row
+    for row in update_df[PROFILE_JOB_RESULT_COLUMNS].itertuples(index=False, name=None):
+        profile_id, job_id, llm_match, llm_match_error = row
         fit_score, fit_decision = _extract_fit_fields(llm_match)
-        records.append((llm_match, llm_match_error, fit_score, fit_decision, job_id))
+        records.append(
+            (
+                llm_match,
+                llm_match_error,
+                fit_score,
+                fit_decision,
+                int(profile_id),
+                str(job_id),
+            )
+        )
 
     with _connect() as conn:
         with conn.cursor() as cursor:
             cursor.executemany(
                 """
-                UPDATE jobs
+                UPDATE profile_jobs
                 SET llm_match = %s,
                     llm_match_error = %s,
                     fit_score = %s,
                     fit_decision = %s
-                WHERE id = %s
+                WHERE profile_id = %s
+                  AND job_id = %s
                 """,
                 records,
             )
 
 
-def get_jobs_to_notify(limit: int = 10) -> pd.DataFrame:
-    """Get unnotified fit results that are ready to notify."""
-    init_db()
+def get_jobs_to_notify() -> pd.DataFrame:
+    """Get unnotified fit results that are ready to notify per profile."""
+    sync_profiles_from_source()
     query = """
-        SELECT *
-        FROM jobs
-        WHERE fit_decision IN ('Strong Fit', 'Moderate Fit')
-          AND notified_at IS NULL
-          AND fit_status IN ('fit_done', 'notify_failed')
-        ORDER BY batch_id DESC, fit_score DESC
-        LIMIT %s
+        SELECT
+            pj.profile_id,
+            p.profile_key,
+            p.display_name,
+            p.discord_channel_id,
+            p.discord_webhook_url,
+            p.model_name,
+            j.id,
+            j.title,
+            j.company,
+            j.job_url,
+            j.batch_id,
+            pj.fit_score,
+            pj.fit_decision,
+            pj.llm_match,
+            pj.notified_at,
+            pj.notify_status,
+            pj.notify_error,
+            pj.fit_status
+        FROM profile_jobs pj
+        JOIN jobs j ON j.id = pj.job_id
+        JOIN profiles p ON p.id = pj.profile_id
+        WHERE pj.fit_decision IN ('Strong Fit', 'Moderate Fit')
+          AND pj.notified_at IS NULL
+          AND pj.fit_status IN ('fit_done', 'notify_failed')
+          AND p.is_active = TRUE
+        ORDER BY pj.profile_id ASC, COALESCE(j.batch_id, 0) DESC, pj.fit_score DESC
     """
     with _connect(row_factory=dict_row) as conn:
         with conn.cursor() as cursor:
-            cursor.execute(query, (limit,))
+            cursor.execute(query)
             rows = cursor.fetchall()
     return pd.DataFrame(rows)
 
 
-def mark_job_notified(job_id: str, status: str = "sent", error: Optional[str] = None):
-    """Mark notification status for one job."""
+def mark_job_notified(
+    profile_id: int,
+    job_id: str,
+    status: str = "sent",
+    error: Optional[str] = None,
+):
+    """Mark notification status for one profile job."""
     init_db()
     with _connect() as conn:
         with conn.cursor() as cursor:
             if status == "sent":
                 cursor.execute(
                     """
-                    UPDATE jobs
+                    UPDATE profile_jobs
                     SET notified_at = CURRENT_TIMESTAMP,
                         notify_status = 'sent',
                         notify_error = NULL,
                         fit_status = 'notified'
-                    WHERE id = %s
+                    WHERE profile_id = %s
+                      AND job_id = %s
                     """,
-                    (job_id,),
+                    (profile_id, job_id),
                 )
             else:
                 cursor.execute(
                     """
-                    UPDATE jobs
+                    UPDATE profile_jobs
                     SET notify_status = %s,
                         notify_error = %s,
                         fit_status = 'notify_failed'
-                    WHERE id = %s
+                    WHERE profile_id = %s
+                      AND job_id = %s
                     """,
-                    (status, error, job_id),
+                    (status, error, profile_id, job_id),
                 )
 
 
@@ -655,7 +1615,7 @@ def save_jd_result(
     description: Optional[str] = None,
     description_error: Optional[str] = None,
 ):
-    """Persist one JD scrape result from OpenClaw worker."""
+    """Persist one JD fetch result from the LinkedIn jobPosting API worker."""
     init_db()
 
     with _connect() as conn:

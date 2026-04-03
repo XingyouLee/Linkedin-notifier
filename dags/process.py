@@ -33,17 +33,17 @@ SCAN_JOB_ID_RE = re.compile(r"-(\d+)\?")
 SCAN_ITEM_RE = re.compile(r"<li>(.*?)</li>", re.S)
 
 
-def _resolve_scan_terms(search_term: str, search_terms) -> list[str]:
-    env_terms = os.getenv("SCAN_SEARCH_TERMS", "")
-    terms_input = search_terms if search_terms is not None else env_terms
-    if isinstance(terms_input, str):
-        terms = [t.strip() for t in terms_input.split(",") if t.strip()]
-    else:
-        terms = [str(t).strip() for t in (terms_input or []) if str(t).strip()]
-    return terms or [search_term]
+def _get_nonnegative_int_env(var_name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(var_name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
 
 
-def _build_scan_config(results_wanted: int, hours_old: int) -> dict:
+def _build_scan_config(
+    results_wanted: int, hours_old: int, distance: int | None = None
+) -> dict:
     return {
         "request_page_size": int(os.getenv("SCAN_REQUEST_PAGE_SIZE", "10")),
         "http_max_retries": max(0, int(os.getenv("SCAN_HTTP_MAX_RETRIES", "6"))),
@@ -56,11 +56,14 @@ def _build_scan_config(results_wanted: int, hours_old: int) -> dict:
             os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0")
         ),
         "request_timeout_sec": int(os.getenv("SCAN_REQUEST_TIMEOUT_SEC", "45")),
-        "results_per_term": int(
-            os.getenv("SCAN_RESULTS_PER_TERM", str(results_wanted))
+        "results_per_term": _get_nonnegative_int_env(
+            "SCAN_RESULTS_PER_TERM",
+            int(results_wanted),
         ),
-        "hours_old": int(os.getenv("SCAN_HOURS_OLD", str(hours_old))),
-        "distance": int(os.getenv("SCAN_DISTANCE", "25")),
+        "hours_old": int(hours_old),
+        "distance": int(
+            distance if distance is not None else os.getenv("SCAN_DISTANCE", "25")
+        ),
     }
 
 
@@ -84,9 +87,8 @@ def _build_scan_params(
     term: str,
     start: int,
     *,
+    location: str | None,
     distance: int,
-    location: str,
-    geo_id: str,
     hours_old: int,
 ) -> dict:
     params = {
@@ -95,9 +97,7 @@ def _build_scan_params(
         "start": str(start),
     }
     if location:
-        params["location"] = location
-    if geo_id:
-        params["geoId"] = str(geo_id)
+        params["location"] = str(location).strip()
     if hours_old > 0:
         params["f_TPR"] = f"r{hours_old * 3600}"
     return params
@@ -134,8 +134,6 @@ def _scan_fetch_page(
     term: str,
     start: int,
     *,
-    location: str,
-    geo_id: str,
     scan_config: dict,
 ) -> list[dict]:
     for attempt in range(scan_config["http_max_retries"] + 1):
@@ -145,9 +143,8 @@ def _scan_fetch_page(
                 params=_build_scan_params(
                     term=term,
                     start=start,
+                    location=scan_config.get("location"),
                     distance=scan_config["distance"],
-                    location=location,
-                    geo_id=geo_id,
                     hours_old=scan_config["hours_old"],
                 ),
                 timeout=scan_config["request_timeout_sec"],
@@ -213,8 +210,6 @@ def _scan_one_term(
     term: str,
     target_count: int,
     *,
-    location: str,
-    geo_id: str,
     scan_config: dict,
 ) -> list[dict]:
     import math
@@ -230,8 +225,6 @@ def _scan_one_term(
             session=session,
             term=term,
             start=start,
-            location=location,
-            geo_id=geo_id,
             scan_config=scan_config,
         )
         request_count += 1
@@ -275,31 +268,72 @@ def _scan_one_term(
     return term_rows
 
 
-def _collect_scan_rows(
-    terms: list[str],
-    *,
-    location: str,
-    geo_id: str,
-    scan_config: dict,
-) -> list[dict]:
+def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
     all_rows = []
     with requests.Session() as session:
-        for idx, term in enumerate(terms):
-            all_rows.extend(
-                _scan_one_term(
+        for config_index, search_config in enumerate(search_configs):
+            terms = [term for term in (search_config.get("terms") or []) if term]
+            if not terms:
+                continue
+            results_per_term = search_config.get("results_per_term")
+            if results_per_term is None:
+                raise ValueError(
+                    "search_config.results_per_term is required for "
+                    f"profile={profile_label} config={search_config.get('search_config_name')}"
+                )
+            scan_config = _build_scan_config(
+                results_wanted=results_per_term,
+                hours_old=search_config.get("hours_old") or 168,
+                distance=search_config.get("distance") or 25,
+            )
+            scan_config["location"] = search_config.get("location") or "Netherlands"
+            profile_label = (
+                search_config.get("profile_key")
+                or search_config.get("display_name")
+                or search_config.get("profile_id")
+            )
+
+            print(
+                f"Scanning profile={profile_label} config={search_config.get('search_config_name')} "
+                f"terms={terms} location={scan_config['location']} hours_old={scan_config['hours_old']} "
+                f"results_per_term={scan_config['results_per_term']} distance={scan_config['distance']}"
+            )
+
+            if scan_config["results_per_term"] <= 0:
+                print(
+                    f"Skipping scan for profile={profile_label} "
+                    f"config={search_config.get('search_config_name')} because "
+                    "results_per_term=0"
+                )
+                continue
+
+            for term_index, term in enumerate(terms):
+                term_rows = _scan_one_term(
                     session=session,
                     term=term,
-                    target_count=max(1, scan_config["results_per_term"]),
-                    location=location,
-                    geo_id=geo_id,
+                    target_count=scan_config["results_per_term"],
                     scan_config=scan_config,
                 )
-            )
-            if idx < len(terms) - 1 and scan_config["between_terms_delay_sec"] > 0:
-                print(
-                    f"term={term} done, "
-                    f"cooldown_before_next_term={scan_config['between_terms_delay_sec']:.1f}s"
-                )
+                for row in term_rows:
+                    row["profile_id"] = search_config.get("profile_id")
+                    row["search_config_id"] = search_config.get("search_config_id")
+                    row["search_term"] = term
+                all_rows.extend(term_rows)
+
+                if (
+                    term_index < len(terms) - 1
+                    and scan_config["between_terms_delay_sec"] > 0
+                ):
+                    print(
+                        f"profile={profile_label} term={term} done, "
+                        f"cooldown_before_next_term={scan_config['between_terms_delay_sec']:.1f}s"
+                    )
+                    time.sleep(scan_config["between_terms_delay_sec"])
+
+            if (
+                config_index < len(search_configs) - 1
+                and scan_config["between_terms_delay_sec"] > 0
+            ):
                 time.sleep(scan_config["between_terms_delay_sec"])
     return all_rows
 
@@ -342,6 +376,18 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
                 jobs_df.get(
                     "search_term", pd.Series(index=jobs_df.index, dtype="object")
                 )
+            ),
+            "profile_id": pd.to_numeric(
+                jobs_df.get(
+                    "profile_id", pd.Series(index=jobs_df.index, dtype="object")
+                ),
+                errors="coerce",
+            ),
+            "search_config_id": pd.to_numeric(
+                jobs_df.get(
+                    "search_config_id", pd.Series(index=jobs_df.index, dtype="object")
+                ),
+                errors="coerce",
             ),
         }
     )
@@ -401,11 +447,35 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
 
     database.save_jobs(deduped_df[["id", "site", "job_url", "title", "company"]])
 
+    profile_job_df = (
+        normalized_df[["profile_id", "search_config_id", "id", "search_term"]]
+        .dropna(subset=["profile_id", "id"])
+        .sort_values(by=["profile_id", "id", "search_config_id"])
+        .drop_duplicates(subset=["profile_id", "id"], keep="first")
+        .rename(columns={"id": "job_id", "search_term": "matched_term"})
+        .reset_index(drop=True)
+    )
+    if not profile_job_df.empty:
+        profile_job_df["profile_id"] = profile_job_df["profile_id"].astype(int)
+        if profile_job_df["search_config_id"].notna().any():
+            profile_job_df["search_config_id"] = profile_job_df[
+                "search_config_id"
+            ].astype("Int64")
+    linked_count = database.upsert_profile_jobs(profile_job_df)
+
+    per_profile_stats = (
+        profile_job_df.groupby("profile_id")["job_id"].nunique().to_dict()
+        if not profile_job_df.empty
+        else {}
+    )
+    print(f"Per-profile discovered job stats: {per_profile_stats}")
+
     return {
         "scanned_raw": raw_count,
         "scanned_unique": unique_count,
         "scanned_duplicates": duplicate_count,
         "scanned_invalid_ids": invalid_id_count,
+        "profile_job_links": linked_count,
     }
 
 
@@ -419,42 +489,47 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
 )
 def linkedin_notifier():
     @task
-    def scan_and_save_jobs(
-        search_term="Data Engineer",
-        search_terms=None,
-        location="Netherlands",
-        geo_id="102890719",
-        hours_old=168,
-        results_wanted=10,
-    ):
-        """Scrape LinkedIn jobs via guest API logic and save unique rows."""
-        terms = _resolve_scan_terms(search_term, search_terms)
-        scan_config = _build_scan_config(
-            results_wanted=results_wanted, hours_old=hours_old
-        )
+    def scan_and_save_jobs():
+        """Scrape LinkedIn jobs for every active profile search config."""
+        search_configs = database.get_active_search_configs()
+        if not search_configs:
+            print("No active profile search configs found. Skip scan stage.")
+            return {
+                "scanned_raw": 0,
+                "scanned_unique": 0,
+                "search_configs": 0,
+                "profiles": 0,
+            }
 
+        profile_count = len({config["profile_id"] for config in search_configs})
         print(
-            f"Scanning LinkedIn jobs: source=scripts_guest_api, terms={terms}, location={location}, "
-            f"hours_old={scan_config['hours_old']}, results_per_term={scan_config['results_per_term']}, "
-            f"distance={scan_config['distance']}"
+            f"Scanning LinkedIn jobs for {profile_count} profiles across "
+            f"{len(search_configs)} active search configs."
         )
 
-        all_rows = _collect_scan_rows(
-            terms=terms,
-            location=location,
-            geo_id=geo_id,
-            scan_config=scan_config,
-        )
+        all_rows = _collect_scan_rows(search_configs)
 
         if not all_rows:
             print("No jobs returned by scripts scraper.")
-            return {"scanned_raw": 0, "scanned_unique": 0}
+            return {
+                "scanned_raw": 0,
+                "scanned_unique": 0,
+                "search_configs": len(search_configs),
+                "profiles": profile_count,
+            }
 
         scan_stats = _normalize_and_save_scan_rows(all_rows)
+        print(
+            "Scan stage progress: "
+            f"done={scan_stats.get('scanned_unique', 0)} "
+            f"total={scan_stats.get('scanned_unique', 0)} "
+            f"profile_job_links={scan_stats.get('profile_job_links', 0)}"
+        )
 
         return {
-            "terms": terms,
             "scan_source": "scripts_guest_api",
+            "search_configs": len(search_configs),
+            "profiles": profile_count,
             **scan_stats,
         }
 
@@ -531,10 +606,10 @@ def linkedin_notifier():
 
     @task(task_id="run_jd_worker")
     def run_jd_worker(job_ids, worker_batch_size=5, max_loops=20, idle_loop_limit=2):
-        import asyncio
         import math
         import time
-        from dags.jd_playwright_worker import run_once
+
+        from dags.jd_api_worker import run_once
 
         job_ids = job_ids or []
         if not job_ids:
@@ -574,13 +649,21 @@ def linkedin_notifier():
                 f"JD queue progress(before): done={done_count}, failed={failed_count}, "
                 f"pending={pending_count}, total={total}"
             )
+            print(
+                "JD stage progress: "
+                f"done={done_count + failed_count} total={total} "
+                f"successful={done_count} failed={failed_count} in_progress={pending_count}"
+            )
 
             if pending_count <= 0:
                 break
 
-            processed = asyncio.run(
-                run_once(limit=worker_batch_size, job_ids=job_ids)
-            )
+            # Legacy Playwright worker kept for fallback debugging only:
+            # from dags.jd_playwright_worker import run_once as playwright_run_once
+            # processed = asyncio.run(
+            #     playwright_run_once(limit=worker_batch_size, job_ids=job_ids)
+            # )
+            processed = run_once(limit=worker_batch_size, job_ids=job_ids)
             total_processed += processed
 
             if processed == 0:
@@ -603,6 +686,11 @@ def linkedin_notifier():
             "pending": pending_count,
             "total": total,
         }
+        print(
+            "JD stage final progress: "
+            f"done={done_count + failed_count} total={total} "
+            f"successful={done_count} failed={failed_count} remaining={pending_count}"
+        )
 
         if pending_count > 0:
             raise RuntimeError(
@@ -615,17 +703,17 @@ def linkedin_notifier():
 
     @task
     def enqueue_fitting_tasks():
-        jobs_df = database.get_jobs_ready_for_fitting()
+        jobs_df = database.get_profile_jobs_ready_for_fitting()
         if jobs_df is None or jobs_df.empty:
             return {"queued": 0}
 
         queued = database.enqueue_fitting_requests(jobs_df)
         print(f"Queued {queued} fitting requests")
+        print(f"Fitting stage progress: done=0 total={queued} queued={queued}")
         return {"queued": queued}
 
     # Pipeline wiring (all task calls at bottom)
-    results_wanted = int(os.getenv("SCAN_RESULTS_WANTED", "10"))
-    scan_meta = scan_and_save_jobs(results_wanted=results_wanted)
+    scan_meta = scan_and_save_jobs()
 
     filtered_job_records = filter_jobs()
     scan_meta >> filtered_job_records

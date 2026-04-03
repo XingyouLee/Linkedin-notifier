@@ -12,3 +12,15 @@ airflow.cfg
 airflow.db
 .idea/
 test.ipynb
+.codex_tmp/
+.playwright-mcp/
+.pytest_cache/
+.ruff_cache/
+apps/**/.build/
+apps/**/.swiftpm/
+apps/**/dist/
+apps/**/DerivedData/
+apps/**/xcuserdata/
+apps/**/*.app/
+apps/**/Products/
+apps/**/LinkedinNotifierApp */
