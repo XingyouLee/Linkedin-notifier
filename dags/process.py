@@ -33,6 +33,14 @@ SCAN_JOB_ID_RE = re.compile(r"-(\d+)\?")
 SCAN_ITEM_RE = re.compile(r"<li>(.*?)</li>", re.S)
 
 
+def _get_nonnegative_int_env(var_name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(var_name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(0, value)
+
+
 def _build_scan_config(
     results_wanted: int, hours_old: int, distance: int | None = None
 ) -> dict:
@@ -48,8 +56,9 @@ def _build_scan_config(
             os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0")
         ),
         "request_timeout_sec": int(os.getenv("SCAN_REQUEST_TIMEOUT_SEC", "45")),
-        "results_per_term": int(
-            os.getenv("SCAN_RESULTS_PER_TERM", str(max(1, int(results_wanted))))
+        "results_per_term": _get_nonnegative_int_env(
+            "SCAN_RESULTS_PER_TERM",
+            int(results_wanted),
         ),
         "hours_old": int(hours_old),
         "distance": int(
@@ -266,8 +275,14 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
             terms = [term for term in (search_config.get("terms") or []) if term]
             if not terms:
                 continue
+            results_per_term = search_config.get("results_per_term")
+            if results_per_term is None:
+                raise ValueError(
+                    "search_config.results_per_term is required for "
+                    f"profile={profile_label} config={search_config.get('search_config_name')}"
+                )
             scan_config = _build_scan_config(
-                results_wanted=search_config.get("results_per_term") or 10,
+                results_wanted=results_per_term,
                 hours_old=search_config.get("hours_old") or 168,
                 distance=search_config.get("distance") or 25,
             )
@@ -284,11 +299,19 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                 f"results_per_term={scan_config['results_per_term']} distance={scan_config['distance']}"
             )
 
+            if scan_config["results_per_term"] <= 0:
+                print(
+                    f"Skipping scan for profile={profile_label} "
+                    f"config={search_config.get('search_config_name')} because "
+                    "results_per_term=0"
+                )
+                continue
+
             for term_index, term in enumerate(terms):
                 term_rows = _scan_one_term(
                     session=session,
                     term=term,
-                    target_count=max(1, scan_config["results_per_term"]),
+                    target_count=scan_config["results_per_term"],
                     scan_config=scan_config,
                 )
                 for row in term_rows:
@@ -496,6 +519,12 @@ def linkedin_notifier():
             }
 
         scan_stats = _normalize_and_save_scan_rows(all_rows)
+        print(
+            "Scan stage progress: "
+            f"done={scan_stats.get('scanned_unique', 0)} "
+            f"total={scan_stats.get('scanned_unique', 0)} "
+            f"profile_job_links={scan_stats.get('profile_job_links', 0)}"
+        )
 
         return {
             "scan_source": "scripts_guest_api",
@@ -620,6 +649,11 @@ def linkedin_notifier():
                 f"JD queue progress(before): done={done_count}, failed={failed_count}, "
                 f"pending={pending_count}, total={total}"
             )
+            print(
+                "JD stage progress: "
+                f"done={done_count + failed_count} total={total} "
+                f"successful={done_count} failed={failed_count} in_progress={pending_count}"
+            )
 
             if pending_count <= 0:
                 break
@@ -652,6 +686,11 @@ def linkedin_notifier():
             "pending": pending_count,
             "total": total,
         }
+        print(
+            "JD stage final progress: "
+            f"done={done_count + failed_count} total={total} "
+            f"successful={done_count} failed={failed_count} remaining={pending_count}"
+        )
 
         if pending_count > 0:
             raise RuntimeError(
@@ -670,6 +709,7 @@ def linkedin_notifier():
 
         queued = database.enqueue_fitting_requests(jobs_df)
         print(f"Queued {queued} fitting requests")
+        print(f"Fitting stage progress: done=0 total={queued} queued={queued}")
         return {"queued": queued}
 
     # Pipeline wiring (all task calls at bottom)

@@ -78,6 +78,14 @@ def _get_positive_int_env(var_name: str, default: int) -> int:
     return max(1, value)
 
 
+def _coerce_nonnegative_int(value, default: int) -> int:
+    try:
+        coerced = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, coerced)
+
+
 def _resolve_db_url() -> str:
     env_db_url = os.getenv("JOBS_DB_URL")
     if env_db_url:
@@ -309,6 +317,13 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
             terms = _parse_terms(search_config.get("terms"))
             if not terms:
                 continue
+            if "results_per_term" not in search_config or search_config.get(
+                "results_per_term"
+            ) is None:
+                raise ValueError(
+                    "search_config.results_per_term is required for "
+                    f"profile={profile_key} config={config_name}"
+                )
             search_configs.append(
                 {
                     "name": config_name,
@@ -318,8 +333,9 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
                     or "Netherlands",
                     "distance": int(search_config.get("distance") or 25),
                     "hours_old": int(search_config.get("hours_old") or 168),
-                    "results_per_term": int(
-                        search_config.get("results_per_term") or 10
+                    "results_per_term": _coerce_nonnegative_int(
+                        search_config.get("results_per_term"),
+                        10,
                     ),
                     "is_active": _coerce_bool(
                         search_config.get("active")
@@ -1009,11 +1025,14 @@ def get_active_search_configs() -> list[dict[str, Any]]:
                 "location": row["location"]
                 or os.getenv("SCAN_LOCATION", "Netherlands"),
                 "distance": row["distance"]
-                or _get_positive_int_env("SCAN_DISTANCE", 25),
+                if row["distance"] is not None
+                else _get_positive_int_env("SCAN_DISTANCE", 25),
                 "hours_old": row["hours_old"]
-                or _get_positive_int_env("SCAN_HOURS_OLD", 168),
+                if row["hours_old"] is not None
+                else _get_positive_int_env("SCAN_HOURS_OLD", 168),
                 "results_per_term": row["results_per_term"]
-                or _get_positive_int_env("SCAN_RESULTS_PER_TERM", 10),
+                if row["results_per_term"] is not None
+                else _get_positive_int_env("SCAN_RESULTS_PER_TERM", 10),
                 "terms": [],
             }
             configs_by_id[search_config_id] = config

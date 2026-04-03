@@ -100,6 +100,104 @@ def test_save_jobs_performs_upsert(monkeypatch):
     )
 
 
+def test_coerce_profile_configs_preserves_zero_results_per_term():
+    profiles = database._coerce_profile_configs(
+        [
+            {
+                "profile_key": "zero-scan",
+                "search_configs": [
+                    {
+                        "name": "default",
+                        "location": "Netherlands",
+                        "distance": 25,
+                        "hours_old": 24,
+                        "results_per_term": 0,
+                        "terms": ["data engineer"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert profiles[0]["search_configs"][0]["results_per_term"] == 0
+
+
+def test_coerce_profile_configs_requires_results_per_term():
+    try:
+        database._coerce_profile_configs(
+            [
+                {
+                    "profile_key": "missing-results",
+                    "search_configs": [
+                        {
+                            "name": "default",
+                            "location": "Netherlands",
+                            "distance": 25,
+                            "hours_old": 24,
+                            "terms": ["data engineer"],
+                        }
+                    ],
+                }
+            ]
+        )
+        assert False, "Expected ValueError for missing results_per_term"
+    except ValueError as error:
+        assert "results_per_term is required" in str(error)
+
+
+def test_coerce_profile_configs_rejects_none_results_per_term():
+    try:
+        database._coerce_profile_configs(
+            [
+                {
+                    "profile_key": "none-results",
+                    "search_configs": [
+                        {
+                            "name": "default",
+                            "location": "Netherlands",
+                            "distance": 25,
+                            "hours_old": 24,
+                            "results_per_term": None,
+                            "terms": ["data engineer"],
+                        }
+                    ],
+                }
+            ]
+        )
+        assert False, "Expected ValueError for None results_per_term"
+    except ValueError as error:
+        assert "results_per_term is required" in str(error)
+
+
+def test_get_active_search_configs_preserves_zero_results_per_term(monkeypatch):
+    cursor = DummyCursor()
+    cursor._rows = [
+        {
+            "profile_id": 1,
+            "profile_key": "zero-scan",
+            "display_name": "Zero Scan",
+            "resume_path": None,
+            "resume_text": None,
+            "discord_channel_id": None,
+            "discord_webhook_url": None,
+            "model_name": "gpt-5.4",
+            "search_config_id": 10,
+            "search_config_name": "default",
+            "location": "Netherlands",
+            "distance": 25,
+            "hours_old": 24,
+            "results_per_term": 0,
+            "term": "data engineer",
+        }
+    ]
+    _patch_connect(monkeypatch, cursor)
+
+    configs = database.get_active_search_configs()
+
+    assert len(configs) == 1
+    assert configs[0]["results_per_term"] == 0
+
+
 def test_claim_pending_fitting_tasks_only_reclaims_stale_fitting(monkeypatch):
     cursor = DummyCursor()
     cursor._rows = [{"profile_id": 7, "job_id": "10", "attempts": 0}]
@@ -174,26 +272,43 @@ def test_jd_api_run_once_forwards_job_ids_to_claim_api(monkeypatch):
     assert captured == {"limit": 3, "job_ids": ["a", "b"]}
 
 
-def test_jd_api_extract_description_prefers_description_markup():
+def test_jd_api_extract_description_reads_description_rich_block():
     html = """
-    <div class="jobs-description">
-      <section>
-        <div>
-          <p>Build resilient Python data pipelines for analytics and machine learning workflows.</p>
-        </div>
-      </section>
+    <div class="description__text description__text--rich">
+      <p>Build resilient Python data pipelines for analytics and machine learning workflows.</p>
     </div>
+    <ul class="description__job-criteria-list">
+      <li>Seniority level Associate</li>
+      <li>Employment type Full-time</li>
+    </ul>
     """
 
     extracted = jd_api_worker.extract_description(html)
 
     assert extracted is not None
     assert "Python data pipelines" in extracted
+    assert "Seniority level Associate" in extracted
+
+
+def test_jd_api_extract_description_reads_job_criteria_when_description_missing():
+    html = """
+    <ul class="description__job-criteria-list">
+      <li>Seniority level Associate</li>
+      <li>Employment type Full-time</li>
+      <li>Job function Information Technology</li>
+    </ul>
+    """
+
+    extracted = jd_api_worker.extract_description(html)
+
+    assert extracted is not None
+    assert "Seniority level Associate" in extracted
+    assert "Job function Information Technology" in extracted
 
 
 def test_jd_api_extract_description_keeps_nested_div_text():
     html = """
-    <div class="show-more-less-html__markup">
+    <div class="description__text description__text--rich">
       <div>
         <p>Line one about backend services and data pipelines.</p>
       </div>
@@ -208,6 +323,31 @@ def test_jd_api_extract_description_keeps_nested_div_text():
     assert extracted is not None
     assert "backend services and data pipelines" in extracted
     assert "PostgreSQL, Python, and production APIs" in extracted
+
+
+def test_jd_api_extract_description_combines_description_and_criteria():
+    html = """
+    <div class="description__text description__text--rich">
+      <p><strong>Achter elke succesvolle collectie staat data die klopt.</strong></p>
+      <p>Als Product Data Quality Specialist ben je verantwoordelijk voor de kwaliteit, volledigheid en actualiteit van onze productdata.</p>
+      <p><strong>Wat ga je doen?</strong></p>
+      <ul>
+        <li>Je beheert, verrijkt en optimaliseert productdata.</li>
+        <li>Je onderzoekt structurele oorzaken van datakwaliteitsproblemen.</li>
+      </ul>
+    </div>
+    <ul class="description__job-criteria-list">
+      <li class="description__job-criteria-item">Seniority level Associate</li>
+      <li class="description__job-criteria-item">Employment type Part-time</li>
+    </ul>
+    """
+
+    extracted = jd_api_worker.extract_description(html)
+
+    assert extracted is not None
+    assert "Product Data Quality Specialist" in extracted
+    assert "optimaliseert productdata" in extracted
+    assert "Seniority level Associate" in extracted
 
 
 def test_normalize_fit_prompt_text_appends_placeholders_when_missing():

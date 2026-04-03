@@ -8,6 +8,16 @@ final class ProjectService: Sendable {
     }
 
     func refreshEnvironment(projectPath: String) async -> EnvironmentSnapshot {
+        let status = await refreshEnvironmentStatus(projectPath: projectPath)
+        guard status.astroRunning else {
+            return status
+        }
+
+        let summaryResult = await refreshEnvironmentSummary(projectPath: projectPath)
+        return status.withSummary(summaryResult.summary, lastError: summaryResult.lastError)
+    }
+
+    func refreshEnvironmentStatus(projectPath: String) async -> EnvironmentSnapshot {
         let dockerRunning = await isDockerRunning()
         guard dockerRunning else {
             return .empty
@@ -19,21 +29,6 @@ final class ProjectService: Sendable {
         let postgres = await containerName(projectPath: projectPath, service: "postgres")
         let astroRunning = scheduler != nil
 
-        let summary: SummaryPayload?
-        let lastError: String?
-        if astroRunning {
-            do {
-                summary = try await loadSummary(projectPath: projectPath)
-                lastError = nil
-            } catch {
-                summary = nil
-                lastError = error.localizedDescription
-            }
-        } else {
-            summary = nil
-            lastError = nil
-        }
-
         return EnvironmentSnapshot(
             dockerRunning: dockerRunning,
             astroRunning: astroRunning,
@@ -41,9 +36,22 @@ final class ProjectService: Sendable {
             apiServerContainer: apiServer,
             postgresContainer: postgres,
             containers: containers,
-            summary: summary,
-            lastError: lastError
+            summary: nil,
+            lastError: nil
         )
+    }
+
+    func refreshEnvironmentSummary(projectPath: String) async -> (summary: SummaryPayload?, lastError: String?) {
+        guard await containerName(projectPath: projectPath, service: "scheduler") != nil else {
+            return (nil, nil)
+        }
+
+        do {
+            let summary = try await loadSummary(projectPath: projectPath)
+            return (summary, nil)
+        } catch {
+            return (nil, error.localizedDescription)
+        }
     }
 
     func startAstro(projectPath: String) async throws -> String {
@@ -122,6 +130,19 @@ final class ProjectService: Sendable {
             timeout: 20
         )
         return try runner.decodeJSON(JobDetailResponse.self, from: result.combinedOutput)
+    }
+
+    func loadProfileDashboards(projectPath: String) async throws -> ProfileDashboardResponse {
+        let scheduler = try await requireContainer(projectPath: projectPath, service: "scheduler")
+        let result = try await runner.run(
+            arguments: [
+                "docker", "exec", scheduler, "python",
+                "/usr/local/airflow/dags/frontend_data.py", "profiles", "dashboard",
+            ],
+            currentDirectory: projectPath,
+            timeout: 20
+        )
+        return try runner.decodeJSON(ProfileDashboardResponse.self, from: result.combinedOutput)
     }
 
     func airflowDagRunURL(projectPath: String, dagID: String, runID: String) async -> URL? {

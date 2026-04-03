@@ -983,7 +983,9 @@ def _send_discord_message(
 def linkedin_fitting_notifier():
     @task
     def claim_fitting_tasks():
-        return database.claim_pending_fitting_tasks()
+        claimed = database.claim_pending_fitting_tasks()
+        print(f"Fitting claim summary: claimed={len(claimed or [])}")
+        return claimed
 
     @task
     def match_jobs_with_resume_llm(queue_items, batch_size=5):
@@ -1009,6 +1011,10 @@ def linkedin_fitting_notifier():
 
         if not claimed_items:
             return _build_match_task_result([])
+
+        print(
+            f"Fitting stage progress: done=0 total={len(claimed_items)} queued={len(claimed_items)}"
+        )
 
         load_env(override_if_missing=True)
         matched_jobs = []
@@ -1485,6 +1491,12 @@ def linkedin_fitting_notifier():
             f"done={finalize_counts['done']} "
             f"failed={finalize_counts['failed']} "
             f"requeued={finalize_counts['requeued']}"
+        )
+        print(
+            "Fitting stage progress: "
+            f"done={finalize_counts['done'] + finalize_counts['failed'] + finalize_counts['requeued']} "
+            f"total={len(claimed_items)} "
+            f"successful={finalize_counts['done']} failed={finalize_counts['failed']} requeued={finalize_counts['requeued']}"
         )
         return _build_match_task_result(
             matched_jobs,
