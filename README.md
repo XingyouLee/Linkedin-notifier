@@ -29,6 +29,15 @@ Run locally
    - `astro dev run dags trigger linkedin_fitting_notifier`
 
 
+Deploy to Zeabur (Airflow 3)
+----------------------------
+
+- The root `Dockerfile` is now a standard Docker build that works outside Astronomer. Zeabur can build it directly from the repo root.
+- The default container entrypoint is [`scripts/start_airflow_service.sh`](/Users/levi/Linkedin-notifier/scripts/start_airflow_service.sh), which runs `airflow db migrate`, `airflow scheduler`, `airflow dag-processor`, and `airflow api-server` in one container when `AIRFLOW_SERVICE_ROLE=all-in-one`.
+- That all-in-one mode is the recommended Zeabur layout because Zeabur expects long-running services to expose an HTTP port, while standalone scheduler and dag-processor roles do not.
+- Detailed Zeabur setup is documented in [`docs/zeabur-airflow.md`](/Users/levi/Linkedin-notifier/docs/zeabur-airflow.md).
+
+
 Environment variables
 ---------------------
 
@@ -41,6 +50,8 @@ Ensure both files are covered by version-control and Docker ignores so secrets n
 
 Common vars:
 
+- `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`: Airflow metadata DB DSN. Use Postgres in Zeabur; do not rely on SQLite for deployed runs.
+- `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS`: Airflow UI users for the default simple auth manager, in `username:role` format such as `levi:admin`.
 - `JOBS_DB_URL`: business DB DSN (for DAG tasks), e.g. `postgresql://jobs_app:jobs_pass@postgres:5432/jobsdb`
 - `PROFILE_CONFIG_PATH`: optional override for profile config file; defaults to `include/user_info/profiles.json`
 - `SCAN_REQUEST_PAGE_SIZE`, `SCAN_BETWEEN_REQUESTS_MIN_SEC`, `SCAN_BETWEEN_REQUESTS_MAX_SEC`
@@ -53,6 +64,13 @@ Common vars:
 - `GMN_API_KEY`
 - `DISCORD_BOT_TOKEN` (used with per-profile Discord channel ids)
 - `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap for single-user mode)
+
+Recommended Airflow deploy defaults:
+
+- `AIRFLOW_SERVICE_ROLE=all-in-one`
+- `AIRFLOW__CORE__AUTH_MANAGER=airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager`
+- `AIRFLOW__CORE__LOAD_EXAMPLES=False`
+- For `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS`, use values like `levi:admin` or `levi:admin,readonly:viewer`; Airflow auto-generates passwords and prints them in the startup logs.
 
 
 Multi-user config
@@ -73,6 +91,7 @@ Data storage
 ------------
 
 - Business data is stored in Postgres (`jobsdb`)
+- Airflow metadata should use a separate Postgres database via `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`
 - Main tables:
   - `batches`
   - `jobs`
