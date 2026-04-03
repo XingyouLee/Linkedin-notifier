@@ -2,7 +2,7 @@ from airflow.sdk import dag, task
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import os
 import pandas as pd
 import random
@@ -488,7 +488,7 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
     tags=["linkedin_notifier"],
 )
 def linkedin_notifier():
-    @task
+    @task(retries=1, retry_delay=timedelta(minutes=2))
     def scan_and_save_jobs():
         """Scrape LinkedIn jobs for every active profile search config."""
         search_configs = database.get_active_search_configs()
