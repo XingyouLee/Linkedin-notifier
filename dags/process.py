@@ -659,7 +659,7 @@ def linkedin_notifier():
                 break
 
             # Legacy Playwright worker kept for fallback debugging only:
-            # from dags.jd_playwright_worker import run_once as playwright_run_once
+            # from scripts.jd_playwright_worker import run_once as playwright_run_once
             # processed = asyncio.run(
             #     playwright_run_once(limit=worker_batch_size, job_ids=job_ids)
             # )

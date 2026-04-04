@@ -1,11 +1,7 @@
 # Astro Runtime includes the following pre-installed providers packages: https://www.astronomer.io/docs/astro/runtime-image-architecture#provider-packages
 
-python-jobspy
 pandas
 pyarrow
-playwright
 psycopg[binary]
 
 python-dotenv
-
-astro-run-dag # This package is needed for the astro run command. It will be removed before a deploy
