@@ -4,7 +4,7 @@ import pandas as pd
 
 from dags import database
 from dags import jd_api_worker
-from dags import jd_playwright_worker
+from scripts import jd_playwright_worker
 
 
 class DummyCursor:
