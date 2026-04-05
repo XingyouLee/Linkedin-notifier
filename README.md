@@ -99,5 +99,4 @@ Notes
 
 - Job id normalization is required to keep DB dedupe stable (`id` is stored as numeric string).
 - Canonical jobs are shared globally, but discovery / fitting / notification state is tracked per profile.
-- The legacy Playwright JD scraper is still kept in `dags/jd_playwright_worker.py`, but the DAG now fetches descriptions through LinkedIn's `jobPosting` API.
 - Notifications run after fitting finalization, so newly finished jobs are not skipped.

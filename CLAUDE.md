@@ -49,7 +49,6 @@ There are two main DAGs:
   - Owns queue-claiming and result-persistence logic.
 - `database.py` at repo root is only a compatibility shim that re-exports `dags.database`; prefer importing `dags.database` directly.
 - `dags/jd_api_worker.py` fetches LinkedIn `jobPosting` HTML, extracts the description text, and stores JD results.
-- `dags/jd_playwright_worker.py` is legacy; README notes the DAG now uses the API worker path instead.
 - `dags/runtime_utils.py` loads env vars from both repo-root and `dags/` `.env` files and converts pandas values into XCom-safe records.
 
 ### Data model
