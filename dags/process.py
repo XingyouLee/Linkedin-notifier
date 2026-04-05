@@ -658,11 +658,6 @@ def linkedin_notifier():
             if pending_count <= 0:
                 break
 
-            # Legacy Playwright worker kept for fallback debugging only:
-            # from scripts.jd_playwright_worker import run_once as playwright_run_once
-            # processed = asyncio.run(
-            #     playwright_run_once(limit=worker_batch_size, job_ids=job_ids)
-            # )
             processed = run_once(limit=worker_batch_size, job_ids=job_ids)
             total_processed += processed
 

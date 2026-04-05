@@ -15,10 +15,6 @@ psycopg_stub.Connection = object
 psycopg_rows_stub = types.ModuleType("psycopg.rows")
 psycopg_rows_stub.dict_row = object()
 
-playwright_stub = types.ModuleType("playwright")
-playwright_async_api_stub = types.ModuleType("playwright.async_api")
-playwright_async_api_stub.async_playwright = None
-
 airflow_stub = types.ModuleType("airflow")
 airflow_sdk_stub = types.ModuleType("airflow.sdk")
 
@@ -55,7 +51,5 @@ airflow_sdk_stub.task = _TaskStub()
 
 sys.modules.setdefault("psycopg", psycopg_stub)
 sys.modules.setdefault("psycopg.rows", psycopg_rows_stub)
-sys.modules.setdefault("playwright", playwright_stub)
-sys.modules.setdefault("playwright.async_api", playwright_async_api_stub)
 sys.modules.setdefault("airflow", airflow_stub)
 sys.modules.setdefault("airflow.sdk", airflow_sdk_stub)

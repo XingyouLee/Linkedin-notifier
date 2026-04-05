@@ -23,7 +23,6 @@ Run locally
 
 1. Start local Airflow:
    - `astro dev start`
-   - If you specifically need the legacy Playwright JD fallback worker inside the image, build with `--build-arg INSTALL_PLAYWRIGHT_CHROMIUM=1`
 2. Trigger scan DAG:
    - `astro dev run dags trigger linkedin_notifier`
 3. Or trigger fitting DAG directly:
@@ -100,6 +99,4 @@ Notes
 
 - Job id normalization is required to keep DB dedupe stable (`id` is stored as numeric string).
 - Canonical jobs are shared globally, but discovery / fitting / notification state is tracked per profile.
-- The legacy Playwright JD scraper is still kept in `scripts/jd_playwright_worker.py`, but the DAG now fetches descriptions through LinkedIn's `jobPosting` API.
-- Local Docker builds skip Chromium installation by default to keep `astro dev start` lightweight; only enable it explicitly when you need the legacy Playwright fallback worker.
 - Notifications run after fitting finalization, so newly finished jobs are not skipped.

@@ -1,10 +1,7 @@
-import asyncio
-
 import pandas as pd
 
 from dags import database
 from dags import jd_api_worker
-from scripts import jd_playwright_worker
 
 
 class DummyCursor:
@@ -234,24 +231,6 @@ def test_claim_pending_jd_requests_scopes_to_requested_job_ids(monkeypatch):
     assert select_params[1] == ["job-1", "job-2"]
     assert select_params[2] == 2
     assert "SET status = 'processing'" in update_sql
-
-
-def test_run_once_forwards_job_ids_to_claim_api(monkeypatch):
-    captured = {}
-
-    def fake_claim_pending_jd_requests(limit, job_ids=None):
-        captured["limit"] = limit
-        captured["job_ids"] = job_ids
-        return pd.DataFrame(columns=["job_id", "job_url"])
-
-    monkeypatch.setattr(
-        database, "claim_pending_jd_requests", fake_claim_pending_jd_requests
-    )
-
-    processed = asyncio.run(jd_playwright_worker.run_once(limit=3, job_ids=["a", "b"]))
-
-    assert processed == 0
-    assert captured == {"limit": 3, "job_ids": ["a", "b"]}
 
 
 def test_jd_api_run_once_forwards_job_ids_to_claim_api(monkeypatch):

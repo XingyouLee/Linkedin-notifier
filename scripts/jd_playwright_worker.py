@@ -67,7 +67,7 @@ async def extract_description(page) -> Optional[str]:
     if await article.count() > 0:
         text = (await article.inner_text() or "").strip()
         if text.lower().startswith("about the job"):
-            text = text[len("about the job"):].strip()
+            text = text[len("about the job") :].strip()
         if len(text) > MIN_DESCRIPTION_LENGTH:
             return text
 

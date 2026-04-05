@@ -917,7 +917,7 @@ def init_db():
 
 def save_jobs(jobs_df: pd.DataFrame):
     """
-    Saves a pandas DataFrame of jobs (from JobSpy) to the database.
+    Saves a pandas DataFrame of jobs to the database.
     Assigns a new batch_id to this group.
     Updates existing jobs if the ID already exists (UPSERT).
     """
