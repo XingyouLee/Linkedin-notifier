@@ -87,18 +87,11 @@ When changing fit behavior, inspect both prompt construction and `_apply_fit_cap
 
 ## Environment
 - Runtime env files are expected at `.env` and/or `dags/.env`.
-- Important runtime vars called out by the repo README include `JOBS_DB_URL`, `PROFILE_CONFIG_PATH`, scan tuning vars, JD/fitting stale-claim vars, `GMN_API_KEY`, and Discord credentials.
+- Important runtime vars called out by the repo README include `JOBS_DB_URL`, `PROFILE_CONFIG_PATH`, scan tuning vars, JD/fitting stale-claim vars, `GMN_API_KEY`, Discord credentials, and `AIRFLOW_ADMIN_PASSWORD` for fixed SimpleAuthManager login bootstrapping.
 - The Docker image installs Playwright Chromium during build (`Dockerfile`).
+- Zeabur deployment is a single Docker app service plus two Postgres databases: one for Airflow metadata (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`) and one for business data (`JOBS_DB_URL`).
+- In the single-container cloud deployment, keep `AIRFLOW__API__BASE_URL=http://127.0.0.1:8080` and `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`; do not point them at old multi-service hostnames.
 
 ### Code Review 工作流
 
-每次完成编码后，使用 codex 和 git diff 进行 code review，分析 codex 的反馈后，自行修改代码，然后将新的 diff 使用 codex-reply 和相同的 threadId 发给 codex，继续下一轮 review。如此循环，最多 3 轮，直到没有关键问题。
-
-#### Review Checklist
-1. 完成编码
-2. 运行 `codex` + `git diff` 发起 review
-3. 分析 codex 的反馈
-4. 手动修改代码
-5. 使用 `codex-reply` + 相同 `threadId` + 新的 diff 继续 review
-6. 最多迭代 3 轮
-7. 直到没有关键问题
+如果要求code review，使用 codex 和 git diff 进行 code review，分析 codex 的反馈后，自行修改代码，然后将新的 diff 使用 codex-reply 和相同的 threadId 发给 codex，继续下一轮 review。如此循环，最多 3 轮，直到没有关键问题。
