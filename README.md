@@ -104,43 +104,35 @@ Notes
 Zeabur deployment
 -----------------
 
-Deploy this repo to Zeabur as separate Docker services that all build from the root-level `Dockerfile`:
+Deploy this repo to Zeabur as **one Docker app service plus two Postgres databases**:
 
-1. `postgres-airflow`
-   - Image: `postgres:16`
-   - Purpose: Airflow metadata database only
-   - Requires persistent storage
-2. `airflow-init`
-   - Build from repo root
-   - Run once with `/usr/local/airflow/entrypoint-airflow-init.sh`
-3. `airflow-webserver`
-   - Build from repo root
-   - Start command: `/usr/local/airflow/entrypoint-airflow-webserver.sh`
+1. `linkedin-notifier`
+   - Build from the root-level `Dockerfile`
+   - Uses the image default command, which runs:
+     - `airflow db migrate`
+     - `airflow scheduler`
+     - `airflow dag-processor`
+     - `airflow triggerer`
+     - `airflow api-server`
    - Expose port `8080`
-   - Uses Airflow 3 `api-server`, not the removed `webserver` command
-4. `airflow-scheduler`
-   - Build from repo root
-   - Start command: `/usr/local/airflow/entrypoint-airflow-scheduler.sh`
-5. `airflow-dag-processor`
-   - Build from repo root
-   - Start command: `/usr/local/airflow/entrypoint-airflow-dag-processor.sh`
-   - Required on Airflow 3 so DAG files are parsed and serialized continuously
-6. `airflow-triggerer`
-   - Build from repo root
-   - Start command: `/usr/local/airflow/entrypoint-airflow-triggerer.sh`
-   - Optional for the current DAGs; keep it if you want headroom for future deferrable operators
+2. `postgres-airflow`
+   - Airflow metadata database only
+3. `postgres-jobs`
+   - Business database used by the DAGs through `JOBS_DB_URL`
 
 Important notes:
 
-- Set `CLOUD_DEPLOYMENT=1` on every Airflow runtime service.
-- Set `AIRFLOW__CORE__AUTH_MANAGER=airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager` for self-hosted Airflow 3 login on Zeabur.
-- Set `AIRFLOW_SIMPLE_AUTH_MANAGER_USERS` to one or more `<username>:<role>` pairs such as `admin:admin`.
-- Set `AIRFLOW__API__BASE_URL` to the internal Airflow API host, for example `http://airflow-webserver:8080`.
-- Set `AIRFLOW__API_AUTH__JWT_SECRET` to the same long random secret on every Airflow service so the scheduler and API server agree on execution-task JWTs.
-- Set `AIRFLOW__CORE__EXECUTION_API_SERVER_URL` to the internal execution API endpoint, for example `http://airflow-webserver:8080/execution/`.
-- Set `JOBS_DB_URL` to the shared business Postgres used by the DAGs.
-- Keep the Airflow metadata database separate from `jobsdb`.
+- Do **not** split Airflow into multiple Zeabur app services for this setup.
+- Set `CLOUD_DEPLOYMENT=1` on the Docker app service.
+- Set `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` to the Airflow metadata Postgres.
+- Set `JOBS_DB_URL` to the separate business Postgres.
+- Set `AIRFLOW__CORE__AUTH_MANAGER=airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager`.
+- Set `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS` to one or more `<username>:<role>` pairs such as `admin:admin`.
+- Set `AIRFLOW__API__BASE_URL=http://127.0.0.1:8080`.
+- Set `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`.
+- Set `AIRFLOW__API_AUTH__JWT_SECRET` to the same long random secret for the whole app service.
 - `PROFILE_CONFIG_PATH` should point to `/usr/local/airflow/include/user_info/profiles.json` unless you deliberately move the config.
-- On Airflow 3, run a dedicated `airflow-dag-processor` service alongside the scheduler so DAGs are continuously discovered.
-- `linkedin_notifier` triggers `linkedin_fitting_notifier`, so the scheduler must be running; the triggerer is optional for the current non-deferrable DAG setup.
-- Manage the DAGs through the Airflow UI after deployment.
+- `DISCORD_BOT_TOKEN` should be configured globally if Discord delivery is enabled.
+- `DISCORD_CHANNEL_ID` is only a fallback; profile-specific channel ids from config/database still take precedence.
+- `DISCORD_WEBHOOK_URL` can be left empty if you only use bot-token delivery.
+- Airflow login uses `SimpleAuthManager`; usernames come from `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS`, and passwords are generated into `/usr/local/airflow/simple_auth_manager_passwords.json.generated` unless you provide a fixed passwords file.
