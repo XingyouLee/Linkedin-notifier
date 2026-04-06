@@ -128,6 +128,7 @@ Important notes:
 - Set `JOBS_DB_URL` to the separate business Postgres.
 - Set `AIRFLOW__CORE__AUTH_MANAGER=airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager`.
 - Set `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS` to one or more `<username>:<role>` pairs such as `admin:admin`.
+- Set `AIRFLOW_ADMIN_PASSWORD` if you want a fixed Airflow login password from env.
 - Set `AIRFLOW__API__BASE_URL=http://127.0.0.1:8080`.
 - Set `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`.
 - Set `AIRFLOW__API_AUTH__JWT_SECRET` to the same long random secret for the whole app service.
@@ -135,4 +136,4 @@ Important notes:
 - `DISCORD_BOT_TOKEN` should be configured globally if Discord delivery is enabled.
 - `DISCORD_CHANNEL_ID` is only a fallback; profile-specific channel ids from config/database still take precedence.
 - `DISCORD_WEBHOOK_URL` can be left empty if you only use bot-token delivery.
-- Airflow login uses `SimpleAuthManager`; usernames come from `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS`, and passwords are generated into `/usr/local/airflow/simple_auth_manager_passwords.json.generated` unless you provide a fixed passwords file.
+- If `AIRFLOW_ADMIN_PASSWORD` is unset, Airflow login uses a generated password file under `/usr/local/airflow/simple_auth_manager_passwords.json.generated`.
