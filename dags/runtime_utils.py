@@ -27,7 +27,7 @@ def load_env(
     candidates = list(env_candidates or _default_env_candidates())
     for env_path in candidates:
         try:
-            load_dotenv(env_path)
+            load_dotenv(env_path, override=False)
         except Exception:
             pass
 

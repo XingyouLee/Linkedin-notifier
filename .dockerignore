@@ -1,5 +1,7 @@
 .git
 .env
+.env.*
+!.env.zeabur.example
 dags/.env
 astro
 airflow_settings.yaml
@@ -7,3 +9,16 @@ logs/
 .venv
 airflow.db
 airflow.cfg
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.codex_tmp/
+.playwright-mcp/
+apps/**/.build/
+apps/**/.swiftpm/
+apps/**/dist/
+apps/**/DerivedData/
+apps/**/xcuserdata/
+apps/**/*.app/
+apps/**/Products/
+output/

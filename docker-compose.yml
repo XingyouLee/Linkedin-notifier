@@ -1,0 +1,85 @@
+x-airflow-common: &airflow-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  environment:
+    AIRFLOW_HOME: /usr/local/airflow
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+    AIRFLOW__CORE__AUTH_MANAGER: airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager
+    AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS: ${AIRFLOW_SIMPLE_AUTH_MANAGER_USERS:-admin:admin}
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    AIRFLOW__API__SECRET_KEY: ${AIRFLOW__API__SECRET_KEY}
+    AIRFLOW__API__BASE_URL: ${AIRFLOW__API__BASE_URL:-http://airflow-webserver:8080}
+    AIRFLOW__API_AUTH__JWT_SECRET: ${AIRFLOW__API_AUTH__JWT_SECRET}
+    AIRFLOW__CORE__EXECUTION_API_SERVER_URL: ${AIRFLOW__CORE__EXECUTION_API_SERVER_URL:-http://airflow-webserver:8080/execution/}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER}:${AIRFLOW_DB_PASSWORD}@postgres-airflow:5432/${AIRFLOW_DB_NAME}
+    JOBS_DB_URL: ${JOBS_DB_URL}
+    PROFILE_CONFIG_PATH: ${PROFILE_CONFIG_PATH:-/usr/local/airflow/include/user_info/profiles.json}
+    FITTING_REQUEST_URL: ${FITTING_REQUEST_URL:-}
+    LLM_API_KEY: ${LLM_API_KEY:-}
+    GMN_API_KEY: ${GMN_API_KEY:-}
+    LLM_ENDPOINTS_JSON: ${LLM_ENDPOINTS_JSON:-}
+    DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+    DISCORD_CHANNEL_ID: ${DISCORD_CHANNEL_ID:-}
+    DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
+    CLOUD_DEPLOYMENT: ${CLOUD_DEPLOYMENT:-0}
+  depends_on:
+    postgres-airflow:
+      condition: service_healthy
+
+services:
+  postgres-airflow:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${AIRFLOW_DB_USER}
+      POSTGRES_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      POSTGRES_DB: ${AIRFLOW_DB_NAME}
+    volumes:
+      - airflow-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_DB_USER} -d ${AIRFLOW_DB_NAME}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  airflow-init:
+    <<: *airflow-common
+    restart: "no"
+    command: ["/usr/local/airflow/entrypoint-airflow-init.sh"]
+
+  airflow-webserver:
+    <<: *airflow-common
+    command: ["/usr/local/airflow/entrypoint-airflow-webserver.sh"]
+    ports:
+      - "8080:8080"
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-scheduler:
+    <<: *airflow-common
+    command: ["/usr/local/airflow/entrypoint-airflow-scheduler.sh"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-dag-processor:
+    <<: *airflow-common
+    command: ["/usr/local/airflow/entrypoint-airflow-dag-processor.sh"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+  airflow-triggerer:
+    <<: *airflow-common
+    command: ["/usr/local/airflow/entrypoint-airflow-triggerer.sh"]
+    depends_on:
+      airflow-init:
+        condition: service_completed_successfully
+
+volumes:
+  airflow-postgres-data:

@@ -91,6 +91,9 @@ def _resolve_db_url() -> str:
     if env_db_url:
         return env_db_url
 
+    if os.getenv("CLOUD_DEPLOYMENT") == "1":
+        raise ValueError("CLOUD_DEPLOYMENT=1 requires JOBS_DB_URL to be set")
+
     host = os.getenv("JOBS_DB_HOST")
     if not host:
         host = "postgres" if os.path.exists("/.dockerenv") else "127.0.0.1"
@@ -229,6 +232,11 @@ def _resolve_profile_resume_path(
 
 
 def _load_profile_configs_from_file(config_path: Path) -> list[dict[str, Any]]:
+    if not config_path.exists():
+        raise FileNotFoundError(
+            f"PROFILE_CONFIG_PATH does not exist: {config_path}"
+        )
+
     with config_path.open("r", encoding="utf-8") as file_handle:
         raw_configs = json.load(file_handle)
 
@@ -636,6 +644,10 @@ def _sync_profiles_from_source(cursor, *, force: bool = False) -> int:
     global _PROFILE_SOURCE_SIGNATURE
 
     config_path = _resolve_profiles_config_path()
+    if os.getenv("PROFILE_CONFIG_PATH") and not config_path.exists():
+        raise FileNotFoundError(
+            f"PROFILE_CONFIG_PATH does not exist: {config_path}"
+        )
     source_signature = _compute_profile_source_signature(config_path)
     if not force and source_signature == _PROFILE_SOURCE_SIGNATURE:
         return 0
