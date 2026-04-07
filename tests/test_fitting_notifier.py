@@ -1,6 +1,7 @@
 import json
 
 import pytest
+import requests
 
 from dags import fitting_notifier
 
@@ -266,3 +267,36 @@ def test_request_llm_json_with_fallback_raises_fatal_when_all_endpoints_missing_
     assert "endpoint=empty-proxy error=response_missing_output_text" in str(
         error.value
     )
+
+
+def test_request_llm_json_uses_plain_string_input_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"output_text": '{"ok": true}'}
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed = fitting_notifier._request_llm_json(
+        request_url="https://example.com/v1/responses",
+        api_key="test-key",
+        model_name="gpt-5.4",
+        prompt="Return only valid JSON: {\"ok\": true}",
+    )
+
+    assert parsed == {"ok": True}
+    assert captured["json"] == {
+        "model": "gpt-5.4",
+        "input": 'Return only valid JSON: {"ok": true}',
+    }

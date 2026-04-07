@@ -525,13 +525,7 @@ def _request_llm_json(
 ) -> dict:
     payload = {
         "model": model_name,
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": prompt}],
-            }
-        ],
+        "input": prompt,
     }
     response = requests.post(
         request_url,
