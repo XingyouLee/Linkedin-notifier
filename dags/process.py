@@ -275,6 +275,11 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
             terms = [term for term in (search_config.get("terms") or []) if term]
             if not terms:
                 continue
+            profile_label = (
+                search_config.get("profile_key")
+                or search_config.get("display_name")
+                or search_config.get("profile_id")
+            )
             results_per_term = search_config.get("results_per_term")
             if results_per_term is None:
                 raise ValueError(
@@ -287,11 +292,6 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                 distance=search_config.get("distance") or 25,
             )
             scan_config["location"] = search_config.get("location") or "Netherlands"
-            profile_label = (
-                search_config.get("profile_key")
-                or search_config.get("display_name")
-                or search_config.get("profile_id")
-            )
 
             print(
                 f"Scanning profile={profile_label} config={search_config.get('search_config_name')} "

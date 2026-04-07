@@ -1,4 +1,7 @@
 import pandas as pd
+import pytest
+from pathlib import Path
+import re
 
 from dags import database
 from dags import jd_api_worker
@@ -193,6 +196,24 @@ def test_get_active_search_configs_preserves_zero_results_per_term(monkeypatch):
 
     assert len(configs) == 1
     assert configs[0]["results_per_term"] == 0
+
+
+def test_collect_scan_rows_requires_results_per_term_with_clear_profile_context():
+    source = (Path(__file__).resolve().parents[1] / "dags" / "process.py").read_text()
+
+    profile_label_match = re.search(
+        r"profile_label\s*=\s*\(\s*search_config.get\(\"profile_key\"\)",
+        source,
+    )
+    results_guard_match = re.search(
+        r"results_per_term\s*=\s*search_config.get\(\"results_per_term\"\)",
+        source,
+    )
+
+    assert profile_label_match is not None
+    assert results_guard_match is not None
+    assert profile_label_match.start() < results_guard_match.start()
+    assert "search_config.results_per_term is required for " in source
 
 
 def test_claim_pending_fitting_tasks_only_reclaims_stale_fitting(monkeypatch):
