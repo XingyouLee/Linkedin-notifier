@@ -41,3 +41,21 @@ def test_resolve_db_config_requires_jobs_db_url_or_cli_overrides(monkeypatch, tm
 
     with pytest.raises(SystemExit, match="JOBS_DB_URL"):
         run_jobs_sql._resolve_db_config(argparse.Namespace(db=None, user=None))
+
+
+def test_main_requires_explicit_pg_url_when_jobs_db_url_missing(monkeypatch, tmp_path):
+    sqlite_path = tmp_path / "jobs.db"
+    sqlite_path.write_bytes(b"sqlite")
+
+    monkeypatch.delenv("JOBS_DB_URL", raising=False)
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "migrate_sqlite_to_postgres.py",
+            "--sqlite-path",
+            str(sqlite_path),
+        ],
+    )
+
+    with pytest.raises(SystemExit, match="JOBS_DB_URL|--pg-url"):
+        migrate_sqlite_to_postgres.main()

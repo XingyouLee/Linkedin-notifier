@@ -105,18 +105,22 @@ def _parse_args():
 def main():
     args = _parse_args()
     sqlite_path = Path(args.sqlite_path).expanduser().resolve()
+    pg_url = (args.pg_url or "").strip()
 
     if not sqlite_path.exists():
         raise FileNotFoundError(f"SQLite file not found: {sqlite_path}")
 
-    os.environ["JOBS_DB_URL"] = args.pg_url
+    if not pg_url:
+        raise SystemExit("Set JOBS_DB_URL or pass --pg-url before running migration.")
+
+    os.environ["JOBS_DB_URL"] = pg_url
     from dags import database as pg_database  # noqa: WPS433
 
     pg_database.init_db()
 
     with sqlite3.connect(str(sqlite_path)) as sqlite_conn:
         sqlite_conn.row_factory = sqlite3.Row
-        with psycopg.connect(args.pg_url) as pg_conn:
+        with psycopg.connect(pg_url) as pg_conn:
             _copy_table(
                 sqlite_conn,
                 pg_conn,
