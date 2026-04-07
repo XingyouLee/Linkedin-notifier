@@ -602,12 +602,22 @@ def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
 
 
 def _request_llm_json_with_fallback(
-    *, endpoints: list[dict[str, str]], model_name: str, prompt: str
+    *,
+    endpoints: list[dict[str, str]],
+    model_name: str,
+    prompt: str,
+    start_index: int = 0,
 ) -> dict:
     transient_errors: list[str] = []
     fatal_errors: list[str] = []
 
-    for endpoint in endpoints:
+    if not endpoints:
+        raise RuntimeError("FATAL_API::no_llm_endpoints_available")
+
+    normalized_start_index = start_index % len(endpoints)
+    ordered_endpoints = endpoints[normalized_start_index:] + endpoints[:normalized_start_index]
+
+    for endpoint in ordered_endpoints:
         endpoint_name = (
             endpoint.get("name") or endpoint.get("request_url") or "endpoint"
         )
@@ -1122,6 +1132,7 @@ def linkedin_fitting_notifier():
                         endpoints=llm_endpoints,
                         model_name=model_name,
                         prompt=prompt,
+                        start_index=(prepared["sequence_index"] + attempt) % len(llm_endpoints),
                     )
                     parsed = _apply_fit_caps(
                         parsed,
@@ -1319,13 +1330,14 @@ def linkedin_fitting_notifier():
         }
 
         prepared_items = []
-        for item in claimed_items:
+        for sequence_index, item in enumerate(claimed_items):
             profile_id = item["profile_id"]
             job_id = item["job_id"]
             profile_record = profiles_by_id.get(profile_id)
             if not profile_record:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1341,6 +1353,7 @@ def linkedin_fitting_notifier():
             if not job_record:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1356,6 +1369,7 @@ def linkedin_fitting_notifier():
             if not resume_text:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1370,6 +1384,7 @@ def linkedin_fitting_notifier():
             if profile_id in profile_summary_errors:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1385,6 +1400,7 @@ def linkedin_fitting_notifier():
             if not candidate_summary:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1401,6 +1417,7 @@ def linkedin_fitting_notifier():
             if not jd_text.strip():
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1414,6 +1431,7 @@ def linkedin_fitting_notifier():
 
             prepared_items.append(
                 {
+                    "sequence_index": sequence_index,
                     "item": item,
                     "ready": True,
                     "profile_record": profile_record,

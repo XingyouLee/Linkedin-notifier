@@ -269,6 +269,47 @@ def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_
     )
 
 
+def test_request_llm_json_with_fallback_rotates_starting_endpoint(monkeypatch):
+    calls = []
+
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+        calls.append(request_url)
+        return {"fit_score": 77, "decision": "Moderate Fit"}
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    endpoints = [
+        {
+            "name": "proxy-a",
+            "request_url": "https://a.example/v1/responses",
+            "api_key": "key-a",
+        },
+        {
+            "name": "proxy-b",
+            "request_url": "https://b.example/v1/responses",
+            "api_key": "key-b",
+        },
+    ]
+
+    fitting_notifier._request_llm_json_with_fallback(
+        endpoints=endpoints,
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+        start_index=0,
+    )
+    fitting_notifier._request_llm_json_with_fallback(
+        endpoints=endpoints,
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+        start_index=1,
+    )
+
+    assert calls == [
+        "https://a.example/v1/responses",
+        "https://b.example/v1/responses",
+    ]
+
+
 def test_request_llm_json_uses_plain_string_input_payload(monkeypatch):
     captured = {}
 
