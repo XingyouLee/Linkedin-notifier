@@ -69,6 +69,21 @@ Update operator-facing docs to describe this rule plainly:
 - A local or fallback business database is an explicit override for emergency use, not an automatic default.
 - `postgres-airflow` is only for Airflow metadata and should not be confused with the business database.
 
+### Configuration Migration Impact
+
+This change is intended to preserve behavior for any environment that already sets `JOBS_DB_URL`.
+Those environments do not need to change their business database env configuration.
+
+This change will break only the environments that currently rely on one of these implicit paths:
+
+- Split variables such as `JOBS_DB_HOST`, `JOBS_DB_PORT`, `JOBS_DB_USER`, `JOBS_DB_PASSWORD`, and `JOBS_DB_NAME`
+- The built-in localhost or Docker hostname fallback when no business database env is set
+
+For those environments, the migration is simple: provide a complete `JOBS_DB_URL`.
+
+The repository's local env files should also avoid drift.
+If both repo-root `.env` and `dags/.env` define `JOBS_DB_URL`, they should normally point at the same business database so local CLI tooling and Airflow runtime do not accidentally diverge.
+
 ## Affected Areas
 
 - `dags/database.py`
@@ -76,6 +91,7 @@ Update operator-facing docs to describe this rule plainly:
 - `README.md`
 - `CLAUDE.md`
 - Any scripts or docs that currently imply a default local business Postgres target
+- Local env examples that currently point different runtimes at different business databases
 
 ## Testing Strategy
 
@@ -85,6 +101,7 @@ Add or update tests to cover these cases:
 - `get_db_url()` raises a clear error when `JOBS_DB_URL` is absent.
 - The error is the same regardless of `CLOUD_DEPLOYMENT` or Docker-related conditions.
 - Existing env-loading behavior still preserves an already injected `JOBS_DB_URL`.
+- Legacy split-variable business DB configuration is no longer accepted.
 
 Documentation updates do not require new runtime tests beyond the configuration behavior above.
 
