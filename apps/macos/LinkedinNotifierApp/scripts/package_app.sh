@@ -33,12 +33,6 @@ if [[ ! -f "${ENV_PATH}" ]]; then
   exit 1
 fi
 
-JOBS_DB_URL_VALUE="$(sed -n 's/^JOBS_DB_URL=//p' "${ENV_PATH}" | tail -n 1)"
-if [[ -z "${JOBS_DB_URL_VALUE}" ]]; then
-  echo "JOBS_DB_URL is missing from ${ENV_PATH}." >&2
-  exit 1
-fi
-
 AIRFLOW_WEB_URL_VALUE="${LINKEDIN_NOTIFIER_AIRFLOW_WEB_URL:-}"
 if [[ -z "${AIRFLOW_WEB_URL_VALUE}" ]]; then
   AIRFLOW_WEB_URL_VALUE="$(sed -n 's/^LINKEDIN_NOTIFIER_AIRFLOW_WEB_URL=//p' "${ENV_PATH}" | tail -n 1)"
@@ -119,8 +113,6 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
-    <key>${CLOUDBUILD_JOB_DB_KEY:-LinkedinNotifierJobsDatabaseURL}</key>
-    <string>${JOBS_DB_URL_VALUE}</string>
     <key>${CLOUDBUILD_AIRFLOW_KEY:-LinkedinNotifierAirflowWebURL}</key>
     <string>${AIRFLOW_WEB_URL_VALUE}</string>
 </dict>

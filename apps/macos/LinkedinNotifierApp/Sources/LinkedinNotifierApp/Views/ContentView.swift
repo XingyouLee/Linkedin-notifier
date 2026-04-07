@@ -30,5 +30,17 @@ struct ContentView: View {
                 .tag(AppTab.jobs)
         }
         .padding(.top, 10)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    if let url = URL(string: "file://\(CloudConfig.userConfigFileURL.path)") {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+                    }
+                } label: {
+                    Label("Reveal Config", systemImage: "gearshape")
+                }
+                .help("Reveal database configuration file in Finder")
+            }
+        }
     }
 }

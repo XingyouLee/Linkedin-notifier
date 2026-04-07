@@ -9,9 +9,9 @@ enum CloudConfigError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .missingJobsDatabaseURL:
-            return "The packaged app is missing a JOBS_DB_URL value. Rebuild the app with LINKEDIN_NOTIFIER_JOBS_DB_URL or JOBS_DB_URL set."
+            return "No database URL configured. Please enter your JOBS_DB_URL in the app settings."
         case let .invalidJobsDatabaseURL(value):
-            return "The packaged app contains an invalid JOBS_DB_URL: \(value)"
+            return "The database URL is invalid: \(value)"
         }
     }
 }
@@ -82,14 +82,36 @@ struct CloudConfig: Sendable {
     let airflowWebURL: URL?
     let databaseEndpoint: DatabaseEndpoint
 
+    private static let userConfigDirectory: URL = {
+        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        return appSupport.appendingPathComponent("LinkedinNotifier", isDirectory: true)
+    }()
+
+    static let userConfigFileURL: URL = userConfigDirectory.appendingPathComponent("cloud-config.json")
+
+    static func loadUserConfigFile() -> String? {
+        guard let data = try? Data(contentsOf: userConfigFileURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String]
+        else { return nil }
+        return json["jobs_database_url"]?.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    @discardableResult
+    static func saveUserConfigFile(jobsDatabaseURL: String) throws -> URL {
+        try FileManager.default.createDirectory(at: userConfigDirectory, withIntermediateDirectories: true)
+        let json = ["jobs_database_url": jobsDatabaseURL]
+        let data = try JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys])
+        try data.write(to: userConfigFileURL, options: .atomic)
+        return userConfigFileURL
+    }
+
     static func load(
         bundle: Bundle = .main,
         environment: [String: String] = ProcessInfo.processInfo.environment
     ) throws -> CloudConfig {
         let jobsDatabaseURL = (
-            bundle.object(forInfoDictionaryKey: CloudBuildConfig.jobsDatabaseURLInfoKey) as? String
-        )?.trimmingCharacters(in: .whitespacesAndNewlines)
-            ?? environment[CloudBuildConfig.jobsDatabaseURLEnvironmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines)
+            environment[CloudBuildConfig.jobsDatabaseURLEnvironmentKey]?.trimmingCharacters(in: .whitespacesAndNewlines)
+        ) ?? loadUserConfigFile()
 
         guard let jobsDatabaseURL, !jobsDatabaseURL.isEmpty else {
             throw CloudConfigError.missingJobsDatabaseURL
