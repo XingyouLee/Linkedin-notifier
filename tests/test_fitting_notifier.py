@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from dags import fitting_notifier
 
 
@@ -200,4 +202,67 @@ def test_normalize_exp_requirement_text_flattens_dict_like_payload_to_plain_text
         "title signal: Python Developer with data/risk emphasis; "
         "jd years specified: 8-10 years; "
         "jd seniority specified: not applicable"
+    )
+
+
+def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+        calls.append((request_url, model_name, prompt))
+        if request_url == "https://empty.example/v1/responses":
+            raise ValueError("response_missing_output_text")
+        return {"fit_score": 77, "decision": "Moderate Fit"}
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    parsed = fitting_notifier._request_llm_json_with_fallback(
+        endpoints=[
+            {
+                "name": "empty-proxy",
+                "request_url": "https://empty.example/v1/responses",
+                "api_key": "key-1",
+            },
+            {
+                "name": "working-proxy",
+                "request_url": "https://working.example/v1/responses",
+                "api_key": "key-2",
+            },
+        ],
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+    )
+
+    assert parsed == {"fit_score": 77, "decision": "Moderate Fit"}
+    assert calls == [
+        ("https://empty.example/v1/responses", "gpt-5.4", "Return JSON only"),
+        ("https://working.example/v1/responses", "gpt-5.4", "Return JSON only"),
+    ]
+
+
+def test_request_llm_json_with_fallback_raises_fatal_when_all_endpoints_missing_output(
+    monkeypatch,
+):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+        raise ValueError("response_missing_output_text")
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    with pytest.raises(RuntimeError, match="^FATAL_API::") as error:
+        fitting_notifier._request_llm_json_with_fallback(
+            endpoints=[
+                {
+                    "name": "empty-proxy",
+                    "request_url": "https://empty.example/v1/responses",
+                    "api_key": "key-1",
+                }
+            ],
+            model_name="gpt-5.4",
+            prompt="Return JSON only",
+        )
+
+    assert "endpoint=empty-proxy error=response_missing_output_text" in str(
+        error.value
     )

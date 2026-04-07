@@ -640,6 +640,9 @@ def _request_llm_json_with_fallback(
         except requests.RequestException as error:
             fatal_errors.append(f"endpoint={endpoint_name} error={error}")
             continue
+        except ValueError as error:
+            fatal_errors.append(f"endpoint={endpoint_name} error={error}")
+            continue
 
     if transient_errors and not fatal_errors:
         raise RuntimeError("TRANSIENT_API::" + " | ".join(transient_errors))
