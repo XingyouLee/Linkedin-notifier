@@ -574,13 +574,15 @@ def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
                 raise ValueError(
                     f"invalid_llm_endpoints_json: entry {index} requires request_url and api_key/api_key_env"
                 )
-            endpoints.append(
-                {
+            entry_dict: dict[str, str] = {
                     "name": name,
                     "request_url": request_url,
                     "api_key": api_key,
                 }
-            )
+            model = _normalize_text(entry.get("model"))
+            if model:
+                entry_dict["model"] = model
+            endpoints.append(entry_dict)
 
     if endpoints:
         return endpoints
@@ -621,11 +623,12 @@ def _request_llm_json_with_fallback(
         endpoint_name = (
             endpoint.get("name") or endpoint.get("request_url") or "endpoint"
         )
+        effective_model_name = endpoint.get("model") or model_name
         try:
             return _request_llm_json(
                 request_url=endpoint["request_url"],
                 api_key=endpoint["api_key"],
-                model_name=model_name,
+                model_name=effective_model_name,
                 prompt=prompt,
             )
         except requests.HTTPError as error:
