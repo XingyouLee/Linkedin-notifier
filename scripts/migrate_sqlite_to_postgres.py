@@ -84,10 +84,7 @@ def _sync_batches_sequence(pg_conn: psycopg.Connection):
 def _parse_args():
     repo_root = Path(__file__).resolve().parents[1]
     default_sqlite_path = repo_root / "include" / "jobs.db"
-    default_pg_url = (
-        os.getenv("JOBS_DB_URL")
-        or "postgresql://postgres:postgres@127.0.0.1:5432/jobsdb"
-    )
+    default_pg_url = os.getenv("JOBS_DB_URL")
 
     parser = argparse.ArgumentParser(
         description="One-time migration from local SQLite jobs.db to Postgres jobsdb."
@@ -100,7 +97,7 @@ def _parse_args():
     parser.add_argument(
         "--pg-url",
         default=default_pg_url,
-        help="Target Postgres DSN.",
+        help="Target Postgres DSN. Pass explicitly or set JOBS_DB_URL.",
     )
     return parser.parse_args()
 

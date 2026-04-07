@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import quote_plus
 
 import pandas as pd
 import psycopg
@@ -87,26 +86,11 @@ def _coerce_nonnegative_int(value, default: int) -> int:
 
 
 def _resolve_db_url() -> str:
-    env_db_url = os.getenv("JOBS_DB_URL")
+    env_db_url = os.getenv("JOBS_DB_URL", "").strip()
     if env_db_url:
         return env_db_url
 
-    if os.getenv("CLOUD_DEPLOYMENT") == "1":
-        raise ValueError("CLOUD_DEPLOYMENT=1 requires JOBS_DB_URL to be set")
-
-    host = os.getenv("JOBS_DB_HOST")
-    if not host:
-        host = "postgres" if os.path.exists("/.dockerenv") else "127.0.0.1"
-
-    port = os.getenv("JOBS_DB_PORT", "5432")
-    user = os.getenv("JOBS_DB_USER", "postgres")
-    password = os.getenv("JOBS_DB_PASSWORD", "postgres")
-    db_name = os.getenv("JOBS_DB_NAME", "jobsdb")
-
-    return (
-        f"postgresql://{quote_plus(user)}:{quote_plus(password)}"
-        f"@{host}:{port}/{quote_plus(db_name)}"
-    )
+    raise ValueError("JOBS_DB_URL must be set for the business database connection")
 
 
 def get_db_url() -> str:

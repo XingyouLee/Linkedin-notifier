@@ -39,9 +39,11 @@ For Astro local runs, keep runtime vars in:
 
 Ensure both files are covered by version-control and Docker ignores so secrets never leak.
 
+`JOBS_DB_URL` is the only source of truth for the business database connection. Local Astro/Airflow runs and cloud deployments should normally point to the same shared business database. If you need to fall back to a local or emergency database, change `JOBS_DB_URL` explicitly.
+
 Common vars:
 
-- `JOBS_DB_URL`: business DB DSN (for DAG tasks), e.g. `postgresql://jobs_app:jobs_pass@postgres:5432/jobsdb`
+- `JOBS_DB_URL`: business DB DSN (for DAG tasks), e.g. `postgresql://jobs_app:jobs_pass@db.example.com:5432/jobsdb`
 - `PROFILE_CONFIG_PATH`: optional override for profile config file; defaults to `include/user_info/profiles.json`
 - `SCAN_REQUEST_PAGE_SIZE`, `SCAN_BETWEEN_REQUESTS_MIN_SEC`, `SCAN_BETWEEN_REQUESTS_MAX_SEC`
 - `SCAN_BETWEEN_TERMS_DELAY_SEC`, `SCAN_HTTP_MAX_RETRIES`, `SCAN_HTTP_BASE_DELAY_SEC`
@@ -87,11 +89,12 @@ Data storage
 Migrate existing SQLite data (one-time)
 --------------------------------------
 
-1. Ensure `jobsdb` exists in your local Postgres container.
-2. Run migration from host (requires `psycopg[binary]` installed) or from Airflow container:
-   - Host: `python scripts/migrate_sqlite_to_postgres.py --sqlite-path include/jobs.db --pg-url postgresql://postgres:postgres@127.0.0.1:5432/jobsdb`
-   - Container: `docker exec "$(docker ps --filter 'name=scheduler-1' --format '{{.Names}}' | head -n1)" python /usr/local/airflow/scripts/migrate_sqlite_to_postgres.py --sqlite-path /usr/local/airflow/include/jobs.db --pg-url postgresql://postgres:postgres@postgres:5432/jobsdb`
-3. Set `JOBS_DB_URL` in `/Users/levi/Linkedin-notifier/dags/.env` for Airflow runtime.
+1. Decide which Postgres database should receive the migrated business data.
+2. Set `JOBS_DB_URL` to that target, or pass `--pg-url` explicitly.
+3. Run migration from host (requires `psycopg[binary]` installed) or from Airflow container:
+   - Host: `JOBS_DB_URL=postgresql://jobs_app:jobs_pass@db.example.com:5432/jobsdb python scripts/migrate_sqlite_to_postgres.py --sqlite-path include/jobs.db`
+   - Container: `docker exec -e JOBS_DB_URL="$JOBS_DB_URL" "$(docker ps --filter 'name=scheduler-1' --format '{{.Names}}' | head -n1)" python /usr/local/airflow/scripts/migrate_sqlite_to_postgres.py --sqlite-path /usr/local/airflow/include/jobs.db`
+4. Keep `JOBS_DB_URL` aligned between `/Users/levi/Linkedin-notifier/.env` and your local Airflow runtime env so host tooling and DAG runs talk to the same business database by default.
 
 
 Notes

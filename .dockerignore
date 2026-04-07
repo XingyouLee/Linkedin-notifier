@@ -14,11 +14,7 @@ __pycache__/
 .ruff_cache/
 .codex_tmp/
 .playwright-mcp/
-apps/**/.build/
-apps/**/.swiftpm/
-apps/**/dist/
-apps/**/DerivedData/
-apps/**/xcuserdata/
-apps/**/*.app/
-apps/**/Products/
+.worktrees/
+.claude/
+apps/
 output/

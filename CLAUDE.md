@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run Astro DAG import/parsing validation: `pytest .astro/test_dag_integrity_default.py`
 
 ### One-off scripts
-- Migrate legacy SQLite data into Postgres: `python scripts/migrate_sqlite_to_postgres.py --sqlite-path include/jobs.db --pg-url postgresql://postgres:postgres@127.0.0.1:5432/jobsdb`
+- Migrate legacy SQLite data into Postgres: `JOBS_DB_URL=postgresql://jobs_app:jobs_pass@db.example.com:5432/jobsdb python scripts/migrate_sqlite_to_postgres.py --sqlite-path include/jobs.db`
 
 ## Architecture
 
@@ -87,6 +87,7 @@ When changing fit behavior, inspect both prompt construction and `_apply_fit_cap
 
 ## Environment
 - Runtime env files are expected at `.env` and/or `dags/.env`.
+- `JOBS_DB_URL` is required for the business database connection. Legacy split `JOBS_DB_HOST`, `JOBS_DB_PORT`, `JOBS_DB_USER`, `JOBS_DB_PASSWORD`, and `JOBS_DB_NAME` fallbacks should not be relied on.
 - Important runtime vars called out by the repo README include `JOBS_DB_URL`, `PROFILE_CONFIG_PATH`, scan tuning vars, JD/fitting stale-claim vars, `GMN_API_KEY`, Discord credentials, and `AIRFLOW_ADMIN_PASSWORD` for fixed SimpleAuthManager login bootstrapping.
 - The Docker image installs Playwright Chromium during build (`Dockerfile`).
 - Zeabur deployment is a single Docker app service plus two Postgres databases: one for Airflow metadata (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`) and one for business data (`JOBS_DB_URL`).

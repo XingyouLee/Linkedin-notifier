@@ -29,6 +29,27 @@ def test_get_db_url_requires_jobs_db_url_in_cloud_mode(monkeypatch):
         database.get_db_url()
 
 
+def test_get_db_url_requires_jobs_db_url_even_outside_cloud_mode(monkeypatch):
+    monkeypatch.delenv("JOBS_DB_URL", raising=False)
+    monkeypatch.delenv("CLOUD_DEPLOYMENT", raising=False)
+
+    with pytest.raises(ValueError, match="JOBS_DB_URL"):
+        database.get_db_url()
+
+
+def test_get_db_url_ignores_split_jobs_db_variables(monkeypatch):
+    monkeypatch.delenv("JOBS_DB_URL", raising=False)
+    monkeypatch.delenv("CLOUD_DEPLOYMENT", raising=False)
+    monkeypatch.setenv("JOBS_DB_HOST", "legacy-host")
+    monkeypatch.setenv("JOBS_DB_PORT", "6543")
+    monkeypatch.setenv("JOBS_DB_USER", "legacy-user")
+    monkeypatch.setenv("JOBS_DB_PASSWORD", "legacy-password")
+    monkeypatch.setenv("JOBS_DB_NAME", "legacy-db")
+
+    with pytest.raises(ValueError, match="JOBS_DB_URL"):
+        database.get_db_url()
+
+
 def test_profile_config_path_error_is_explicit(monkeypatch, tmp_path):
     missing = tmp_path / "missing-profiles.json"
     monkeypatch.setenv("PROFILE_CONFIG_PATH", str(missing))
