@@ -4,7 +4,6 @@ private enum AppTab: Hashable {
     case overview
     case profiles
     case jobs
-    case runs
 }
 
 struct ContentView: View {
@@ -29,12 +28,6 @@ struct ContentView: View {
                     Label("Jobs", systemImage: "list.bullet.rectangle")
                 }
                 .tag(AppTab.jobs)
-
-            RunsTabView(isVisible: selectedTab == .runs)
-                .tabItem {
-                    Label("Runs", systemImage: "arrow.trianglehead.clockwise")
-                }
-                .tag(AppTab.runs)
         }
         .padding(.top, 10)
     }
