@@ -4,144 +4,178 @@ import Testing
 @testable import LinkedinNotifierApp
 
 @Test
-func commandRunnerReadsLargeOutputWithoutDeadlocking() async throws {
-    let runner = CommandRunner()
+func cloudConfigParsesDatabaseURLAndBuildsAirflowLinks() throws {
 
-    let result = try await runner.run(
-        executable: "/usr/bin/python3",
-        arguments: ["-c", "import sys; sys.stdout.write('x' * 70000)"],
-        timeout: 10
+    let config = try CloudConfig(
+        jobsDatabaseURL: "postgresql://demo:secret@db.example.com:5432/jobsdb?sslmode=require",
+        airflowWebURL: URL(string: "https://airflow.example.com"),
+        databaseEndpoint: .parse(urlString: "postgresql://demo:secret@db.example.com:5432/jobsdb?sslmode=require")
     )
 
-    #expect(result.exitCode == 0)
-    #expect(result.standardOutput.count == 70000)
-    #expect(result.standardError.isEmpty)
+    #expect(config.databaseEndpoint.host == "db.example.com")
+    #expect(config.databaseEndpoint.port == 5432)
+    #expect(config.databaseEndpoint.username == "demo")
+    #expect(config.databaseEndpoint.password == "secret")
+    #expect(config.databaseEndpoint.database == "jobsdb")
+    #expect(config.databaseEndpoint.tlsMode == .require)
+    #expect(config.redactedDatabaseDescription == "demo@db.example.com:5432/jobsdb")
+    #expect(config.postgresConnectionConfiguration.host == "db.example.com")
+    #expect(config.postgresConnectionConfiguration.port == 5432)
+    #expect(config.postgresConnectionConfiguration.username == "demo")
+    #expect(config.postgresConnectionConfiguration.database == "jobsdb")
+    #expect(config.postgresConnectionConfiguration.options.tlsServerName == nil)
+    #expect(config.airflowHomeURL()?.absoluteString == "https://airflow.example.com")
+    #expect(config.airflowDagURL(dagID: "linkedin_notifier")?.absoluteString == "https://airflow.example.com/dags/linkedin_notifier/grid")
+    #expect(config.airflowDagRunURL(dagID: "linkedin_notifier", runID: "manual__123")?.absoluteString == "https://airflow.example.com/dags/linkedin_notifier/runs/manual__123")
 }
 
 @Test
-func commandRunnerTimesOutHungProcess() async {
-    let runner = CommandRunner()
-
-    do {
-        _ = try await runner.run(
-            executable: "/bin/sleep",
-            arguments: ["2"],
-            timeout: 0.1
-        )
-        Issue.record("Expected the sleep command to time out.")
-    } catch let error as CommandError {
-        switch error {
-        case .timedOut:
-            break
-        default:
-            Issue.record("Expected a timeout error, got \(error).")
-        }
-    } catch {
-        Issue.record("Expected a CommandError timeout, got \(error).")
+func cloudConfigRequiresDatabaseURL() {
+    #expect(throws: CloudConfigError.missingJobsDatabaseURL) {
+        _ = try CloudConfig.load(bundle: .main, environment: [:])
     }
 }
 
 @Test
-func decodeJSONFindsPayloadInsideNoisyAirflowOutput() throws {
-    let runner = CommandRunner()
-    let output = """
-    2026-03-31T06:32:35.438488Z [warning  ] Astro managed secrets backend is disabled [astronomer.runtime.plugin.AstronomerRuntimePlugin] loc=plugin.py:125
-    [{"dag_id":"linkedin_notifier","run_id":"scheduled__2026-03-31T00:00:00+00:00","state":"success","run_after":"2026-03-31T00:00:00+00:00"}]
-    /usr/local/lib/python3.12/site-packages/airflow/configuration.py:879 DeprecationWarning: The secret_key option in [webserver] has been moved to the secret_key option in [api]
-    """
+func cloudConfigLoadsFromEnvironment() throws {
+    let config = try CloudConfig.load(environment: [
+        CloudBuildConfig.jobsDatabaseURLEnvironmentKey: "postgresql://worker:pw@remote.example.com:5433/cloudjobs",
+        CloudBuildConfig.airflowWebURLEnvironmentKey: "https://airflow.example.com"
+    ])
 
-    let runs = try runner.decodeJSON([DagRunRecord].self, from: output)
-
-    #expect(runs.count == 1)
-    #expect(runs.first?.dagId == "linkedin_notifier")
-    #expect(runs.first?.runId == "scheduled__2026-03-31T00:00:00+00:00")
-    #expect(runs.first?.state == "success")
+    #expect(config.databaseEndpoint.host == "remote.example.com")
+    #expect(config.databaseEndpoint.port == 5433)
+    #expect(config.databaseEndpoint.username == "worker")
+    #expect(config.databaseEndpoint.database == "cloudjobs")
+    #expect(config.airflowWebURLString == "https://airflow.example.com")
 }
 
 @Test
-func airflowBaseURLParsesDockerPortOutput() throws {
-    let url = ProjectService.airflowBaseURL(
-        fromDockerPortOutput: """
-        127.0.0.1:8080
-        [::]:8080
-        """
-    )
-
-    #expect(url?.absoluteString == "http://127.0.0.1:8080")
-}
-
-@Test
-func projectLocatorPrefersSavedProjectPathWhenValid() {
-    let path = ProjectLocator.resolvedDefaultProjectPath(
-        savedProjectPath: "/tmp/saved-project",
-        bundleProjectPath: "/tmp/bundle-project",
-        filePath: "/tmp/source/LinkedinNotifierApp.swift",
-        homeDirectoryPath: "/Users/levi",
-        fileExistsAtPath: { filePath in
-            filePath == "/tmp/saved-project/.astro/config.yaml"
-        }
-    )
-
-    #expect(path == "/tmp/saved-project")
-}
-
-@Test
-func projectLocatorFallsBackToBundledProjectPathWhenSavedPathIsInvalid() {
-    let path = ProjectLocator.resolvedDefaultProjectPath(
-        savedProjectPath: "/tmp/missing-project",
-        bundleProjectPath: "/tmp/bundle-project",
-        filePath: "/tmp/source/LinkedinNotifierApp.swift",
-        homeDirectoryPath: "/Users/levi",
-        fileExistsAtPath: { filePath in
-            filePath == "/tmp/bundle-project/.astro/config.yaml"
-        }
-    )
-
-    #expect(path == "/tmp/bundle-project")
-}
-
-@Test
-func dagRunRecordDecodesListRunsPayload() throws {
+func localProfileSummaryDecodesProfilesJSONShape() throws {
     let data = Data(
         """
-        {
-          "dag_id": "linkedin_notifier",
-          "run_id": "manual__2026-03-30T20:00:00+00:00",
-          "state": "success"
-        }
+        [
+          {
+            "profile_key": "Xingyou Li",
+            "display_name": "Xingyou Li",
+            "active": true,
+            "resume_path": "resume/xingyouli.md",
+            "discord_channel_id": "1476129860450779147",
+            "model_name": "gpt-5.4",
+            "candidate_summary": {
+              "summary": "Early-career data engineer.",
+              "target_roles": ["Data Engineer", "Analytics Engineer"],
+              "candidate_years": 1.5,
+              "candidate_seniority": "junior",
+              "core_skills": ["Python", "SQL"],
+              "obvious_gaps": ["Fluent Dutch"],
+              "language_signals": {
+                "dutch_level": "basic",
+                "english_level": "fluent",
+                "notes": "English is fluent."
+              }
+            },
+            "search_configs": [
+              {
+                "name": "data",
+                "location": "Netherlands",
+                "distance": 50,
+                "hours_old": 120,
+                "results_per_term": 300,
+                "terms": ["python", "data engineer"]
+              }
+            ]
+          }
+        ]
         """.utf8
     )
 
     let decoder = JSONDecoder()
     decoder.keyDecodingStrategy = .convertFromSnakeCase
 
-    let run = try decoder.decode(DagRunRecord.self, from: data)
+    let profiles = try decoder.decode([LocalProfileSummary].self, from: data)
+    let profile = try #require(profiles.first)
 
-    #expect(run.dagId == "linkedin_notifier")
-    #expect(run.runId == "manual__2026-03-30T20:00:00+00:00")
-    #expect(run.state == "success")
+    #expect(profile.profileKey == "Xingyou Li")
+    #expect(profile.displayName == "Xingyou Li")
+    #expect(profile.active == true)
+    #expect(profile.resumePath == "resume/xingyouli.md")
+    #expect(profile.modelName == "gpt-5.4")
+    #expect(profile.candidateSummary?.candidateYears == 1.5)
+    #expect(profile.candidateSummary?.targetRoles == ["Data Engineer", "Analytics Engineer"])
+    #expect(profile.searchConfigs.first?.terms == ["python", "data engineer"])
 }
 
 @Test
-func dagRunRecordDecodesTriggerPayload() throws {
-    let data = Data(
-        """
-        {
-          "dag_id": "linkedin_notifier",
-          "dag_run_id": "manual__2026-03-30T20:00:00+00:00",
-          "state": "queued"
-        }
-        """.utf8
+func localProfileMatchesRemoteDashboardByKeyOrDisplayName() {
+    let localProfile = LocalProfileSummary(
+        profileKey: "Xingyou Li",
+        displayName: "Xingyou Li",
+        active: true,
+        resumePath: nil,
+        discordChannelId: nil,
+        modelName: nil,
+        candidateSummary: nil,
+        searchConfigs: []
     )
 
-    let decoder = JSONDecoder()
-    decoder.keyDecodingStrategy = .convertFromSnakeCase
+    let matchingDashboard = ProfileDashboard(
+        profileId: 2,
+        profileKey: "Xingyou Li",
+        displayName: "Xingyou Li",
+        isActive: true,
+        modelName: nil,
+        discordChannelId: nil,
+        hasDiscordWebhook: nil,
+        totalJobs: 10,
+        notifiedJobs: 2,
+        fitPending: 1,
+        fitProcessing: 0,
+        fitDone: 5,
+        fitNotified: 2,
+        fitFailed: 0,
+        notifyFailed: 0,
+        scoredJobs: 8,
+        avgFitScore: 51,
+        maxFitScore: 72,
+        lastSeenAt: nil,
+        lastNotifiedAt: nil,
+        scoreBuckets: [],
+        decisionBreakdown: [],
+        topTerms: []
+    )
 
-    let run = try decoder.decode(DagRunRecord.self, from: data)
+    let nonMatchingDashboard = ProfileDashboard(
+        profileId: 3,
+        profileKey: "Other",
+        displayName: "Other",
+        isActive: true,
+        modelName: nil,
+        discordChannelId: nil,
+        hasDiscordWebhook: nil,
+        totalJobs: 4,
+        notifiedJobs: 0,
+        fitPending: 0,
+        fitProcessing: 0,
+        fitDone: 1,
+        fitNotified: 0,
+        fitFailed: 0,
+        notifyFailed: 0,
+        scoredJobs: 1,
+        avgFitScore: 10,
+        maxFitScore: 10,
+        lastSeenAt: nil,
+        lastNotifiedAt: nil,
+        scoreBuckets: [],
+        decisionBreakdown: [],
+        topTerms: []
+    )
 
-    #expect(run.dagId == "linkedin_notifier")
-    #expect(run.runId == "manual__2026-03-30T20:00:00+00:00")
-    #expect(run.state == "queued")
+    let matched = [matchingDashboard, nonMatchingDashboard].first { dashboard in
+        dashboard.matches(localProfile: localProfile)
+    }
+
+    #expect(matched?.profileId == 2)
 }
 
 @Test

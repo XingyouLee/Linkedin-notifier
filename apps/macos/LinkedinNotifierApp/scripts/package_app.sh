@@ -15,19 +15,33 @@ CONTENTS_DIR="${APP_BUNDLE}/Contents"
 MACOS_DIR="${CONTENTS_DIR}/MacOS"
 RESOURCES_DIR="${CONTENTS_DIR}/Resources"
 FRAMEWORKS_DIR="${CONTENTS_DIR}/Frameworks"
-PROJECT_ROOT="${APP_ROOT}"
+REPO_ROOT="$(cd "${APP_ROOT}/../../.." && pwd)"
 ICON_SOURCE="${APP_ROOT}/Sources/LinkedinNotifierApp/Resources/AppIcon.png"
+PROFILES_SOURCE="${APP_ROOT}/Sources/LinkedinNotifierApp/Resources/profiles.json"
 ICON_NAME="AppIcon"
+DEFAULT_ENV_PATH="/Users/levi/Linkedin-notifier/.env"
 
 cd "${APP_ROOT}"
 
-while [[ "${PROJECT_ROOT}" != "/" && ! -f "${PROJECT_ROOT}/.astro/config.yaml" ]]; do
-  PROJECT_ROOT="$(dirname "${PROJECT_ROOT}")"
-done
+ENV_PATH="${LINKEDIN_NOTIFIER_ENV_FILE:-${REPO_ROOT}/.env}"
+if [[ ! -f "${ENV_PATH}" && -f "${DEFAULT_ENV_PATH}" ]]; then
+  ENV_PATH="${DEFAULT_ENV_PATH}"
+fi
 
-if [[ ! -f "${PROJECT_ROOT}/.astro/config.yaml" ]]; then
-  echo "Could not locate the Astro project root from ${APP_ROOT}." >&2
+if [[ ! -f "${ENV_PATH}" ]]; then
+  echo "Could not find an env file. Set LINKEDIN_NOTIFIER_ENV_FILE or create ${REPO_ROOT}/.env." >&2
   exit 1
+fi
+
+JOBS_DB_URL_VALUE="$(sed -n 's/^JOBS_DB_URL=//p' "${ENV_PATH}" | tail -n 1)"
+if [[ -z "${JOBS_DB_URL_VALUE}" ]]; then
+  echo "JOBS_DB_URL is missing from ${ENV_PATH}." >&2
+  exit 1
+fi
+
+AIRFLOW_WEB_URL_VALUE="${LINKEDIN_NOTIFIER_AIRFLOW_WEB_URL:-}"
+if [[ -z "${AIRFLOW_WEB_URL_VALUE}" ]]; then
+  AIRFLOW_WEB_URL_VALUE="$(sed -n 's/^LINKEDIN_NOTIFIER_AIRFLOW_WEB_URL=//p' "${ENV_PATH}" | tail -n 1)"
 fi
 
 swift build --disable-sandbox -c release
@@ -67,6 +81,15 @@ mkdir -p "${MACOS_DIR}" "${RESOURCES_DIR}" "${FRAMEWORKS_DIR}"
 cp "${EXECUTABLE_PATH}" "${MACOS_DIR}/${APP_NAME}"
 cp "${BUILD_DIR}/${ICON_NAME}.icns" "${RESOURCES_DIR}/${ICON_NAME}.icns"
 
+if [[ -f "${PROFILES_SOURCE}" ]]; then
+  cp "${PROFILES_SOURCE}" "${RESOURCES_DIR}/profiles.json"
+fi
+
+EXECUTABLE_DIR="$(dirname "${EXECUTABLE_PATH}")"
+while IFS= read -r -d '' resource_bundle; do
+  cp -R "${resource_bundle}" "${RESOURCES_DIR}/"
+done < <(find "${EXECUTABLE_DIR}" -maxdepth 1 -type d -name '*.bundle' -print0)
+
 cat > "${CONTENTS_DIR}/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -96,8 +119,10 @@ cat > "${CONTENTS_DIR}/Info.plist" <<EOF
     <true/>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
-    <key>LinkedinNotifierProjectPath</key>
-    <string>${PROJECT_ROOT}</string>
+    <key>${CLOUDBUILD_JOB_DB_KEY:-LinkedinNotifierJobsDatabaseURL}</key>
+    <string>${JOBS_DB_URL_VALUE}</string>
+    <key>${CLOUDBUILD_AIRFLOW_KEY:-LinkedinNotifierAirflowWebURL}</key>
+    <string>${AIRFLOW_WEB_URL_VALUE}</string>
 </dict>
 </plist>
 EOF

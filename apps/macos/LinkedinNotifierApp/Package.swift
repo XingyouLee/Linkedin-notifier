@@ -13,9 +13,17 @@ let package = Package(
             targets: ["LinkedinNotifierApp"]
         ),
     ],
+    dependencies: [
+        .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
+        .package(url: "https://github.com/apple/swift-nio-ssl.git", from: "2.29.0"),
+    ],
     targets: [
         .executableTarget(
             name: "LinkedinNotifierApp",
+            dependencies: [
+                .product(name: "PostgresNIO", package: "postgres-nio"),
+                .product(name: "NIOSSL", package: "swift-nio-ssl"),
+            ],
             resources: [
                 .process("Resources"),
             ]

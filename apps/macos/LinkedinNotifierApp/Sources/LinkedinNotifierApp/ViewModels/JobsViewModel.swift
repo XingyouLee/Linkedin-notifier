@@ -10,7 +10,6 @@ final class JobsViewModel: ObservableObject {
     @Published private(set) var errorMessage: String?
 
     func loadJobs(
-        projectPath: String,
         service: ProjectService,
         searchText overrideSearchText: String? = nil
     ) async {
@@ -22,15 +21,12 @@ final class JobsViewModel: ObservableObject {
         searchText = activeSearchText
 
         do {
-            jobs = try await service.loadJobs(
-                projectPath: projectPath,
-                searchText: activeSearchText
-            )
+            jobs = try await service.loadJobs(searchText: activeSearchText)
             if let selectedJobID, jobs.contains(where: { $0.jobId == selectedJobID }) {
-                try await loadDetail(projectPath: projectPath, jobID: selectedJobID, service: service)
+                try await loadDetail(jobID: selectedJobID, service: service)
             } else if let firstJobID = jobs.first?.jobId {
                 selectedJobID = firstJobID
-                try await loadDetail(projectPath: projectPath, jobID: firstJobID, service: service)
+                try await loadDetail(jobID: firstJobID, service: service)
             } else {
                 selectedJobID = nil
                 selectedJobDetail = nil
@@ -43,7 +39,7 @@ final class JobsViewModel: ObservableObject {
         }
     }
 
-    func select(jobID: String?, projectPath: String, service: ProjectService) async {
+    func select(jobID: String?, service: ProjectService) async {
         guard let jobID else {
             selectedJobID = nil
             selectedJobDetail = nil
@@ -52,14 +48,14 @@ final class JobsViewModel: ObservableObject {
 
         selectedJobID = jobID
         do {
-            try await loadDetail(projectPath: projectPath, jobID: jobID, service: service)
+            try await loadDetail(jobID: jobID, service: service)
         } catch {
             selectedJobDetail = nil
             errorMessage = error.localizedDescription
         }
     }
 
-    private func loadDetail(projectPath: String, jobID: String, service: ProjectService) async throws {
-        selectedJobDetail = try await service.loadJobDetail(projectPath: projectPath, jobID: jobID)
+    private func loadDetail(jobID: String, service: ProjectService) async throws {
+        selectedJobDetail = try await service.loadJobDetail(jobID: jobID)
     }
 }

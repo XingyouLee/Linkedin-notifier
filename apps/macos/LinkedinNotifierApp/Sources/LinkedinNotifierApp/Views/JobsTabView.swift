@@ -41,11 +41,7 @@ struct JobsTabView: View {
                     get: { viewModel.selectedJobID },
                     set: { newValue in
                         Task {
-                            await viewModel.select(
-                                jobID: newValue,
-                                projectPath: context.projectPath,
-                                service: context.projectService
-                            )
+                            await viewModel.select(jobID: newValue, service: context.projectService)
                         }
                     }
                 )) { job in
@@ -101,7 +97,7 @@ struct JobsTabView: View {
             .frame(minWidth: 640, maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .task(id: context.projectPath) {
+        .task {
             searchDraft = viewModel.searchText
             await runSearch()
         }
@@ -109,7 +105,6 @@ struct JobsTabView: View {
 
     private func runSearch() async {
         await viewModel.loadJobs(
-            projectPath: context.projectPath,
             service: context.projectService,
             searchText: searchDraft
         )

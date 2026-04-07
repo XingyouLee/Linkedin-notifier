@@ -2,20 +2,50 @@ import Foundation
 
 @MainActor
 final class AppContext: ObservableObject {
-    @Published var projectPath: String {
-        didSet {
-            ProjectLocator.persistProjectPath(projectPath)
+    enum State {
+        case ready(ProjectService)
+        case failed(String)
+    }
+
+    let state: State
+
+    init(
+        projectService: ProjectService? = nil
+    ) {
+        if let projectService {
+            self.state = .ready(projectService)
+            return
+        }
+
+        do {
+            self.state = .ready(try ProjectService.loadDefault())
+        } catch {
+            self.state = .failed(error.localizedDescription)
         }
     }
 
-    let projectService: ProjectService
+    var isReady: Bool {
+        if case .ready = state {
+            return true
+        }
+        return false
+    }
 
-    init(
-        projectPath: String = ProjectLocator.defaultProjectPath(),
-        projectService: ProjectService? = nil
-    ) {
-        self.projectPath = projectPath
-        self.projectService = projectService ?? ProjectService()
-        ProjectLocator.persistProjectPath(projectPath)
+    var startupError: String? {
+        if case let .failed(message) = state {
+            return message
+        }
+        return nil
+    }
+
+    var projectService: ProjectService {
+        guard case let .ready(projectService) = state else {
+            preconditionFailure("ProjectService is unavailable because cloud config failed to load.")
+        }
+        return projectService
+    }
+
+    var cloudConfig: CloudConfig {
+        projectService.cloudConfig
     }
 }

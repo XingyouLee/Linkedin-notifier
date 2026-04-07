@@ -1,22 +1,20 @@
 # LinkedinNotifierApp
 
-Local macOS SwiftUI frontend for the Astro/Airflow project in this repository.
+Standalone macOS SwiftUI client for the cloud-hosted LinkedIn notifier stack.
 
-## MVP scope
+## Current scope
 
-- Detect whether Docker is reachable
-- Detect whether the local Astro project is running
-- Start the local Astro stack
-- Trigger the scan and fitting DAGs
-- Show recent DAG runs
+- Read the remote business database directly from Swift
+- Show queue summary and latest batch progress
+- Browse profile dashboards and job detail records
 - Search jobs by id, title, company, profile, or matched term
-- Inspect per-profile fit state for a selected job
+- Open the external Airflow UI in the browser
 
 ## How it works
 
-- The app shells out to `docker` and `astro`
-- Airflow CLI commands run inside the local scheduler container via `docker exec`
-- Business data is fetched from Postgres through [`frontend_data.py`](/Users/levi/Linkedin-notifier/dags/frontend_data.py), which also runs inside the scheduler container
+- The app uses `PostgresNIO` to connect directly to the remote `JOBS_DB_URL`
+- It is intentionally read-only: no local Docker, Astro, or DAG-triggering workflow remains in the UI
+- Airflow links open in the default browser using a separately configured external URL
 
 ## Open in Xcode
 
@@ -33,6 +31,20 @@ Run:
 ./scripts/package_app.sh
 ```
 
+The packaging script reads cloud config from the repository root `.env` by default. Required value:
+
+```bash
+JOBS_DB_URL=postgresql://user:password@host:5432/jobsdb
+```
+
+Optional value:
+
+```bash
+LINKEDIN_NOTIFIER_AIRFLOW_WEB_URL=https://your-airflow-host.example.com
+```
+
+You can override the env file path with `LINKEDIN_NOTIFIER_ENV_FILE=/abs/path/to/.env ./scripts/package_app.sh`.
+
 If you want to rebuild and immediately relaunch the packaged app in `dist/`, run:
 
 ```bash
@@ -47,8 +59,6 @@ You can then drag that `.app` to your Desktop or `Applications` and launch it wi
 
 ## Notes
 
-- The app remembers the last project path you entered
-- Xcode `Build` updates the Swift build products, but it does not refresh `dist/LinkedinNotifierApp.app`; use `Run` for Xcode testing, or `./scripts/package_app.sh` when you want the packaged app updated
-- The packaged `.app` also embeds the current repo path as its initial default, so it can launch correctly outside Xcode on this machine
-- If you move the repo later, update the path field in the app once or rebuild the `.app`
-- The current implementation expects the local Astro containers to mount `dags/` into `/usr/local/airflow/dags`
+- The packaged `.app` embeds the remote DB URL and optional Airflow web URL at build time, so rebuild it whenever those values change
+- `swift test --package-path .` covers the Swift-side config and model behavior, but it does not hit the live database
+- Xcode `Build` updates Swift build products, but it does not refresh `dist/LinkedinNotifierApp.app`; use `./scripts/package_app.sh` when you want the packaged app updated
