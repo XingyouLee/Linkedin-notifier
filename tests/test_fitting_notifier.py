@@ -243,7 +243,7 @@ def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
     ]
 
 
-def test_request_llm_json_with_fallback_raises_fatal_when_all_endpoints_missing_output(
+def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_all_endpoints_fail(
     monkeypatch,
 ):
     def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
@@ -251,7 +251,7 @@ def test_request_llm_json_with_fallback_raises_fatal_when_all_endpoints_missing_
 
     monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
 
-    with pytest.raises(RuntimeError, match="^FATAL_API::") as error:
+    with pytest.raises(RuntimeError, match="^TRANSIENT_API::") as error:
         fitting_notifier._request_llm_json_with_fallback(
             endpoints=[
                 {

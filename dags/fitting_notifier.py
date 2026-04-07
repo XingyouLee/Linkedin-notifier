@@ -635,7 +635,11 @@ def _request_llm_json_with_fallback(
             fatal_errors.append(f"endpoint={endpoint_name} error={error}")
             continue
         except ValueError as error:
-            fatal_errors.append(f"endpoint={endpoint_name} error={error}")
+            message = f"endpoint={endpoint_name} error={error}"
+            if str(error) == "response_missing_output_text":
+                transient_errors.append(message)
+                continue
+            fatal_errors.append(message)
             continue
 
     if transient_errors and not fatal_errors:
