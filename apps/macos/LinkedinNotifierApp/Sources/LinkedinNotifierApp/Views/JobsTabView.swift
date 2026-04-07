@@ -32,9 +32,7 @@ struct JobsTabView: View {
                 }
 
                 if let errorMessage = viewModel.errorMessage {
-                    Text(errorMessage)
-                        .foregroundStyle(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    InlineMessageText(errorMessage)
                 }
 
                 List(viewModel.jobs, selection: Binding(
@@ -45,35 +43,7 @@ struct JobsTabView: View {
                         }
                     }
                 )) { job in
-                    VStack(alignment: .leading, spacing: 6) {
-                        HStack {
-                            Text(job.title ?? "Untitled job")
-                                .font(.headline)
-                            Spacer()
-                            Text(job.jobId)
-                                .font(.system(.caption, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                        }
-
-                        HStack(spacing: 10) {
-                            Text(job.company ?? "Unknown company")
-                            if let batchId = job.batchId {
-                                badge("batch \(batchId)")
-                            }
-                            if let jdStatus = job.jdStatus {
-                                badge("jd \(jdStatus)")
-                            }
-                            if let profileMatchCount = job.profileMatchCount {
-                                badge("\(profileMatchCount) profile(s)")
-                            }
-                            if let bestFitScore = job.bestFitScore {
-                                badge("best \(bestFitScore)")
-                            }
-                        }
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    }
-                    .padding(.vertical, 6)
+                    JobRowView(job: job)
                 }
                 .overlay {
                     if viewModel.isLoading {
@@ -108,13 +78,6 @@ struct JobsTabView: View {
             service: context.projectService,
             searchText: searchDraft
         )
-    }
-
-    private func badge(_ text: String) -> some View {
-        Text(text)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 3)
-            .background(.quaternary.opacity(0.5), in: Capsule())
     }
 }
 
@@ -163,93 +126,6 @@ private struct NativeSearchField: NSViewRepresentable {
 
         @objc func submit() {
             onSubmit()
-        }
-    }
-}
-
-private struct JobDetailView: View {
-    let detail: JobDetailResponse
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                GroupBox("Canonical Job") {
-                    VStack(alignment: .leading, spacing: 10) {
-                        infoRow("Job ID", detail.job.jobId, monospace: true)
-                        infoRow("Title", detail.job.title)
-                        infoRow("Company", detail.job.company)
-                        infoRow("Site", detail.job.site)
-                        infoRow("Batch", detail.job.batchId.map(String.init))
-                        infoRow("JD Status", detail.job.jdStatus)
-                        infoRow("JD Attempts", detail.job.jdAttempts.map(String.init))
-                        infoRow("Job URL", detail.job.jobUrl, monospace: true)
-                        if let descriptionError = detail.job.descriptionError {
-                            infoRow("Description Error", descriptionError)
-                        }
-                        if let jdError = detail.job.jdError {
-                            infoRow("JD Queue Error", jdError)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                GroupBox("Job Description") {
-                    Text(detail.job.description ?? "No description stored.")
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-
-                GroupBox("Profile Matches") {
-                    VStack(alignment: .leading, spacing: 14) {
-                        if detail.profiles.isEmpty {
-                            Text("No profile-specific records found for this job.")
-                                .foregroundStyle(.secondary)
-                        } else {
-                            ForEach(detail.profiles) { profile in
-                                VStack(alignment: .leading, spacing: 8) {
-                                    HStack {
-                                        Text(profile.displayName ?? profile.profileKey ?? "Profile \(profile.profileId)")
-                                            .font(.headline)
-                                        Spacer()
-                                        Text("profile_id=\(profile.profileId)")
-                                            .font(.system(.caption, design: .monospaced))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    infoRow("Matched Term", profile.matchedTerm)
-                                    infoRow("Fit Status", profile.fitStatus)
-                                    infoRow("Fit Score", profile.fitScore.map(String.init))
-                                    infoRow("Fit Decision", profile.fitDecision)
-                                    infoRow("Notify Status", profile.notifyStatus)
-                                    infoRow("Notify Error", profile.notifyError)
-                                    infoRow("LLM Error", profile.llmMatchError)
-                                    if let llmMatch = profile.llmMatch {
-                                        Text(llmMatch)
-                                            .font(.system(.caption, design: .monospaced))
-                                            .textSelection(.enabled)
-                                            .padding(10)
-                                            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 10))
-                                    }
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(.vertical, 4)
-                                Divider()
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func infoRow(_ label: String, _ value: String?, monospace: Bool = false) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text(label)
-                .foregroundStyle(.secondary)
-                .frame(width: 120, alignment: .leading)
-            Text(value ?? "—")
-                .font(monospace ? .system(.body, design: .monospaced) : .body)
-                .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 }

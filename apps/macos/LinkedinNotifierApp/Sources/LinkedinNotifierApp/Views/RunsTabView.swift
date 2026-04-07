@@ -25,30 +25,10 @@ struct RunsTabView: View {
                 .foregroundStyle(.secondary)
 
             if let errorMessage = navigationError ?? viewModel.errorMessage {
-                Text(errorMessage)
-                    .foregroundStyle(.red)
+                InlineMessageText(errorMessage)
             }
 
-            GroupBox("Quick Links") {
-                VStack(alignment: .leading, spacing: 12) {
-                    actionButton(
-                        title: "Open Airflow Home",
-                        subtitle: viewModel.homeURL?.absoluteString ?? "Not configured"
-                    ) {
-                        open(viewModel.homeURL, errorMessage: "Could not open the configured Airflow home page.")
-                    }
-
-                    ForEach(RunsViewModel.dagChoices, id: \.self) { dagID in
-                        actionButton(
-                            title: dagID,
-                            subtitle: viewModel.dagURLs[dagID]?.absoluteString ?? "Not configured"
-                        ) {
-                            open(viewModel.dagURLs[dagID], errorMessage: "Could not open the DAG page for \(dagID).")
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+            RunsQuickLinksView(homeURL: viewModel.homeURL, dagURLs: viewModel.dagURLs, open: open)
 
             Spacer()
         }
@@ -70,23 +50,6 @@ struct RunsTabView: View {
                 try? await Task.sleep(for: .seconds(30))
             }
         }
-    }
-
-    private func actionButton(title: String, subtitle: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(title)
-                    .font(.headline)
-                Text(subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .textSelection(.enabled)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(12)
-            .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 12))
-        }
-        .buttonStyle(.plain)
     }
 
     private func open(_ url: URL?, errorMessage: String) {

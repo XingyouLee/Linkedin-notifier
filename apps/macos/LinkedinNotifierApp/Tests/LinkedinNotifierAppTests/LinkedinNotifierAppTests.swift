@@ -329,3 +329,44 @@ func profileDashboardResponseDecodesDashboardPayload() throws {
     #expect(profile.scoreBuckets.count == 2)
     #expect(profile.topTerms.count == 2)
 }
+
+@Test
+func profileDashboardComputedMetricsRemainConsistent() {
+    let profile = ProfileDashboard(
+        profileId: 7,
+        profileKey: "demo",
+        displayName: "Demo",
+        isActive: true,
+        modelName: nil,
+        discordChannelId: nil,
+        hasDiscordWebhook: nil,
+        totalJobs: 40,
+        notifiedJobs: 8,
+        fitPending: 3,
+        fitProcessing: 2,
+        fitDone: 10,
+        fitNotified: 5,
+        fitFailed: 4,
+        notifyFailed: 1,
+        scoredJobs: 22,
+        avgFitScore: 48.5,
+        maxFitScore: 88,
+        lastSeenAt: nil,
+        lastNotifiedAt: nil,
+        scoreBuckets: [],
+        decisionBreakdown: [
+            ProfileDecisionCount(decision: "Strong Fit", count: 2),
+            ProfileDecisionCount(decision: "Moderate Fit", count: 3),
+            ProfileDecisionCount(decision: "Weak Fit", count: 5)
+        ],
+        topTerms: []
+    )
+
+    #expect(profile.totalJobsValue == 40)
+    #expect(profile.notifiedJobsValue == 8)
+    #expect(profile.terminalCompletedJobs == 15)
+    #expect(profile.totalFailures == 5)
+    #expect(profile.strongOrModerateCount == 5)
+    #expect(profile.completionFraction == 0.375)
+    #expect(profile.notifiedFraction == 0.2)
+}
