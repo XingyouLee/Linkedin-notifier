@@ -56,6 +56,7 @@ YEARS_RANGE_RE = re.compile(
     re.I,
 )
 YEARS_SINGLE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)", re.I)
+LOGGED_MODEL_NAME_RE = re.compile(r"model_name=([^\s|]+)")
 
 
 def _build_match_task_result(
@@ -136,12 +137,14 @@ def _build_job_match_result(
     *,
     llm_match: str | None = None,
     llm_match_error: str | None = None,
+    model_name: str | None = None,
 ):
     return {
         "profile_id": int(profile_id),
         "job_id": job_id,
         "llm_match": llm_match,
         "llm_match_error": llm_match_error,
+        "model_name": model_name,
     }
 
 
@@ -202,9 +205,28 @@ def _summarize_api_errors(api_error_messages):
     )
 
 
+def _extract_logged_model_names(text: str | None) -> list[str]:
+    model_names = []
+    for model_name in LOGGED_MODEL_NAME_RE.findall(str(text or "")):
+        if model_name not in model_names:
+            model_names.append(model_name)
+    return model_names
+
+
+def _summarize_logged_model_names(
+    text: str | None,
+    fallback_model_name: str | None = None,
+) -> str:
+    model_names = _extract_logged_model_names(text)
+    if model_names:
+        return ",".join(model_names)
+    return fallback_model_name or "unknown"
+
+
 def _log_job_match_result(job_result):
     job_id = job_result.get("job_id")
     profile_id = job_result.get("profile_id")
+    model_name = job_result.get("model_name") or "unknown"
     if not job_id or profile_id is None:
         return
 
@@ -212,7 +234,7 @@ def _log_job_match_result(job_result):
     if llm_error:
         print(
             f"llm_result profile_id={profile_id} job_id={job_id} "
-            f"status=error error={llm_error}"
+            f"model_name={model_name} status=error error={llm_error}"
         )
         return
 
@@ -226,7 +248,7 @@ def _log_job_match_result(job_result):
         pass
 
     print(
-        f"llm_result profile_id={profile_id} job_id={job_id} status=ok "
+        f"llm_result profile_id={profile_id} job_id={job_id} model_name={model_name} status=ok "
         f"fit_score={fit_score} decision={decision}"
     )
 
@@ -609,7 +631,8 @@ def _request_llm_json_with_fallback(
     model_name: str,
     prompt: str,
     start_index: int = 0,
-) -> dict:
+    return_metadata: bool = False,
+) -> dict | tuple[dict, str]:
     transient_errors: list[str] = []
     fatal_errors: list[str] = []
 
@@ -625,30 +648,42 @@ def _request_llm_json_with_fallback(
         )
         effective_model_name = endpoint.get("model") or model_name
         try:
-            return _request_llm_json(
+            parsed = _request_llm_json(
                 request_url=endpoint["request_url"],
                 api_key=endpoint["api_key"],
                 model_name=effective_model_name,
                 prompt=prompt,
             )
+            if return_metadata:
+                return parsed, effective_model_name
+            return parsed
         except requests.HTTPError as error:
             status_code = (
                 error.response.status_code if error.response is not None else "unknown"
             )
-            message = f"endpoint={endpoint_name} status={status_code} error={error}"
+            message = (
+                f"endpoint={endpoint_name} model_name={effective_model_name} "
+                f"status={status_code} error={error}"
+            )
             if _is_transient_llm_http_status(status_code):
                 transient_errors.append(message)
                 continue
             fatal_errors.append(message)
             continue
         except (requests.Timeout, requests.ConnectionError) as error:
-            transient_errors.append(f"endpoint={endpoint_name} error={error}")
+            transient_errors.append(
+                f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
+            )
             continue
         except requests.RequestException as error:
-            fatal_errors.append(f"endpoint={endpoint_name} error={error}")
+            fatal_errors.append(
+                f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
+            )
             continue
         except ValueError as error:
-            message = f"endpoint={endpoint_name} error={error}"
+            message = (
+                f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
+            )
             if str(error) == "response_missing_output_text":
                 transient_errors.append(message)
                 continue
@@ -1091,7 +1126,17 @@ def linkedin_fitting_notifier():
             finalized_item_keys.add(item_key)
             finalize_counts["failed"] += 1
 
-        def _record_transient_api_error(item, message: str):
+        def _default_prepared_model_name(prepared: dict) -> str:
+            profile_record = prepared.get("profile_record") or {}
+            return profile_record.get("model_name") or os.getenv(
+                "FITTING_MODEL_NAME", "gpt-5.4"
+            )
+
+        def _record_transient_api_error(
+            item,
+            message: str,
+            model_name: str | None = None,
+        ):
             claim_key = _job_ref_key(item["profile_id"], item["job_id"])
             error_message = str(message)
             requeue_job_errors[claim_key] = error_message
@@ -1099,7 +1144,7 @@ def linkedin_fitting_notifier():
             _finalize_job_result(item, requeue_error=error_message)
             print(
                 f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
-                f"status=api_error_requeue error={error_message}"
+                f"model_name={model_name or 'unknown'} status=api_error_requeue error={error_message}"
             )
 
         def _process_single_item(prepared: dict) -> tuple[dict | None, dict | None]:
@@ -1125,17 +1170,19 @@ def linkedin_fitting_notifier():
 
             parsed = None
             last_error = None
+            used_model_name = model_name
             for attempt in range(3):
                 prompt = base_prompt
                 if attempt > 0:
                     prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
 
                 try:
-                    parsed = _request_llm_json_with_fallback(
+                    parsed, used_model_name = _request_llm_json_with_fallback(
                         endpoints=llm_endpoints,
                         model_name=model_name,
                         prompt=prompt,
                         start_index=(prepared["sequence_index"] + attempt) % len(llm_endpoints),
+                        return_metadata=True,
                     )
                     parsed = _apply_fit_caps(
                         parsed,
@@ -1147,9 +1194,13 @@ def linkedin_fitting_notifier():
                 except RuntimeError as error:
                     error_message = str(error)
                     if error_message.startswith("TRANSIENT_API::") and attempt < 2:
+                        retry_model_name = _summarize_logged_model_names(
+                            error_message,
+                            model_name,
+                        )
                         print(
                             f"llm_result profile_id={profile_id} job_id={job_id} "
-                            f"status=api_retry attempt={attempt + 1}/3 error={error_message.removeprefix('TRANSIENT_API::')}"
+                            f"model_name={retry_model_name} status=api_retry attempt={attempt + 1}/3 error={error_message.removeprefix('TRANSIENT_API::')}"
                         )
                         time.sleep(min(2**attempt, 4))
                         continue
@@ -1162,12 +1213,14 @@ def linkedin_fitting_notifier():
                     profile_id,
                     job_id,
                     llm_match=json.dumps(parsed, ensure_ascii=False),
+                    model_name=used_model_name,
                 )
 
             return item, _build_job_match_result(
                 profile_id,
                 job_id,
                 llm_match_error=last_error or "invalid_json_response",
+                model_name=used_model_name,
             )
 
         def _return_api_error(
@@ -1461,20 +1514,26 @@ def linkedin_fitting_notifier():
             f"Starting LLM fitting with concurrency={concurrency} jobs={len(ready_items)}"
         )
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            future_to_item = {
-                executor.submit(_process_single_item, prepared): prepared["item"]
+            future_to_prepared = {
+                executor.submit(_process_single_item, prepared): prepared
                 for prepared in ready_items
             }
-            for future in as_completed(future_to_item):
-                item = future_to_item[future]
+            for future in as_completed(future_to_prepared):
+                prepared = future_to_prepared[future]
+                item = prepared["item"]
                 try:
                     _, job_result = future.result()
                 except Exception as error:
                     error_text = str(error)
+                    error_model_name = _summarize_logged_model_names(
+                        error_text,
+                        _default_prepared_model_name(prepared),
+                    )
                     if error_text.startswith("TRANSIENT_API::"):
                         _record_transient_api_error(
                             item,
                             error_text.removeprefix("TRANSIENT_API::"),
+                            error_model_name,
                         )
                         continue
                     if error_text.startswith("FATAL_API::"):
@@ -1482,7 +1541,7 @@ def linkedin_fitting_notifier():
                         claim_key = _job_ref_key(item["profile_id"], item["job_id"])
                         print(
                             f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
-                            f"status=api_error error={fatal_error}"
+                            f"model_name={error_model_name} status=api_error error={fatal_error}"
                         )
                         return _return_api_error(
                             fatal_error,
@@ -1494,6 +1553,7 @@ def linkedin_fitting_notifier():
                         item["profile_id"],
                         item["job_id"],
                         llm_match_error=f"unexpected_job_error: {error}",
+                        model_name=error_model_name,
                     )
 
                 matched_jobs.append(job_result)

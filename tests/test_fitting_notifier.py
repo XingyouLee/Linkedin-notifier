@@ -264,7 +264,7 @@ def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_
             prompt="Return JSON only",
         )
 
-    assert "endpoint=empty-proxy error=response_missing_output_text" in str(
+    assert "endpoint=empty-proxy model_name=gpt-5.4 error=response_missing_output_text" in str(
         error.value
     )
 
@@ -341,3 +341,40 @@ def test_request_llm_json_uses_plain_string_input_payload(monkeypatch):
         "model": "gpt-5.4",
         "input": 'Return only valid JSON: {"ok": true}',
     }
+
+
+def test_log_job_match_result_includes_model_name_for_success(capsys):
+    fitting_notifier._log_job_match_result(
+        {
+            "profile_id": 12,
+            "job_id": "job-1",
+            "model_name": "gpt-5.4",
+            "llm_match": json.dumps(
+                {
+                    "fit_score": 88,
+                    "decision": "Strong Fit",
+                }
+            ),
+            "llm_match_error": None,
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert "status=ok" in captured.out
+    assert "model_name=gpt-5.4" in captured.out
+
+
+def test_log_job_match_result_includes_model_name_for_error(capsys):
+    fitting_notifier._log_job_match_result(
+        {
+            "profile_id": 12,
+            "job_id": "job-1",
+            "model_name": "gpt-5.4-mini",
+            "llm_match": None,
+            "llm_match_error": "invalid_json_response",
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert "status=error" in captured.out
+    assert "model_name=gpt-5.4-mini" in captured.out
