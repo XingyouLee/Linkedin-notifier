@@ -13,9 +13,12 @@ airflow.db
 .idea/
 test.ipynb
 .codex_tmp/
+.claude/
 .playwright-mcp/
 .pytest_cache/
 .ruff_cache/
+CLAUDE*.md
+*claude*.md
 apps/**/.build/
 apps/**/.swiftpm/
 apps/**/dist/
