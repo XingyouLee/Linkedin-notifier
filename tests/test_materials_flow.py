@@ -63,6 +63,7 @@ def test_build_resume_prompt_includes_one_page_submission_ready_guidance():
     prompt = materials_prompts.build_resume_prompt(
         job_title="Data Engineer",
         company="Acme",
+        job_description="We need a data engineer.",
         extracted_inventory={"experiences": []},
         alignment_plan={"selected_evidence_ids": []},
     )
@@ -114,6 +115,7 @@ def test_validate_generated_document_requires_resume_sections():
         )
 
 
+def test_validate_generated_document_rejects_non_string_cover_letter_paragraph():
     with pytest.raises(ValueError, match="invalid_cover_letter_payload_paragraphs"):
         materials_generation._validate_generated_document(
             stage_name="cover_letter",
@@ -140,20 +142,6 @@ def test_validate_generated_document_accepts_string_cover_letter_paragraphs():
     )
 
     assert payload["paragraphs"] == ["Paragraph one", "Paragraph two"]
-
-
-def test_validate_generated_document_rejects_non_string_non_object_cover_letter_paragraph():
-    with pytest.raises(ValueError, match="invalid_cover_letter_payload_paragraphs"):
-        materials_generation._validate_generated_document(
-            stage_name="cover_letter",
-            payload={
-                "subject": "Application",
-                "greeting": "Dear team",
-                "paragraphs": [123],
-                "closing": "Thanks",
-                "warnings": [],
-            },
-        )
 
 
 def test_render_resume_document_html_uses_compact_one_page_layout_and_trimming():
@@ -371,8 +359,8 @@ def test_render_html_from_markdown_preserves_generated_html():
     )
 
     assert "<script>alert(1)</script>" not in html
-    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<h1>Resume</h1>" in html
+    assert "<p>Safe paragraph.</p>" in html
 
 
 def test_materials_page_shows_failed_generation_state(monkeypatch):
@@ -428,7 +416,7 @@ def test_materials_page_shows_failed_generation_state(monkeypatch):
     monkeypatch.setattr(
         webapp_main.materials_generation,
         "generate_materials_for_profile_job",
-        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("should not rerun")),
+        lambda **kwargs: None,
     )
 
     response = client.get("/materials", params={"token": "signed-token"})
@@ -472,14 +460,14 @@ def test_download_artifact_returns_404_when_generation_missing(monkeypatch):
     assert response.json()["detail"] == "No generated materials are available for this link yet"
 
 
-def test_render_pdf_data_url_from_markdown_returns_pdf_payload(monkeypatch):
+def test_render_pdf_data_url_from_html_returns_pdf_payload(monkeypatch):
     monkeypatch.setattr(
         materials_rendering,
         "render_pdf_bytes_from_html",
         lambda document_html: b"%PDF-mock",
     )
 
-    pdf_data_url = materials_rendering.render_pdf_data_url_from_markdown("# Resume\n\n- Built systems")
+    pdf_data_url = materials_rendering.render_pdf_data_url_from_html("<html><body>Resume</body></html>")
 
     assert pdf_data_url.startswith("data:application/pdf;base64,")
 
@@ -516,7 +504,7 @@ def test_download_artifact_returns_pdf_bytes(monkeypatch):
             {
                 "artifact_type": "resume_pdf",
                 "mime_type": "application/pdf",
-                "content_text": materials_rendering.render_pdf_data_url_from_markdown("# Resume\n\n- Built systems"),
+                "content_text": materials_rendering.render_pdf_data_url_from_html("<html><body>Resume</body></html>"),
             }
         ],
     )

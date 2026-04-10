@@ -67,7 +67,7 @@
           <p class="paragraph">{{ paragraph }}</p>
         {% endfor %}
 
-        <p class="closing">{{ closing | replace('\n', '<br />') | safe }}</p>
+        <p class="closing">{% for line in closing.split('\n') %}{{ line }}{% if not loop.last %}<br />{% endif %}{% endfor %}</p>
       </main>
     </div>
   </body>

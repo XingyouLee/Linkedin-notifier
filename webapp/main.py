@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
@@ -50,7 +50,13 @@ ERROR_MESSAGES = {
 
 
 def _get_valid_token_record(token: str) -> dict:
-    payload = materials_links.verify_materials_token(token)
+    try:
+        payload = materials_links.verify_materials_token(token)
+    except ValueError as error:
+        message = str(error)
+        if message == "expired_materials_token":
+            raise HTTPException(status_code=410, detail="This materials link has expired.") from error
+        raise
     token_record = database.get_material_access_token(token)
     if not token_record:
         raise HTTPException(status_code=404, detail="Materials link not found")
@@ -193,7 +199,7 @@ def health() -> str:
 
 
 @app.get("/materials", response_class=HTMLResponse)
-def materials_page(request: Request, token: str = Query(...)):
+def materials_page(request: Request, token: str = Query(...), background_tasks: BackgroundTasks = None):
     try:
         token_data = _get_valid_token_record(token)
     except ValueError as error:
@@ -239,21 +245,12 @@ def materials_page(request: Request, token: str = Query(...)):
         job_id=str(payload["job_id"]),
     )
     if generation is None or generation.get("status") == "failed":
-        try:
-            materials_generation.generate_materials_for_profile_job(
+        if background_tasks is not None:
+            background_tasks.add_task(
+                materials_generation.generate_materials_for_profile_job,
                 profile_id=int(payload["profile_id"]),
                 job_id=str(payload["job_id"]),
                 access_token_id=int(token_data["record"]["id"]),
-            )
-        except Exception:
-            generation = database.get_latest_material_generation(
-                profile_id=int(payload["profile_id"]),
-                job_id=str(payload["job_id"]),
-            )
-        else:
-            generation = database.get_latest_material_generation(
-                profile_id=int(payload["profile_id"]),
-                job_id=str(payload["job_id"]),
             )
 
     artifacts = []

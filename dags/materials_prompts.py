@@ -85,6 +85,7 @@ def build_resume_prompt(
     *,
     job_title: str,
     company: str,
+    job_description: str,
     extracted_inventory: dict,
     alignment_plan: dict,
 ) -> str:
@@ -153,6 +154,7 @@ def build_resume_prompt(
 
         Target company: <<<{company or 'Unknown company'}>>>
         Target role: <<<{job_title}>>>
+        Job description: <<<{job_description}>>>
         Extracted inventory: {json.dumps(extracted_inventory, ensure_ascii=False)}
         Alignment plan: {json.dumps(alignment_plan, ensure_ascii=False)}
         """

@@ -222,6 +222,7 @@ def generate_materials_for_profile_job(
             prompt=materials_prompts.build_resume_prompt(
                 job_title=context.get("title") or "",
                 company=context.get("company") or "",
+                job_description=context.get("description") or "",
                 extracted_inventory=extraction,
                 alignment_plan=alignment,
             ),

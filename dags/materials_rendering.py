@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -27,12 +28,6 @@ _TEMPLATE_ENV = Environment(
 )
 
 
-PDF_PAGE_WIDTH_PT = 612
-PDF_PAGE_HEIGHT_PT = 792
-PDF_MARGIN_PT = 48
-PDF_FONT_SIZE_PT = 11
-PDF_LINE_HEIGHT_PT = 16
-PDF_MAX_CHARS_PER_LINE = 88
 _MAX_SUMMARY_LINES = 3
 _MAX_SKILLS = 8
 _MAX_BULLETS_PER_ENTRY = 2
@@ -350,13 +345,7 @@ def render_html_from_markdown(markdown_text: str) -> str:
             extensions=["extra"],
             output_format="html5",
         )
-        body = html.escape(body)
-        body = body.replace("&lt;h1&gt;", "<h1>").replace("&lt;/h1&gt;", "</h1>")
-        body = body.replace("&lt;h2&gt;", "<h2>").replace("&lt;/h2&gt;", "</h2>")
-        body = body.replace("&lt;h3&gt;", "<h3>").replace("&lt;/h3&gt;", "</h3>")
-        body = body.replace("&lt;p&gt;", "<p>").replace("&lt;/p&gt;", "</p>")
-        body = body.replace("&lt;ul&gt;", "<ul>").replace("&lt;/ul&gt;", "</ul>")
-        body = body.replace("&lt;li&gt;", "<li>").replace("&lt;/li&gt;", "</li>")
+        body = re.sub(r'<script[^>]*>.*?</script>', '', body, flags=re.DOTALL | re.IGNORECASE)
     else:
         body = _render_basic_markdown_html(markdown_text)
     return "".join(
@@ -394,20 +383,6 @@ def render_pdf_bytes_from_html(document_html: str) -> bytes:
                 os.unlink(temp_path)
         except OSError:
             pass
-
-
-def render_pdf_bytes_from_markdown(markdown_text: str) -> bytes:
-    try:
-        return render_pdf_bytes_from_html(render_html_from_markdown(markdown_text))
-    except RuntimeError as error:
-        if str(error) == "playwright_not_installed" or str(error).startswith("pdf_render_failed:"):
-            return b"%PDF-1.4\n%mock\n"
-        raise
-
-
-def render_pdf_data_url_from_markdown(markdown_text: str) -> str:
-    pdf_b64 = base64.b64encode(render_pdf_bytes_from_markdown(markdown_text)).decode("ascii")
-    return f"data:application/pdf;base64,{pdf_b64}"
 
 
 def render_pdf_data_url_from_html(document_html: str) -> str:
