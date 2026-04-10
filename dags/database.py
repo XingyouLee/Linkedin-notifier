@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -907,6 +908,88 @@ def init_db():
                 """
             )
 
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS material_access_tokens (
+                    id BIGSERIAL PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+                    job_id TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+                    purpose TEXT NOT NULL DEFAULT 'materials_generate',
+                    expires_at TIMESTAMP NOT NULL,
+                    revoked_at TIMESTAMP,
+                    use_count INTEGER NOT NULL DEFAULT 0,
+                    last_used_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS material_generations (
+                    id BIGSERIAL PRIMARY KEY,
+                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+                    job_id TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+                    access_token_id BIGINT REFERENCES material_access_tokens (id) ON DELETE SET NULL,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    stage TEXT,
+                    error_code TEXT,
+                    error_message_user TEXT,
+                    error_message_internal TEXT,
+                    model_name_used TEXT,
+                    prompt_version TEXT,
+                    attempts INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS material_artifacts (
+                    id BIGSERIAL PRIMARY KEY,
+                    generation_id BIGINT NOT NULL REFERENCES material_generations (id) ON DELETE CASCADE,
+                    artifact_type TEXT NOT NULL,
+                    mime_type TEXT,
+                    content_text TEXT,
+                    file_path TEXT,
+                    byte_size BIGINT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_material_access_tokens_profile_job
+                ON material_access_tokens (profile_id, job_id)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_material_generations_profile_job
+                ON material_generations (profile_id, job_id, created_at DESC)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_material_generations_status
+                ON material_generations (status)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_material_artifacts_generation
+                ON material_artifacts (generation_id, artifact_type)
+                """
+            )
+
             _sync_profiles_from_source(cursor)
     _SCHEMA_INITIALIZED = True
 
@@ -1604,6 +1687,282 @@ def mark_job_notified(
                     """,
                     (status, error, profile_id, job_id),
                 )
+
+
+def _hash_material_token(token: str) -> str:
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def create_material_access_token(
+    *,
+    token: str,
+    profile_id: int,
+    job_id: str,
+    expires_at,
+    purpose: str = "materials_generate",
+) -> int:
+    init_db()
+    token_hash = _hash_material_token(token)
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO material_access_tokens (
+                    token_hash,
+                    profile_id,
+                    job_id,
+                    purpose,
+                    expires_at
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (token_hash, int(profile_id), str(job_id), purpose, expires_at),
+            )
+            row = cursor.fetchone()
+    return int(row[0])
+
+
+def get_material_access_token(token: str) -> Optional[Dict[str, Any]]:
+    init_db()
+    token_hash = _hash_material_token(token)
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM material_access_tokens
+                WHERE token_hash = %s
+                """,
+                (token_hash,),
+            )
+            row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def touch_material_access_token(token_id: int) -> None:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE material_access_tokens
+                SET use_count = use_count + 1,
+                    last_used_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (int(token_id),),
+            )
+
+
+def create_material_generation(
+    *,
+    profile_id: int,
+    job_id: str,
+    access_token_id: int | None = None,
+    status: str = "pending",
+    stage: str | None = None,
+    prompt_version: str | None = None,
+) -> int:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO material_generations (
+                    profile_id,
+                    job_id,
+                    access_token_id,
+                    status,
+                    stage,
+                    prompt_version
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    int(profile_id),
+                    str(job_id),
+                    int(access_token_id) if access_token_id is not None else None,
+                    status,
+                    stage,
+                    prompt_version,
+                ),
+            )
+            row = cursor.fetchone()
+    return int(row[0])
+
+
+def update_material_generation_status(
+    generation_id: int,
+    *,
+    status: str,
+    stage: str | None = None,
+    error_code: str | None = None,
+    error_message_user: str | None = None,
+    error_message_internal: str | None = None,
+    model_name_used: str | None = None,
+) -> None:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE material_generations
+                SET status = %s,
+                    stage = COALESCE(%s, stage),
+                    error_code = %s,
+                    error_message_user = %s,
+                    error_message_internal = %s,
+                    model_name_used = COALESCE(%s, model_name_used),
+                    updated_at = CURRENT_TIMESTAMP,
+                    completed_at = CASE
+                        WHEN %s IN ('completed', 'failed') THEN CURRENT_TIMESTAMP
+                        ELSE completed_at
+                    END
+                WHERE id = %s
+                """,
+                (
+                    status,
+                    stage,
+                    error_code,
+                    error_message_user,
+                    error_message_internal,
+                    model_name_used,
+                    status,
+                    int(generation_id),
+                ),
+            )
+
+
+def save_material_artifact(
+    *,
+    generation_id: int,
+    artifact_type: str,
+    mime_type: str | None = None,
+    content_text: str | None = None,
+    file_path: str | None = None,
+) -> int:
+    init_db()
+    byte_size = len(content_text.encode("utf-8")) if content_text is not None else None
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                INSERT INTO material_artifacts (
+                    generation_id,
+                    artifact_type,
+                    mime_type,
+                    content_text,
+                    file_path,
+                    byte_size
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+                """,
+                (
+                    int(generation_id),
+                    artifact_type,
+                    mime_type,
+                    content_text,
+                    file_path,
+                    byte_size,
+                ),
+            )
+            row = cursor.fetchone()
+    return int(row[0])
+
+
+def get_latest_material_generation(
+    *,
+    profile_id: int,
+    job_id: str,
+) -> Optional[Dict[str, Any]]:
+    init_db()
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM material_generations
+                WHERE profile_id = %s
+                  AND job_id = %s
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                (int(profile_id), str(job_id)),
+            )
+            row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def get_material_artifacts(generation_id: int) -> List[Dict[str, Any]]:
+    init_db()
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT *
+                FROM material_artifacts
+                WHERE generation_id = %s
+                ORDER BY created_at ASC, id ASC
+                """,
+                (int(generation_id),),
+            )
+            rows = cursor.fetchall()
+    return [dict(row) for row in rows]
+
+
+def get_material_generation_context(
+    *,
+    profile_id: int,
+    job_id: str,
+) -> Optional[Dict[str, Any]]:
+    sync_profiles_from_source()
+    query = """
+        SELECT
+            p.id AS profile_id,
+            p.profile_key,
+            p.display_name,
+            p.resume_path,
+            p.resume_text,
+            p.candidate_summary_config,
+            p.model_name,
+            pj.matched_term,
+            pj.fit_score,
+            pj.fit_decision,
+            pj.llm_match,
+            j.id AS job_id,
+            j.title,
+            j.company,
+            j.job_url,
+            j.description
+        FROM profiles p
+        JOIN profile_jobs pj ON pj.profile_id = p.id
+        JOIN jobs j ON j.id = pj.job_id
+        WHERE p.id = %s
+          AND j.id = %s
+        LIMIT 1
+    """
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (int(profile_id), str(job_id)))
+            row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def mark_material_access_token_revoked(token_id: int) -> None:
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE material_access_tokens
+                SET revoked_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (int(token_id),),
+            )
 
 
 def save_jd_result(

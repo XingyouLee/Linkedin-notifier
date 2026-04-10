@@ -18,10 +18,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 # CLI argument / --file / stdin still override this block.
 DEFAULT_SQL = """
 
-
-
-
+Select *
+from jobs
 """
+
+
+
 DEFAULT_EXPANDED = False
 DEFAULT_ROLLBACK = False
 

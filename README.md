@@ -1,5 +1,24 @@
-LinkedIn Notifier (Airflow + Astro)
-==================================
+LinkedIn Notifier
+=================
+
+This repository currently has three supported surfaces:
+
+- An Astro/Airflow pipeline that scans LinkedIn jobs, fetches JD details, runs profile-specific fitting, and sends notifications.
+- A lightweight materials web app that serves signed generation links for tailored resume and cover-letter previews/downloads.
+- A standalone macOS SwiftUI app that reads the shared business database for a read-only operator view.
+
+Only these two surfaces are part of the active repository workflow.
+
+## Repository layout
+
+- `dags/`: Airflow DAGs and shared pipeline logic
+- `scripts/`: operational scripts such as scraping, migrations, and local reset helpers
+- `include/`: runtime seed data, resumes, and profile configuration
+- `apps/macos/LinkedinNotifierApp/`: standalone macOS SwiftUI client
+- `webapp/`: lightweight signed-link materials generation web surface
+- `tests/`: Python regression coverage
+
+## Pipeline overview
 
 This project runs a two-DAG pipeline:
 
@@ -18,8 +37,7 @@ This project runs a two-DAG pipeline:
    - Send Discord notification for `Strong Fit` / `Moderate Fit` to the owning profile channel/webhook
 
 
-Run locally
------------
+## Run locally
 
 1. Start local Airflow:
    - `astro dev start`
@@ -28,9 +46,17 @@ Run locally
 3. Or trigger fitting DAG directly:
    - `astro dev run dags trigger linkedin_fitting_notifier`
 
+4. Open the materials web app locally at `http://localhost:8000/materials?token=...` after a signed link is generated.
 
-Environment variables
----------------------
+## macOS app
+
+The SwiftUI app under [`apps/macos/LinkedinNotifierApp/`](/Users/levi/Linkedin-notifier/apps/macos/LinkedinNotifierApp/) is a separate read-only client for the cloud-hosted stack.
+
+- Open [`Package.swift`](/Users/levi/Linkedin-notifier/apps/macos/LinkedinNotifierApp/Package.swift) in Xcode to run it locally.
+- Run `swift test --package-path apps/macos/LinkedinNotifierApp` for Swift package tests.
+- Use `./apps/macos/LinkedinNotifierApp/scripts/package_app.sh` to produce a local `.app` bundle.
+
+## Environment variables
 
 For Astro local runs, keep runtime vars in:
 
@@ -57,8 +83,7 @@ Common vars:
 - `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap for single-user mode)
 
 
-Multi-user config
------------------
+## Multi-user config
 
 - The runtime now stores user-specific state in Postgres: `profiles`, `search_configs`, `search_terms`, and `profile_jobs`.
 - Canonical job data stays shared in `jobs`; JD scraping stays shared in `jd_queue`; fit results and notifications are tracked per profile in `profile_jobs`.
@@ -71,8 +96,7 @@ Multi-user config
 - Search config supports `location` again, but not `geo_id`; the current scan flow sends `keywords`, `location`, `distance`, `start`, and `f_TPR`.
 
 
-Data storage
-------------
+## Data storage
 
 - Business data is stored in Postgres (`jobsdb`)
 - Main tables:
@@ -86,8 +110,7 @@ Data storage
   - `fitting_queue` (legacy table, currently not used by DAG flow)
 
 
-Migrate existing SQLite data (one-time)
---------------------------------------
+## Migrate existing SQLite data (one-time)
 
 1. Decide which Postgres database should receive the migrated business data.
 2. Set `JOBS_DB_URL` to that target, or pass `--pg-url` explicitly.
@@ -97,15 +120,12 @@ Migrate existing SQLite data (one-time)
 4. Keep `JOBS_DB_URL` aligned between `/Users/levi/Linkedin-notifier/.env` and your local Airflow runtime env so host tooling and DAG runs talk to the same business database by default.
 
 
-Notes
------
+## Notes
 
 - Job id normalization is required to keep DB dedupe stable (`id` is stored as numeric string).
 - Canonical jobs are shared globally, but discovery / fitting / notification state is tracked per profile.
 
-
-Zeabur deployment
------------------
+## Zeabur deployment
 
 Deploy this repo to Zeabur as **one Docker app service plus two Postgres databases**:
 

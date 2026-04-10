@@ -62,6 +62,7 @@ services:
       FITTING_CONCURRENCY: ${FITTING_CONCURRENCY:-8}
     ports:
       - "8080:8080"
+      - "8000:8000"
 
 volumes:
   airflow-postgres-data:

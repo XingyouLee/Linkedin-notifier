@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Generated Materials</title>
+    <style>
+      body { font-family: -apple-system, BlinkMacSystemFont, sans-serif; margin: 32px; color: #111827; background: #f9fafb; }
+      .page { max-width: 980px; margin: 0 auto; }
+      .card, .banner, .downloads, .preview { margin-bottom: 24px; border-radius: 12px; }
+      .card, .downloads, .preview { padding: 20px; background: #fff; border: 1px solid #e5e7eb; }
+      .banner { padding: 16px 20px; border: 1px solid #dbeafe; background: #eff6ff; }
+      .banner.success { border-color: #bbf7d0; background: #f0fdf4; color: #166534; }
+      .banner.warning { border-color: #fde68a; background: #fffbeb; color: #92400e; }
+      .banner.error { border-color: #fecaca; background: #fef2f2; color: #991b1b; }
+      .meta-row { display: flex; flex-wrap: wrap; gap: 12px 24px; margin-top: 12px; }
+      .meta-item { min-width: 180px; }
+      .muted { color: #6b7280; }
+      .downloads ul { list-style: none; padding: 0; margin: 16px 0 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+      .downloads li { padding: 12px; border: 1px solid #e5e7eb; border-radius: 8px; }
+      .downloads li.unavailable { background: #f9fafb; color: #6b7280; }
+      .downloads a { color: #2563eb; text-decoration: none; font-weight: 600; }
+      .preview-pane { padding: 16px; border: 1px solid #e5e7eb; border-radius: 8px; background: #fff; min-height: 64px; }
+      h1, h2, h3, p { margin-top: 0; }
+      .state-empty { padding: 40px 24px; background: #fff; border: 1px solid #e5e7eb; border-radius: 12px; }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      {% if page_state in ['invalid_token', 'expired_token', 'missing_context'] %}
+        <div class="state-empty">
+          <h1>{{ error_title }}</h1>
+          <p>{{ error_message }}</p>
+        </div>
+      {% else %}
+        <div class="card">
+          <h1>{{ context.title }} — {{ context.company }}</h1>
+          <div class="muted">Profile: {{ context.display_name }} · Fit: {{ context.fit_decision }} · Score: {{ context.fit_score }}</div>
+          <div class="muted">Matched term: {{ context.matched_term or 'n/a' }}</div>
+          <p><a href="{{ context.job_url }}" target="_blank">Open original job posting</a></p>
+        </div>
+
+        <div class="banner {{ generation_summary.message_tone }}">
+          <strong>{{ generation_summary.status_label }}</strong>
+          <div>{{ generation_summary.message }}</div>
+          {% if generation %}
+            <div class="meta-row">
+              <div class="meta-item">
+                <div class="muted">Stage</div>
+                <div>{{ generation_summary.stage_label }}</div>
+              </div>
+              <div class="meta-item">
+                <div class="muted">Model</div>
+                <div>{{ generation.model_name_used or 'pending' }}</div>
+              </div>
+              {% if generation.error_code %}
+                <div class="meta-item">
+                  <div class="muted">Issue</div>
+                  <div>{{ generation.error_code }}</div>
+                </div>
+              {% endif %}
+            </div>
+          {% endif %}
+        </div>
+
+        <div class="downloads">
+          <h2>Downloads</h2>
+          <p class="muted">Available files are linked below. Unavailable entries indicate work that has not completed or could not be rendered.</p>
+          <ul>
+            {% for artifact in artifact_links %}
+              <li class="{% if not artifact.available %}unavailable{% endif %}">
+                {% if artifact.available %}
+                  <a href="{{ artifact.url }}">Download {{ artifact.label }}</a>
+                {% else %}
+                  <strong>{{ artifact.label }}</strong>
+                  <div class="muted">Not available yet</div>
+                {% endif %}
+              </li>
+            {% endfor %}
+          </ul>
+        </div>
+
+        <div class="preview">
+          <h2>Resume Preview</h2>
+          <div class="preview-pane">
+            {% if resume_preview %}
+              {{ resume_preview | safe }}
+            {% else %}
+              <span class="muted">Resume preview is not available yet.</span>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="preview">
+          <h2>Cover Letter Preview</h2>
+          <div class="preview-pane">
+            {% if cover_letter_preview %}
+              {{ cover_letter_preview | safe }}
+            {% else %}
+              <span class="muted">Cover letter preview is not available yet.</span>
+            {% endif %}
+          </div>
+        </div>
+      {% endif %}
+    </div>
+  </body>
+</html>
