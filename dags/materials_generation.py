@@ -229,6 +229,7 @@ def generate_materials_for_profile_job(
             start_index=2,
         )
         resume = _validate_generated_document(stage_name="resume", payload=resume)
+        resume = materials_rendering.stabilize_resume_payload(resume)
         database.update_material_generation_status(
             generation_id,
             status="generating",

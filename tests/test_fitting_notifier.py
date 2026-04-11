@@ -217,7 +217,11 @@ def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
             raise ValueError("response_missing_output_text")
         return {"fit_score": 77, "decision": "Moderate Fit"}
 
-    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+    monkeypatch.setattr(
+        fitting_notifier.llm_runtime,
+        "request_llm_json",
+        fake_request_llm_json,
+    )
 
     parsed = fitting_notifier._request_llm_json_with_fallback(
         endpoints=[
@@ -249,7 +253,11 @@ def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_
     def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
         raise ValueError("response_missing_output_text")
 
-    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+    monkeypatch.setattr(
+        fitting_notifier.llm_runtime,
+        "request_llm_json",
+        fake_request_llm_json,
+    )
 
     with pytest.raises(RuntimeError, match="^TRANSIENT_API::") as error:
         fitting_notifier._request_llm_json_with_fallback(
@@ -276,7 +284,11 @@ def test_request_llm_json_with_fallback_rotates_starting_endpoint(monkeypatch):
         calls.append(request_url)
         return {"fit_score": 77, "decision": "Moderate Fit"}
 
-    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+    monkeypatch.setattr(
+        fitting_notifier.llm_runtime,
+        "request_llm_json",
+        fake_request_llm_json,
+    )
 
     endpoints = [
         {

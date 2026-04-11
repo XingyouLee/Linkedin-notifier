@@ -46,6 +46,18 @@ def _safe_lines(values) -> list[str]:
     return [str(value).strip() for value in values if str(value).strip()]
 
 
+def _dedupe_preserve_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        normalized = value.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
 def _normalize_resume_entry(entry: Any) -> dict[str, Any]:
     if not isinstance(entry, dict):
         return {"header_fields": {}, "bullets": []}
@@ -88,17 +100,27 @@ def _normalize_resume_entry(entry: Any) -> dict[str, Any]:
             "company": company,
             "dates": dates,
         },
-        "bullets": bullets,
+        "bullets": _dedupe_preserve_order(bullets),
     }
 
 
-def _normalize_resume_for_template(resume: dict[str, Any]) -> dict[str, Any]:
+def _entry_header_key(entry: dict[str, Any]) -> tuple[str, str, str]:
+    header_fields = entry.get("header_fields") or {}
+    return (
+        str(header_fields.get("role") or "").strip().casefold(),
+        str(header_fields.get("company") or "").strip().casefold(),
+        str(header_fields.get("dates") or "").strip().casefold(),
+    )
+
+
+def stabilize_resume_payload(resume: dict[str, Any]) -> dict[str, Any]:
     sections = []
     for section in resume.get("sections") or []:
         title = str((section or {}).get("title") or "").strip()
         entries = (section or {}).get("entries") or (section or {}).get("items") or []
         normalized_entries = [_normalize_resume_entry(entry) for entry in entries]
         visible_entries = []
+        entry_index_by_key: dict[tuple[str, str, str], int] = {}
         for entry in normalized_entries:
             header_fields = entry.get("header_fields") or {}
             bullets = _safe_lines(entry.get("bullets"))
@@ -110,16 +132,24 @@ def _normalize_resume_for_template(resume: dict[str, Any]) -> dict[str, Any]:
                     *bullets,
                 ]
             ):
-                visible_entries.append(
-                    {
-                        "header_fields": {
-                            "role": str(header_fields.get("role") or "").strip(),
-                            "company": str(header_fields.get("company") or "").strip(),
-                            "dates": str(header_fields.get("dates") or "").strip(),
-                        },
-                        "bullets": bullets,
-                    }
-                )
+                normalized_entry = {
+                    "header_fields": {
+                        "role": str(header_fields.get("role") or "").strip(),
+                        "company": str(header_fields.get("company") or "").strip(),
+                        "dates": str(header_fields.get("dates") or "").strip(),
+                    },
+                    "bullets": _dedupe_preserve_order(bullets),
+                }
+                entry_key = _entry_header_key(normalized_entry)
+                if any(entry_key) and entry_key in entry_index_by_key:
+                    existing = visible_entries[entry_index_by_key[entry_key]]
+                    existing["bullets"] = _dedupe_preserve_order(
+                        [*existing.get("bullets", []), *normalized_entry["bullets"]]
+                    )
+                else:
+                    if any(entry_key):
+                        entry_index_by_key[entry_key] = len(visible_entries)
+                    visible_entries.append(normalized_entry)
         if title and visible_entries:
             sections.append({"title": title, "entries": visible_entries})
     return {
@@ -130,8 +160,14 @@ def _normalize_resume_for_template(resume: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _max_bullets_for_section(section_title: str, entry_count: int) -> int:
+    if section_title == "Experience" and entry_count == 1:
+        return 3
+    return _MAX_BULLETS_PER_ENTRY
+
+
 def _compact_resume_for_final_output(resume: dict[str, Any]) -> dict[str, Any]:
-    normalized = _normalize_resume_for_template(resume)
+    normalized = stabilize_resume_payload(resume)
     normalized["summary_lines"] = normalized["summary_lines"][:_MAX_SUMMARY_LINES]
     normalized["skills"] = normalized["skills"][:_MAX_SKILLS]
 
@@ -145,9 +181,11 @@ def _compact_resume_for_final_output(resume: dict[str, Any]) -> dict[str, Any]:
     compact_sections = []
     for section in prioritized_sections:
         max_entries = _MAX_ENTRIES_PER_SECTION.get(section["title"], 2)
+        selected_entries = section["entries"][:max_entries]
+        max_bullets = _max_bullets_for_section(section["title"], len(selected_entries))
         compact_entries = []
-        for entry in section["entries"][:max_entries]:
-            bullets = _safe_lines(entry.get("bullets"))[:_MAX_BULLETS_PER_ENTRY]
+        for entry in selected_entries:
+            bullets = _safe_lines(entry.get("bullets"))[:max_bullets]
             compact_entries.append(
                 {
                     "header_fields": entry.get("header_fields") or {},
@@ -206,7 +244,7 @@ def render_cover_letter_document_html(
 
 def _resume_section_lines(resume: dict[str, Any]) -> list[str]:
     lines: list[str] = []
-    sections = resume.get("sections") or []
+    sections = stabilize_resume_payload(resume).get("sections") or []
     for section in sections:
         title = str((section or {}).get("title") or "").strip()
         entries = (section or {}).get("entries") or (section or {}).get("items") or []

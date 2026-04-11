@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from textwrap import dedent
 
-PROMPT_VERSION = "materials_v2"
+PROMPT_VERSION = "materials_v3"
 
 EXTRACTION_OUTPUT_SCHEMA = {
     "type": "object",
@@ -110,11 +110,16 @@ def build_resume_prompt(
         - headline should look like a real candidate headline tailored to the target role
         - summary_lines should be 2-3 strong lines focused on relevant strengths, tools, and business impact
         - sections should prioritize the highest-value evidence for the target role and avoid empty sections
+        - within each section, order entries by target-role relevance and strength, strongest first
+        - assume lower-ranked entries may be trimmed for one-page fit, so put must-keep evidence first instead of keeping source order
         - skills should stay concise and limited to the most relevant supported tools, domains, and keywords
         - trim sections and entries aggressively so only the strongest supported content remains
         - usually 1-2 bullets per entry; add more only when the evidence is unusually strong and still supports a one-page outcome
         - prefer quality over quantity; include fewer stronger bullets rather than many weak ones
         - each bullet should sound like a real resume bullet, with action + scope/result when supported
+        - do not split one source experience into multiple entries to preserve extra bullets
+        - if a source experience has several strong bullets, keep them under one entry and trim lower-priority bullets instead of duplicating the header
+        - do not repeat identical role/company/dates headers within a section
         - never mention banned claims, missing requirements, lack of evidence, or weaknesses
 
         Resume schema requirements:
@@ -195,12 +200,13 @@ def build_cover_letter_prompt(
         - avoid exaggerated enthusiasm, aggressive self-promotion, or overly salesy language
         - paragraph 1: open naturally with role fit and motivation, not a mechanical list of degree + tools
         - paragraph 2: read as a narrative connecting 2-3 strongest experiences to the role, not a list of tools and metrics
-        - paragraph 3: close with specific motivation and forward-looking interest in a concise way
+        - paragraph 3: give specific motivation for this company and role, then close with forward-looking interest in a concise way
         - align the letter's narrative with the generated resume — highlight the same strengths, do not contradict or introduce evidence the resume omitted
         - respond to specific requirements or themes from the job description where supported evidence exists
         - keep every paragraph compact, specific, and human-sounding
         - use the original resume only for grounding and context; do not copy bullet wording directly
         - avoid sounding like an ATS summary, capability inventory, or generic template
+        - avoid generic motivation that could fit any employer; motivation should clearly connect to this company or role
         - no filler or repetition
         - paragraphs may be strings or objects with a text field
         - never mention missing qualifications, language gaps, lack of evidence, or other warnings
@@ -218,4 +224,3 @@ def build_cover_letter_prompt(
         Alignment plan: {json.dumps(alignment_plan, ensure_ascii=False)}
         """
     ).strip()
-

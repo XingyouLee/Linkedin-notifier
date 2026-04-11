@@ -76,6 +76,34 @@ def test_build_resume_prompt_includes_one_page_submission_ready_guidance():
     assert "usually 1-2 bullets per entry" in prompt
 
 
+def test_build_resume_prompt_preserves_source_experience_boundaries():
+    prompt = materials_prompts.build_resume_prompt(
+        job_title="Data Engineer",
+        company="Acme",
+        job_description="We need a data engineer.",
+        extracted_inventory={"experiences": []},
+        alignment_plan={"selected_evidence_ids": []},
+    )
+
+    lowered = prompt.lower()
+    assert "do not split one source experience into multiple entries" in lowered
+    assert "do not repeat identical role/company/dates headers" in lowered
+
+
+def test_build_resume_prompt_requires_relevance_ordering_before_compaction():
+    prompt = materials_prompts.build_resume_prompt(
+        job_title="Data Engineer",
+        company="Acme",
+        job_description="We need a data engineer.",
+        extracted_inventory={"experiences": [], "projects": []},
+        alignment_plan={"selected_evidence_ids": []},
+    )
+
+    lowered = prompt.lower()
+    assert "order entries by target-role relevance and strength" in lowered
+    assert "put must-keep evidence first instead of keeping source order" in lowered
+
+
 def test_build_cover_letter_prompt_includes_resume_context_and_dutch_market_guidance():
     prompt = materials_prompts.build_cover_letter_prompt(
         job_title="Data Engineer",
@@ -98,6 +126,22 @@ def test_build_cover_letter_prompt_includes_resume_context_and_dutch_market_guid
     assert "Generated resume" in prompt
     assert "align the letter's narrative with the generated resume" in prompt.lower()
     assert "closing must contain only the sign-off" in prompt
+
+
+def test_build_cover_letter_prompt_requires_specific_company_motivation():
+    prompt = materials_prompts.build_cover_letter_prompt(
+        job_title="Data Engineer",
+        company="Acme",
+        job_description="We are looking for a data engineer to build ETL pipelines.",
+        extracted_inventory={"experiences": []},
+        alignment_plan={"selected_evidence_ids": []},
+        resume_text="Built reliable ETL pipelines in Python and Spark.",
+        generated_resume={"headline": "Data Engineer", "summary_lines": [], "sections": [], "skills": ["Python"]},
+    )
+
+    lowered = prompt.lower()
+    assert "specific motivation for this company and role" in lowered
+    assert "avoid generic motivation" in lowered
 
 
 
@@ -142,6 +186,167 @@ def test_validate_generated_document_accepts_string_cover_letter_paragraphs():
     )
 
     assert payload["paragraphs"] == ["Paragraph one", "Paragraph two"]
+
+
+def test_generate_materials_for_profile_job_saves_stabilized_resume_json(monkeypatch):
+    saved_artifacts = {}
+
+    monkeypatch.setattr(
+        materials_generation.database,
+        "get_material_generation_context",
+        lambda profile_id, job_id: {
+            "title": "Data Engineering Intern",
+            "company": "Metyis",
+            "description": "Build data pipelines and support analytics.",
+            "display_name": "Xingyou Li",
+            "profile_key": "xingyou",
+            "resume_path": "/tmp/resume.md",
+            "resume_text": None,
+            "candidate_summary_config": json.dumps({"target_role": "Data Engineer"}),
+            "model_name": "gpt-5.4",
+        },
+    )
+    monkeypatch.setattr(
+        materials_generation,
+        "load_resume_text",
+        lambda **kwargs: ("Original resume text", None),
+    )
+    monkeypatch.setattr(
+        materials_generation.llm_runtime,
+        "parse_llm_endpoints_from_env",
+        lambda: [{"name": "test", "request_url": "https://example.com", "api_key": "key"}],
+    )
+    monkeypatch.setattr(
+        materials_generation.database,
+        "create_material_generation",
+        lambda **kwargs: 41,
+    )
+    monkeypatch.setattr(
+        materials_generation.database,
+        "update_material_generation_status",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        materials_generation.database,
+        "save_material_artifact",
+        lambda generation_id, artifact_type, mime_type, content_text: saved_artifacts.setdefault(
+            artifact_type,
+            content_text,
+        ),
+    )
+    monkeypatch.setattr(
+        materials_rendering,
+        "render_resume_markdown",
+        lambda resume, *, profile_name: "resume-md",
+    )
+    monkeypatch.setattr(
+        materials_rendering,
+        "render_cover_letter_markdown",
+        lambda cover_letter, *, profile_name, company: "cover-letter-md",
+    )
+    monkeypatch.setattr(
+        materials_rendering,
+        "render_resume_document_html",
+        lambda resume, *, profile_name: "resume-html",
+    )
+    monkeypatch.setattr(
+        materials_rendering,
+        "render_cover_letter_document_html",
+        lambda cover_letter, *, profile_name, company: "cover-letter-html",
+    )
+    monkeypatch.setattr(
+        materials_rendering,
+        "render_pdf_data_url_from_html",
+        lambda document_html: "data:application/pdf;base64,JVBERi0=",
+    )
+
+    staged_payloads = iter(
+        [
+            (
+                {
+                    "candidate_profile": {},
+                    "experiences": [],
+                    "projects": [],
+                    "education": [],
+                    "constraints": [],
+                },
+                "gpt-5.4",
+            ),
+            (
+                {
+                    "target_role": "Data Engineering Intern",
+                    "must_cover": [],
+                    "gaps": [],
+                    "selected_evidence_ids": [],
+                    "banned_claims": [],
+                    "tone": "concise",
+                    "keywords": [],
+                },
+                "gpt-5.4",
+            ),
+            (
+                {
+                    "headline": "Data Engineer",
+                    "summary_lines": ["One", "Two", "Three"],
+                    "skills": ["Python", "SQL", "Airflow"],
+                    "sections": [
+                        {
+                            "title": "Experience",
+                            "entries": [
+                                {
+                                    "header_fields": {
+                                        "role": "Data Engineer Intern",
+                                        "company": "NIO Netherlands B.V.",
+                                        "dates": "Sep 2023 - May 2024",
+                                    },
+                                    "bullets": ["Optimized SQL queries.", "Maintained pipelines."],
+                                },
+                                {
+                                    "header_fields": {
+                                        "role": "Data Engineer Intern",
+                                        "company": "NIO Netherlands B.V.",
+                                        "dates": "Sep 2023 - May 2024",
+                                    },
+                                    "bullets": ["Designed data models.", "Tracked holiday indicators."],
+                                },
+                            ],
+                        }
+                    ],
+                },
+                "gpt-5.4",
+            ),
+            (
+                {
+                    "subject": "Application for Data Engineering Intern",
+                    "greeting": "Dear Hiring Team,",
+                    "paragraphs": ["Motivation", "Evidence", "Close"],
+                    "closing": "Kind regards,\nXingyou Li",
+                },
+                "gpt-5.4",
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        materials_generation,
+        "_run_json_stage",
+        lambda **kwargs: next(staged_payloads),
+    )
+
+    result = materials_generation.generate_materials_for_profile_job(
+        profile_id=1,
+        job_id="job-123",
+    )
+
+    saved_resume = json.loads(saved_artifacts["resume_json"])
+    experience_entries = saved_resume["sections"][0]["entries"]
+    assert result["generation_id"] == 41
+    assert len(experience_entries) == 1
+    assert experience_entries[0]["bullets"] == [
+        "Optimized SQL queries.",
+        "Maintained pipelines.",
+        "Designed data models.",
+        "Tracked holiday indicators.",
+    ]
 
 
 def test_render_resume_document_html_uses_compact_one_page_layout_and_trimming():
@@ -361,6 +566,90 @@ def test_render_html_from_markdown_preserves_generated_html():
     assert "<script>alert(1)</script>" not in html
     assert "<h1>Resume</h1>" in html
     assert "<p>Safe paragraph.</p>" in html
+
+
+def test_stabilize_resume_merges_duplicate_experience_headers_before_rendering():
+    stabilized = materials_rendering.stabilize_resume_payload(
+        {
+            "headline": "Data Engineer",
+            "summary_lines": ["One", "Two", "Three"],
+            "skills": ["Python", "SQL", "Airflow"],
+            "sections": [
+                {
+                    "title": "Experience",
+                    "entries": [
+                        {
+                            "header_fields": {
+                                "role": "Data Engineer Intern",
+                                "company": "NIO Netherlands B.V.",
+                                "dates": "Sep 2023 - May 2024",
+                            },
+                            "bullets": ["Optimized SQL queries.", "Maintained 100+ pipelines."],
+                        },
+                        {
+                            "header_fields": {
+                                "role": "Data Engineer Intern",
+                                "company": "NIO Netherlands B.V.",
+                                "dates": "Sep 2023 - May 2024",
+                            },
+                            "bullets": ["Designed data models.", "Tracked holiday indicators."],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    experience_entries = stabilized["sections"][0]["entries"]
+    assert len(experience_entries) == 1
+    assert experience_entries[0]["header_fields"]["role"] == "Data Engineer Intern"
+    assert experience_entries[0]["bullets"] == [
+        "Optimized SQL queries.",
+        "Maintained 100+ pipelines.",
+        "Designed data models.",
+        "Tracked holiday indicators.",
+    ]
+
+
+def test_render_resume_document_html_merges_duplicate_headers_and_keeps_three_bullets_for_single_experience():
+    html = materials_rendering.render_resume_document_html(
+        {
+            "headline": "Data Engineer",
+            "summary_lines": ["One", "Two", "Three"],
+            "skills": ["Python", "SQL", "Airflow"],
+            "sections": [
+                {
+                    "title": "Experience",
+                    "entries": [
+                        {
+                            "header_fields": {
+                                "role": "Data Engineer Intern",
+                                "company": "NIO Netherlands B.V.",
+                                "dates": "Sep 2023 - May 2024",
+                            },
+                            "bullets": ["Optimized SQL queries.", "Maintained 100+ pipelines."],
+                        },
+                        {
+                            "header_fields": {
+                                "role": "Data Engineer Intern",
+                                "company": "NIO Netherlands B.V.",
+                                "dates": "Sep 2023 - May 2024",
+                            },
+                            "bullets": ["Designed data models.", "Tracked holiday indicators."],
+                        },
+                    ],
+                }
+            ],
+        },
+        profile_name="Xingyou Li",
+    )
+
+    assert html.count("Data Engineer Intern") == 1
+    assert html.count("NIO Netherlands B.V.") == 1
+    assert "Optimized SQL queries." in html
+    assert "Maintained 100+ pipelines." in html
+    assert "Designed data models." in html
+    assert "Tracked holiday indicators." not in html
 
 
 def test_materials_page_shows_failed_generation_state(monkeypatch):
