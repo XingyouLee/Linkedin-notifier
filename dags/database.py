@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+import zlib
 
 import pandas as pd
 import psycopg
@@ -1793,6 +1794,76 @@ def create_material_generation(
     return int(row[0])
 
 
+def _signed_crc32(value: str) -> int:
+    crc = zlib.crc32(str(value).encode("utf-8"))
+    if crc >= 2**31:
+        crc -= 2**32
+    return crc
+
+
+def create_or_reuse_material_generation(
+    *,
+    profile_id: int,
+    job_id: str,
+    access_token_id: int | None = None,
+    status: str = "pending",
+    stage: str | None = None,
+    prompt_version: str | None = None,
+    blocked_statuses: Iterable[str] = ("pending", "generating", "completed"),
+) -> Dict[str, Any]:
+    init_db()
+    blocked_statuses = tuple(str(value) for value in blocked_statuses)
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT pg_advisory_xact_lock(%s, %s)",
+                (int(profile_id), _signed_crc32(job_id)),
+            )
+            cursor.execute(
+                """
+                SELECT *
+                FROM material_generations
+                WHERE profile_id = %s
+                  AND job_id = %s
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+                """,
+                (int(profile_id), str(job_id)),
+            )
+            existing_row = cursor.fetchone()
+            if existing_row and str(existing_row["status"] or "") in blocked_statuses:
+                result = dict(existing_row)
+                result["created_now"] = False
+                return result
+
+            cursor.execute(
+                """
+                INSERT INTO material_generations (
+                    profile_id,
+                    job_id,
+                    access_token_id,
+                    status,
+                    stage,
+                    prompt_version
+                )
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING *
+                """,
+                (
+                    int(profile_id),
+                    str(job_id),
+                    int(access_token_id) if access_token_id is not None else None,
+                    status,
+                    stage,
+                    prompt_version,
+                ),
+            )
+            row = cursor.fetchone()
+    result = dict(row)
+    result["created_now"] = True
+    return result
+
+
 def update_material_generation_status(
     generation_id: int,
     *,
@@ -1887,7 +1958,7 @@ def get_latest_material_generation(
                 FROM material_generations
                 WHERE profile_id = %s
                   AND job_id = %s
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT 1
                 """,
                 (int(profile_id), str(job_id)),

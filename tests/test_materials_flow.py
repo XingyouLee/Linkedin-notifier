@@ -1441,13 +1441,8 @@ def test_materials_generate_post_queues_generation_on_click(monkeypatch):
     )
     monkeypatch.setattr(
         webapp_main.database,
-        "get_latest_material_generation",
-        lambda profile_id, job_id: None,
-    )
-    monkeypatch.setattr(
-        webapp_main.database,
-        "create_material_generation",
-        lambda **kwargs: (created_generations.append(kwargs) or 41),
+        "create_or_reuse_material_generation",
+        lambda **kwargs: (created_generations.append(kwargs) or {"id": 41, "created_now": True}),
     )
     monkeypatch.setattr(
         webapp_main.materials_generation,
@@ -1474,6 +1469,121 @@ def test_materials_generate_post_queues_generation_on_click(monkeypatch):
             "job_id": "job-123",
             "access_token_id": 11,
             "generation_id": 41,
+        }
+    ]
+
+
+def test_materials_generate_post_reuses_existing_active_generation(monkeypatch):
+    _require_testclient()
+    webapp_main = importlib.import_module("webapp.main")
+    client = TestClient(webapp_main.app)
+    queued_calls = []
+
+    monkeypatch.setattr(
+        webapp_main.materials_links,
+        "verify_materials_token",
+        lambda token: {"profile_id": 7, "job_id": "job-123"},
+    )
+    monkeypatch.setattr(
+        webapp_main.database,
+        "get_material_access_token",
+        lambda token: {"id": 11, "revoked_at": None},
+    )
+    monkeypatch.setattr(
+        webapp_main.database,
+        "touch_material_access_token",
+        lambda token_id: None,
+    )
+    monkeypatch.setattr(
+        webapp_main.database,
+        "get_material_generation_context",
+        lambda profile_id, job_id: {
+            "profile_id": 7,
+            "job_id": "job-123",
+            "title": "Data Engineer",
+            "company": "Acme",
+            "display_name": "Levi",
+            "fit_decision": "Strong Fit",
+            "fit_score": 88,
+            "job_url": "https://example.com/jobs/123",
+        },
+    )
+    monkeypatch.setattr(
+        webapp_main.database,
+        "create_or_reuse_material_generation",
+        lambda **kwargs: {"id": 99, "status": "pending", "created_now": False},
+    )
+    monkeypatch.setattr(
+        webapp_main.materials_generation,
+        "generate_materials_for_profile_job",
+        lambda **kwargs: queued_calls.append(kwargs),
+    )
+
+    response = client.post("/materials/generate", params={"token": "signed-token"}, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/materials?token=signed-token"
+    assert queued_calls == []
+
+
+def test_materials_generate_post_retries_after_failed_generation(monkeypatch):
+    _require_testclient()
+    webapp_main = importlib.import_module("webapp.main")
+    client = TestClient(webapp_main.app)
+    queued_calls = []
+    create_calls = []
+
+    monkeypatch.setattr(
+        webapp_main.materials_links,
+        "verify_materials_token",
+        lambda token: {"profile_id": 7, "job_id": "job-123"},
+    )
+    monkeypatch.setattr(
+        webapp_main.database,
+        "get_material_access_token",
+        lambda token: {"id": 11, "revoked_at": None},
+    )
+    monkeypatch.setattr(
+        webapp_main.database,
+        "touch_material_access_token",
+        lambda token_id: None,
+    )
+    monkeypatch.setattr(
+        webapp_main.database,
+        "get_material_generation_context",
+        lambda profile_id, job_id: {
+            "profile_id": 7,
+            "job_id": "job-123",
+            "title": "Data Engineer",
+            "company": "Acme",
+            "display_name": "Levi",
+            "fit_decision": "Strong Fit",
+            "fit_score": 88,
+            "job_url": "https://example.com/jobs/123",
+        },
+    )
+    monkeypatch.setattr(
+        webapp_main.database,
+        "create_or_reuse_material_generation",
+        lambda **kwargs: (create_calls.append(kwargs) or {"id": 52, "status": "pending", "created_now": True}),
+    )
+    monkeypatch.setattr(
+        webapp_main.materials_generation,
+        "generate_materials_for_profile_job",
+        lambda **kwargs: queued_calls.append(kwargs),
+    )
+
+    response = client.post("/materials/generate", params={"token": "signed-token"}, follow_redirects=False)
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/materials?token=signed-token"
+    assert len(create_calls) == 1
+    assert queued_calls == [
+        {
+            "profile_id": 7,
+            "job_id": "job-123",
+            "access_token_id": 11,
+            "generation_id": 52,
         }
     ]
 

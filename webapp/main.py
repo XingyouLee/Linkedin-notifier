@@ -295,7 +295,7 @@ def materials_page(request: Request, token: str = Query(...)):
 
 
 @app.post("/materials/generate")
-def generate_materials(request: Request, background_tasks: BackgroundTasks, token: str = Query(...)):
+def generate_materials(background_tasks: BackgroundTasks, token: str = Query(...)):
     try:
         token_data = _get_valid_token_record(token)
     except ValueError as error:
@@ -309,26 +309,22 @@ def generate_materials(request: Request, background_tasks: BackgroundTasks, toke
     if not context:
         raise HTTPException(status_code=404, detail="We could not find the saved profile and job data for this link.")
 
-    generation = database.get_latest_material_generation(
-        profile_id=int(payload["profile_id"]),
-        job_id=str(payload["job_id"]),
-    )
-    if generation and generation.get("status") in {"pending", "generating", "completed"}:
-        return RedirectResponse(url=f"/materials?token={token}", status_code=303)
-
-    generation_id = database.create_material_generation(
+    generation = database.create_or_reuse_material_generation(
         profile_id=int(payload["profile_id"]),
         job_id=str(payload["job_id"]),
         access_token_id=int(token_data["record"]["id"]),
         status="pending",
         stage="queued",
     )
+    if not generation.get("created_now"):
+        return RedirectResponse(url=f"/materials?token={token}", status_code=303)
+
     background_tasks.add_task(
         materials_generation.generate_materials_for_profile_job,
         profile_id=int(payload["profile_id"]),
         job_id=str(payload["job_id"]),
         access_token_id=int(token_data["record"]["id"]),
-        generation_id=generation_id,
+        generation_id=int(generation["id"]),
     )
     return RedirectResponse(url=f"/materials?token={token}", status_code=303)
 
