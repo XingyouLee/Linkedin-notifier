@@ -94,6 +94,11 @@ def _normalize_resume_entry(entry: Any) -> dict[str, Any]:
     if not bullets:
         bullets = _safe_lines(entry.get("highlights") or entry.get("details") or entry.get("notes"))
 
+    source_meta = entry.get("source_meta") if isinstance(entry.get("source_meta"), dict) else {}
+    source_evidence_ids = _dedupe_preserve_order(
+        [str(value).strip() for value in source_meta.get("source_evidence_ids") or [] if str(value).strip()]
+    )
+
     return {
         "header_fields": {
             "role": role,
@@ -101,6 +106,11 @@ def _normalize_resume_entry(entry: Any) -> dict[str, Any]:
             "dates": dates,
         },
         "bullets": _dedupe_preserve_order(bullets),
+        "source_meta": {
+            "source_type": str(source_meta.get("source_type") or "").strip(),
+            "source_id": str(source_meta.get("source_id") or "").strip(),
+            "source_evidence_ids": source_evidence_ids,
+        },
     }
 
 
@@ -139,6 +149,7 @@ def stabilize_resume_payload(resume: dict[str, Any]) -> dict[str, Any]:
                         "dates": str(header_fields.get("dates") or "").strip(),
                     },
                     "bullets": _dedupe_preserve_order(bullets),
+                    "source_meta": entry.get("source_meta") or {},
                 }
                 entry_key = _entry_header_key(normalized_entry)
                 if any(entry_key) and entry_key in entry_index_by_key:
@@ -146,6 +157,35 @@ def stabilize_resume_payload(resume: dict[str, Any]) -> dict[str, Any]:
                     existing["bullets"] = _dedupe_preserve_order(
                         [*existing.get("bullets", []), *normalized_entry["bullets"]]
                     )
+                    existing_source_meta = existing.get("source_meta") or {}
+                    incoming_source_meta = normalized_entry.get("source_meta") or {}
+                    merged_evidence_ids = _dedupe_preserve_order(
+                        [
+                            *(
+                                existing_source_meta.get("source_evidence_ids")
+                                if isinstance(existing_source_meta.get("source_evidence_ids"), list)
+                                else []
+                            ),
+                            *(
+                                incoming_source_meta.get("source_evidence_ids")
+                                if isinstance(incoming_source_meta.get("source_evidence_ids"), list)
+                                else []
+                            ),
+                        ]
+                    )
+                    existing["source_meta"] = {
+                        "source_type": str(
+                            existing_source_meta.get("source_type")
+                            or incoming_source_meta.get("source_type")
+                            or ""
+                        ).strip(),
+                        "source_id": str(
+                            existing_source_meta.get("source_id")
+                            or incoming_source_meta.get("source_id")
+                            or ""
+                        ).strip(),
+                        "source_evidence_ids": merged_evidence_ids,
+                    }
                 else:
                     if any(entry_key):
                         entry_index_by_key[entry_key] = len(visible_entries)
@@ -166,6 +206,20 @@ def _max_bullets_for_section(section_title: str, entry_count: int) -> int:
     return _MAX_BULLETS_PER_ENTRY
 
 
+def _max_entries_for_section(section_title: str, *, sections: list[dict[str, Any]]) -> int:
+    if section_title != "Projects":
+        return _MAX_ENTRIES_PER_SECTION.get(section_title, 2)
+
+    experience_section = next(
+        (section for section in sections if section.get("title") == "Experience"),
+        None,
+    )
+    experience_count = len((experience_section or {}).get("entries") or [])
+    if experience_count <= 1:
+        return 3
+    return _MAX_ENTRIES_PER_SECTION.get(section_title, 2)
+
+
 def _compact_resume_for_final_output(resume: dict[str, Any]) -> dict[str, Any]:
     normalized = stabilize_resume_payload(resume)
     normalized["summary_lines"] = normalized["summary_lines"][:_MAX_SUMMARY_LINES]
@@ -180,7 +234,10 @@ def _compact_resume_for_final_output(resume: dict[str, Any]) -> dict[str, Any]:
 
     compact_sections = []
     for section in prioritized_sections:
-        max_entries = _MAX_ENTRIES_PER_SECTION.get(section["title"], 2)
+        max_entries = _max_entries_for_section(
+            section["title"],
+            sections=prioritized_sections,
+        )
         selected_entries = section["entries"][:max_entries]
         max_bullets = _max_bullets_for_section(section["title"], len(selected_entries))
         compact_entries = []
@@ -190,6 +247,7 @@ def _compact_resume_for_final_output(resume: dict[str, Any]) -> dict[str, Any]:
                 {
                     "header_fields": entry.get("header_fields") or {},
                     "bullets": bullets,
+                    "source_meta": entry.get("source_meta") or {},
                 }
             )
         if compact_entries:
@@ -204,10 +262,42 @@ def _compact_resume_for_final_output(resume: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
-def render_resume_document_html(resume: dict[str, Any], *, profile_name: str) -> str:
+def _normalize_candidate_profile(candidate_profile: dict[str, Any] | None, *, profile_name: str) -> dict[str, Any]:
+    if not isinstance(candidate_profile, dict):
+        return {"name": profile_name, "contact_items": []}
+
+    contact = candidate_profile.get("contact") if isinstance(candidate_profile.get("contact"), dict) else {}
+    contact_items: list[str] = []
+    for value in (
+        candidate_profile.get("location"),
+        contact.get("email"),
+        contact.get("phone"),
+        contact.get("linkedin"),
+    ):
+        normalized = str(value or "").strip()
+        if not normalized or normalized.lower() == "provided":
+            continue
+        contact_items.append(normalized)
+
+    return {
+        "name": str(candidate_profile.get("name") or profile_name).strip() or profile_name,
+        "contact_items": _dedupe_preserve_order(contact_items),
+    }
+
+
+def render_resume_document_html(
+    resume: dict[str, Any],
+    *,
+    profile_name: str,
+    candidate_profile: dict[str, Any] | None = None,
+) -> str:
     template = _TEMPLATE_ENV.get_template("materials_resume_document.html")
     normalized = _compact_resume_for_final_output(resume)
-    return template.render(profile_name=profile_name, **normalized)
+    return template.render(
+        profile_name=profile_name,
+        candidate_profile=_normalize_candidate_profile(candidate_profile, profile_name=profile_name),
+        **normalized,
+    )
 
 
 def _normalize_cover_letter_for_template(cover_letter: dict[str, Any], *, profile_name: str, company: str) -> dict[str, Any]:
@@ -244,7 +334,7 @@ def render_cover_letter_document_html(
 
 def _resume_section_lines(resume: dict[str, Any]) -> list[str]:
     lines: list[str] = []
-    sections = stabilize_resume_payload(resume).get("sections") or []
+    sections = (resume or {}).get("sections") or []
     for section in sections:
         title = str((section or {}).get("title") or "").strip()
         entries = (section or {}).get("entries") or (section or {}).get("items") or []
@@ -281,22 +371,32 @@ def _resume_section_lines(resume: dict[str, Any]) -> list[str]:
     return lines
 
 
-def render_resume_markdown(resume: dict[str, Any], *, profile_name: str) -> str:
+def render_resume_markdown(
+    resume: dict[str, Any],
+    *,
+    profile_name: str,
+    candidate_profile: dict[str, Any] | None = None,
+) -> str:
+    normalized_resume = _compact_resume_for_final_output(resume)
+    normalized_candidate_profile = _normalize_candidate_profile(candidate_profile, profile_name=profile_name)
     lines: list[str] = [f"# {profile_name}", ""]
 
-    headline = str(resume.get("headline") or "").strip()
+    if normalized_candidate_profile.get("contact_items"):
+        lines.extend([" · ".join(normalized_candidate_profile["contact_items"]), ""])
+
+    headline = str(normalized_resume.get("headline") or "").strip()
     if headline:
         lines.extend([headline, ""])
 
-    summary_lines = _safe_lines(resume.get("summary_lines"))
+    summary_lines = _safe_lines(normalized_resume.get("summary_lines"))
     if summary_lines:
         lines.extend(["## Professional Summary", *summary_lines, ""])
 
-    skills = _safe_lines(resume.get("skills"))
+    skills = _safe_lines(normalized_resume.get("skills"))
     if skills:
         lines.extend(["## Core Skills", " · ".join(skills), ""])
 
-    lines.extend(_resume_section_lines(resume))
+    lines.extend(_resume_section_lines(normalized_resume))
 
     return "\n".join(lines).strip() + "\n"
 

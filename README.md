@@ -48,6 +48,17 @@ This project runs a two-DAG pipeline:
 
 4. Open the materials web app locally at `http://localhost:8000/materials?token=...` after a signed link is generated.
 
+## Materials generation
+
+- The signed-link materials flow generates tailored resume and cover-letter artifacts for a profile/job pair.
+- The current ATS-oriented line keeps this repository's existing pipeline and web delivery model, while improving the final submission quality of the generated materials.
+- Profile `resume_path` inputs may point to either Markdown resumes or PDF resumes; the generation flow adapts from the source file type before producing final recruiter-facing artifacts.
+
+## Acknowledgements
+
+- The ATS-oriented materials work in this repository is informed by ideas from [`santifer/career-ops`](https://github.com/santifer/career-ops), especially around conservative ATS-friendly resume presentation and final-asset quality.
+- This project does **not** vendor or mirror that repository wholesale; it adapts selected ideas into the existing Linkedin-notifier pipeline and templates.
+
 ## macOS app
 
 The SwiftUI app under [`apps/macos/LinkedinNotifierApp/`](/Users/levi/Linkedin-notifier/apps/macos/LinkedinNotifierApp/) is a separate read-only client for the cloud-hosted stack.

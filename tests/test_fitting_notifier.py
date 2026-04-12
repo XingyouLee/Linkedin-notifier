@@ -1,9 +1,11 @@
 import json
+import subprocess
 
 import pytest
 import requests
 
 from dags import fitting_notifier
+from dags import resume_utils
 
 
 def _candidate_summary(**overrides):
@@ -204,6 +206,40 @@ def test_normalize_exp_requirement_text_flattens_dict_like_payload_to_plain_text
         "jd years specified: 8-10 years; "
         "jd seniority specified: not applicable"
     )
+
+
+def test_load_resume_text_wrapper_supports_pdf_resume_path(tmp_path, monkeypatch):
+    resume_path = tmp_path / "resume.pdf"
+    resume_path.write_bytes(b"%PDF-1.4\n%mock\n")
+
+    monkeypatch.setattr(resume_utils, "PdfReader", None)
+    monkeypatch.setattr(resume_utils.shutil, "which", lambda name: "/usr/bin/pdftotext")
+
+    def fake_run(cmd, *, capture_output, text, check, timeout):
+        assert cmd == [
+            "/usr/bin/pdftotext",
+            "-layout",
+            "-nopgbrk",
+            "-enc",
+            "UTF-8",
+            str(resume_path),
+            "-",
+        ]
+        assert capture_output is True
+        assert text is True
+        assert check is True
+        assert timeout == 30
+        return subprocess.CompletedProcess(cmd, 0, "Resume extracted from PDF\n", "")
+
+    monkeypatch.setattr(resume_utils.subprocess, "run", fake_run)
+
+    resume_text, resume_error = fitting_notifier._load_resume_text(
+        resume_path=str(resume_path),
+        resume_text=None,
+    )
+
+    assert resume_error is None
+    assert resume_text == "Resume extracted from PDF"
 
 
 def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
