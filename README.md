@@ -1,6 +1,14 @@
 LinkedIn Notifier
 =================
 
+## Branch status: Deprecated
+
+This branch (`feature/material-generation-flow`) is deprecated and should not be used as the base for new materials-generation work.
+
+- Reason: the recent materials-generation exploration on this line has been abandoned.
+- Next step: start the replacement work from a fresh branch off `main`.
+- Guidance: keep this branch only as historical reference; do not continue feature development here.
+
 This repository currently has three supported surfaces:
 
 - An Astro/Airflow pipeline that scans LinkedIn jobs, fetches JD details, runs profile-specific fitting, and sends notifications.
