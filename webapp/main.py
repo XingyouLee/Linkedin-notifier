@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, PlainTextResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from starlette.requests import Request
 
@@ -29,6 +29,7 @@ ARTIFACT_LABELS = {
     "cover_letter_pdf": "Cover Letter PDF",
 }
 STAGE_LABELS = {
+    "queued": "Queued",
     "extraction": "Extracting resume details",
     "alignment": "Matching your background to the job",
     "resume": "Drafting the resume",
@@ -82,6 +83,8 @@ def _render_materials_page(
     generation_summary: dict | None = None,
     resume_preview: str = "",
     cover_letter_preview: str = "",
+    can_generate: bool = False,
+    generate_button_label: str = "Generate materials",
 ):
     return TEMPLATES.TemplateResponse(
         request,
@@ -97,6 +100,8 @@ def _render_materials_page(
             "generation_summary": generation_summary or {},
             "resume_preview": resume_preview,
             "cover_letter_preview": cover_letter_preview,
+            "can_generate": can_generate,
+            "generate_button_label": generate_button_label,
         },
     )
 
@@ -120,9 +125,9 @@ def _build_artifact_links(token: str, artifact_map: dict[str, dict]) -> list[dic
 def _build_generation_summary(generation: dict | None, artifact_map: dict[str, dict]) -> dict:
     if not generation:
         return {
-            "status_label": "Preparing generation",
-            "stage_label": "Starting up",
-            "message": "We are starting to generate tailored materials for this job.",
+            "status_label": "Not started",
+            "stage_label": "Awaiting request",
+            "message": "Materials have not been generated yet. Click the button below to start generation.",
             "message_tone": "info",
             "has_partial_artifacts": False,
         }
@@ -146,6 +151,9 @@ def _build_generation_summary(generation: dict | None, artifact_map: dict[str, d
     elif status == "failed":
         message = error_message or ERROR_MESSAGES["generation_failed"]
         tone = "error"
+    elif status == "pending":
+        message = "Generation has been requested. Reload this page in a moment to check for completed files."
+        tone = "info"
     else:
         message = "Generation is in progress. Reload this page in a moment to check for completed files."
         tone = "info"
@@ -199,7 +207,7 @@ def health() -> str:
 
 
 @app.get("/materials", response_class=HTMLResponse)
-def materials_page(request: Request, token: str = Query(...), background_tasks: BackgroundTasks = None):
+def materials_page(request: Request, token: str = Query(...)):
     try:
         token_data = _get_valid_token_record(token)
     except ValueError as error:
@@ -244,14 +252,6 @@ def materials_page(request: Request, token: str = Query(...), background_tasks: 
         profile_id=int(payload["profile_id"]),
         job_id=str(payload["job_id"]),
     )
-    if generation is None or generation.get("status") == "failed":
-        if background_tasks is not None:
-            background_tasks.add_task(
-                materials_generation.generate_materials_for_profile_job,
-                profile_id=int(payload["profile_id"]),
-                job_id=str(payload["job_id"]),
-                access_token_id=int(token_data["record"]["id"]),
-            )
 
     artifacts = []
     if generation:
@@ -259,11 +259,13 @@ def materials_page(request: Request, token: str = Query(...), background_tasks: 
 
     artifact_map = {artifact["artifact_type"]: artifact for artifact in artifacts}
     generation_summary = _build_generation_summary(generation, artifact_map)
-    page_state = generation.get("status") if generation else "generating"
+    page_state = generation.get("status") if generation else "ready_to_generate"
     if generation_summary.get("has_partial_artifacts"):
         page_state = "partial_success"
     if generation and generation.get("error_code") in {"missing_job_description", "missing_resume_source"}:
         page_state = "missing_data"
+    can_generate = generation is None or generation.get("status") == "failed"
+    generate_button_label = "Retry generation" if generation and generation.get("status") == "failed" else "Generate materials"
 
     return _render_materials_page(
         request,
@@ -287,7 +289,48 @@ def materials_page(request: Request, token: str = Query(...), background_tasks: 
                 "No cover letter preview available yet.",
             )
         ),
+        can_generate=can_generate,
+        generate_button_label=generate_button_label,
     )
+
+
+@app.post("/materials/generate")
+def generate_materials(request: Request, background_tasks: BackgroundTasks, token: str = Query(...)):
+    try:
+        token_data = _get_valid_token_record(token)
+    except ValueError as error:
+        raise HTTPException(status_code=400, detail=f"Invalid materials link: {error}") from error
+
+    payload = token_data["payload"]
+    context = database.get_material_generation_context(
+        profile_id=int(payload["profile_id"]),
+        job_id=str(payload["job_id"]),
+    )
+    if not context:
+        raise HTTPException(status_code=404, detail="We could not find the saved profile and job data for this link.")
+
+    generation = database.get_latest_material_generation(
+        profile_id=int(payload["profile_id"]),
+        job_id=str(payload["job_id"]),
+    )
+    if generation and generation.get("status") in {"pending", "generating", "completed"}:
+        return RedirectResponse(url=f"/materials?token={token}", status_code=303)
+
+    generation_id = database.create_material_generation(
+        profile_id=int(payload["profile_id"]),
+        job_id=str(payload["job_id"]),
+        access_token_id=int(token_data["record"]["id"]),
+        status="pending",
+        stage="queued",
+    )
+    background_tasks.add_task(
+        materials_generation.generate_materials_for_profile_job,
+        profile_id=int(payload["profile_id"]),
+        job_id=str(payload["job_id"]),
+        access_token_id=int(token_data["record"]["id"]),
+        generation_id=generation_id,
+    )
+    return RedirectResponse(url=f"/materials?token={token}", status_code=303)
 
 
 @app.get("/materials/download/{artifact_type}")

@@ -721,6 +721,7 @@ def generate_materials_for_profile_job(
     profile_id: int,
     job_id: str,
     access_token_id: int | None = None,
+    generation_id: int | None = None,
 ) -> dict[str, Any]:
     context = database.get_material_generation_context(profile_id=profile_id, job_id=job_id)
     if not context:
@@ -745,14 +746,22 @@ def generate_materials_for_profile_job(
     job_description = context.get("description") or ""
     profile_name = context.get("display_name") or context.get("profile_key") or "Candidate"
     model_name = context.get("model_name") or os.getenv("FITTING_MODEL_NAME", "gpt-5.4")
-    generation_id = database.create_material_generation(
-        profile_id=profile_id,
-        job_id=job_id,
-        access_token_id=access_token_id,
-        status="generating",
-        stage="extraction",
-        prompt_version=materials_prompts.PROMPT_VERSION,
-    )
+    if generation_id is None:
+        generation_id = database.create_material_generation(
+            profile_id=profile_id,
+            job_id=job_id,
+            access_token_id=access_token_id,
+            status="generating",
+            stage="extraction",
+            prompt_version=materials_prompts.PROMPT_VERSION,
+        )
+    else:
+        database.update_material_generation_status(
+            generation_id,
+            status="generating",
+            stage="extraction",
+            model_name_used=model_name,
+        )
 
     try:
         extraction, used_model_name = _run_json_stage(
