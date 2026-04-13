@@ -12,6 +12,7 @@ import re
 import requests
 import time
 from dags import database
+from dags import materials_launch
 from dags.runtime_utils import df_to_xcom_records, load_env
 
 
@@ -1021,6 +1022,53 @@ def _send_discord_message(
         return False, str(error)
 
 
+def _build_discord_job_match_message(job: dict) -> str | None:
+    profile_id = (
+        int(job.get("profile_id")) if job.get("profile_id") is not None else None
+    )
+    job_id = job.get("id")
+    if profile_id is None or not job_id:
+        return None
+
+    title = job.get("title") or "Unknown title"
+    company = job.get("company") or "Unknown company"
+    fit_score = job.get("fit_score")
+    fit_decision = job.get("fit_decision")
+    job_url = job.get("job_url") or ""
+    exp_requirement = "not specified"
+    profile_label = job.get("display_name") or job.get("profile_key") or profile_id
+
+    llm_match = job.get("llm_match")
+    if llm_match:
+        try:
+            parsed = llm_match if isinstance(llm_match, dict) else json.loads(llm_match)
+            exp_requirement = _format_exp_requirement_for_discord(
+                parsed.get("exp_requirement")
+            )
+        except Exception:
+            pass
+
+    materials_url = materials_launch.maybe_build_materials_launch_url(
+        profile_id=profile_id,
+        job_id=str(job_id),
+    )
+
+    lines = [
+        "🎯 Job Match",
+        f"Profile: {profile_label}",
+        f"ID: {job_id}",
+        f"Title: {title}",
+        f"Company: {company}",
+        f"Decision: {fit_decision}",
+        f"Fit Score: {fit_score}",
+        f"Exp Requirement: {exp_requirement}",
+        f"URL: {job_url}",
+    ]
+    if materials_url:
+        lines.append(f"Materials: {materials_url}")
+    return "\n".join(lines)
+
+
 @dag(
     start_date=datetime(2023, 1, 1),
     schedule=None,
@@ -1922,12 +1970,6 @@ def linkedin_fitting_notifier():
                 else None
             )
             job_id = job.get("id")
-            title = job.get("title") or "Unknown title"
-            company = job.get("company") or "Unknown company"
-            fit_score = job.get("fit_score")
-            fit_decision = job.get("fit_decision")
-            job_url = job.get("job_url") or ""
-            exp_requirement = "not specified"
             profile_label = (
                 job.get("display_name") or job.get("profile_key") or profile_id
             )
@@ -1948,31 +1990,9 @@ def linkedin_fitting_notifier():
             )
             profile_summary["eligible"] += 1
 
-            llm_match = job.get("llm_match")
-            if llm_match:
-                try:
-                    parsed = (
-                        llm_match
-                        if isinstance(llm_match, dict)
-                        else json.loads(llm_match)
-                    )
-                    exp_requirement = _format_exp_requirement_for_discord(
-                        parsed.get("exp_requirement")
-                    )
-                except Exception:
-                    pass
-
-            message = (
-                "🎯 Job Match\n"
-                f"Profile: {profile_label}\n"
-                f"ID: {job_id}\n"
-                f"Title: {title}\n"
-                f"Company: {company}\n"
-                f"Decision: {fit_decision}\n"
-                f"Fit Score: {fit_score}\n"
-                f"Exp Requirement: {exp_requirement}\n"
-                f"URL: {job_url}"
-            )
+            message = _build_discord_job_match_message(job)
+            if not message:
+                continue
 
             ok, error = _send_discord_message(
                 message,

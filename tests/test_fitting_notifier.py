@@ -4,6 +4,7 @@ import pytest
 import requests
 
 from dags import fitting_notifier
+from dags import materials_launch
 
 
 def _candidate_summary(**overrides):
@@ -378,3 +379,53 @@ def test_log_job_match_result_includes_model_name_for_error(capsys):
     captured = capsys.readouterr()
     assert "status=error" in captured.out
     assert "model_name=gpt-5.4-mini" in captured.out
+
+
+def test_build_discord_job_match_message_includes_materials_launch_url(monkeypatch):
+    monkeypatch.setenv("RESUME_MATCHER_BASE_URL", "https://materials.example.com")
+    monkeypatch.setenv("MATERIALS_LINK_SECRET", "test-secret")
+
+    message = fitting_notifier._build_discord_job_match_message(
+        {
+            "profile_id": 7,
+            "display_name": "George Gu",
+            "id": "li-123",
+            "title": "Data Engineer",
+            "company": "Example Co",
+            "fit_score": 88,
+            "fit_decision": "Strong Fit",
+            "job_url": "https://linkedin.example/job/li-123",
+            "llm_match": json.dumps({"exp_requirement": "3+ years preferred"}),
+        }
+    )
+
+    assert message is not None
+    assert "Materials: https://materials.example.com/launch?token=" in message
+    token = message.split("Materials: ", 1)[1].strip()
+    parsed = materials_launch.verify_materials_launch_token(
+        token=token.split("token=", 1)[1],
+        secret="test-secret",
+    )
+    assert parsed["profile_id"] == 7
+    assert parsed["job_id"] == "li-123"
+
+
+def test_build_discord_job_match_message_omits_materials_url_without_config(monkeypatch):
+    monkeypatch.delenv("RESUME_MATCHER_BASE_URL", raising=False)
+    monkeypatch.delenv("MATERIALS_LINK_SECRET", raising=False)
+
+    message = fitting_notifier._build_discord_job_match_message(
+        {
+            "profile_id": 7,
+            "display_name": "George Gu",
+            "id": "li-123",
+            "title": "Data Engineer",
+            "company": "Example Co",
+            "fit_score": 88,
+            "fit_decision": "Strong Fit",
+            "job_url": "https://linkedin.example/job/li-123",
+        }
+    )
+
+    assert message is not None
+    assert "Materials:" not in message
