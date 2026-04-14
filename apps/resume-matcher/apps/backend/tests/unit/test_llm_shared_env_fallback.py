@@ -26,6 +26,58 @@ class TestSharedEnvFallback:
         "app.llm._parse_shared_llm_endpoints",
         return_value=[
             {
+                "name": "nc",
+                "request_url": "https://nc.example.test/v1/responses",
+                "api_key": "nc-key",
+            },
+            {
+                "name": "yuan",
+                "request_url": "https://yuan.example.test/v1/responses",
+                "api_key": "yuan-key",
+                "model": "glm-5.1",
+            },
+        ],
+    )
+    def test_shared_env_fallback_starts_from_first_endpoint_every_call(
+        self,
+        _mock_endpoints,
+        mock_request,
+    ):
+        calls: list[tuple[str, str]] = []
+
+        def side_effect(*, request_url, api_key, model_name, messages, max_tokens):
+            calls.append((request_url, model_name))
+            if request_url == "https://nc.example.test/v1/responses":
+                raise RuntimeError("temporary nc failure")
+            return '{"ok": true}'
+
+        mock_request.side_effect = side_effect
+
+        first = _request_shared_responses_text_with_fallback(
+            messages=[{"role": "user", "content": "Return JSON."}],
+            model_name="gpt-5.4",
+            max_tokens=256,
+        )
+        second = _request_shared_responses_text_with_fallback(
+            messages=[{"role": "user", "content": "Return JSON."}],
+            model_name="gpt-5.4",
+            max_tokens=256,
+        )
+
+        assert first == '{"ok": true}'
+        assert second == '{"ok": true}'
+        assert calls == [
+            ("https://nc.example.test/v1/responses", "gpt-5.4"),
+            ("https://yuan.example.test/v1/responses", "glm-5.1"),
+            ("https://nc.example.test/v1/responses", "gpt-5.4"),
+            ("https://yuan.example.test/v1/responses", "glm-5.1"),
+        ]
+
+    @patch("app.llm._request_shared_responses_text")
+    @patch(
+        "app.llm._parse_shared_llm_endpoints",
+        return_value=[
+            {
                 "name": "yuan",
                 "request_url": "https://example.test/v1/responses",
                 "api_key": "test-key",

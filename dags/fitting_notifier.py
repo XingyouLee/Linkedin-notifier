@@ -631,7 +631,6 @@ def _request_llm_json_with_fallback(
     endpoints: list[dict[str, str]],
     model_name: str,
     prompt: str,
-    start_index: int = 0,
     return_metadata: bool = False,
 ) -> dict | tuple[dict, str]:
     transient_errors: list[str] = []
@@ -640,10 +639,7 @@ def _request_llm_json_with_fallback(
     if not endpoints:
         raise RuntimeError("FATAL_API::no_llm_endpoints_available")
 
-    normalized_start_index = start_index % len(endpoints)
-    ordered_endpoints = endpoints[normalized_start_index:] + endpoints[:normalized_start_index]
-
-    for endpoint in ordered_endpoints:
+    for endpoint in endpoints:
         endpoint_name = (
             endpoint.get("name") or endpoint.get("request_url") or "endpoint"
         )
@@ -1229,7 +1225,6 @@ def linkedin_fitting_notifier():
                         endpoints=llm_endpoints,
                         model_name=model_name,
                         prompt=prompt,
-                        start_index=(prepared["sequence_index"] + attempt) % len(llm_endpoints),
                         return_metadata=True,
                     )
                     parsed = _apply_fit_caps(

@@ -288,6 +288,8 @@ def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch
 
     def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
         calls.append((request_url, model_name, prompt))
+        if request_url == "https://nowcoding.ai/v1/responses":
+            raise requests.Timeout("nc timeout")
         return {"fit_score": 77, "decision": "Moderate Fit"}
 
     monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
@@ -308,11 +310,11 @@ def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch
         ],
         model_name="gpt-5.4",
         prompt="Return JSON only",
-        start_index=1,
     )
 
     assert parsed == {"fit_score": 77, "decision": "Moderate Fit"}
     assert calls == [
+        ("https://nowcoding.ai/v1/responses", "gpt-5.4", "Return JSON only"),
         ("https://us.mcxhm.cn/v1/responses", "glm-5.1", "Return JSON only"),
     ]
 
@@ -343,7 +345,7 @@ def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_
     )
 
 
-def test_request_llm_json_with_fallback_rotates_starting_endpoint(monkeypatch):
+def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(monkeypatch):
     calls = []
 
     def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
@@ -369,18 +371,16 @@ def test_request_llm_json_with_fallback_rotates_starting_endpoint(monkeypatch):
         endpoints=endpoints,
         model_name="gpt-5.4",
         prompt="Return JSON only",
-        start_index=0,
     )
     fitting_notifier._request_llm_json_with_fallback(
         endpoints=endpoints,
         model_name="gpt-5.4",
         prompt="Return JSON only",
-        start_index=1,
     )
 
     assert calls == [
         "https://a.example/v1/responses",
-        "https://b.example/v1/responses",
+        "https://a.example/v1/responses",
     ]
 
 
