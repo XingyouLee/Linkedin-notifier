@@ -1,7 +1,9 @@
+import re
+import json
+from pathlib import Path
+
 import pandas as pd
 import pytest
-from pathlib import Path
-import re
 
 from dags import database
 from dags import jd_api_worker
@@ -167,6 +169,34 @@ def test_coerce_profile_configs_rejects_none_results_per_term():
         assert False, "Expected ValueError for None results_per_term"
     except ValueError as error:
         assert "results_per_term is required" in str(error)
+
+
+def test_load_profile_configs_from_file_hydrates_resume_text_from_markdown(tmp_path):
+    resume_dir = tmp_path / "resume"
+    resume_dir.mkdir(parents=True, exist_ok=True)
+    resume_path = resume_dir / "candidate.md"
+    resume_path.write_text("# Candidate\n\nExperience bullets", encoding="utf-8")
+
+    profiles_path = tmp_path / "profiles.json"
+    profiles_path.write_text(
+        json.dumps(
+            [
+                {
+                    "profile_key": "default",
+                    "display_name": "Default",
+                    "resume_path": "resume/candidate.md",
+                    "resume_text": None,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    profiles = database._load_profile_configs_from_file(profiles_path)
+
+    assert len(profiles) == 1
+    assert profiles[0]["resume_path"] == str(resume_path.resolve())
+    assert "Experience bullets" in (profiles[0].get("resume_text") or "")
 
 
 def test_get_active_search_configs_preserves_zero_results_per_term(monkeypatch):

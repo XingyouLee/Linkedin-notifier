@@ -21,6 +21,7 @@ INCLUDE_USER_INFO_DIR = Path(__file__).resolve().parent.parent / "include" / "us
 BOOTSTRAP_EXISTING_JOBS_KEY = "existing_jobs_v1"
 _SCHEMA_INITIALIZED = False
 _PROFILE_SOURCE_SIGNATURE: tuple[str, int, int] | None = None
+TEXT_RESUME_SUFFIXES = {".md", ".txt"}
 
 DEFAULT_FIT_PROMPT_TEXT = (
     "If output is not valid JSON, regenerate until valid. "
@@ -215,6 +216,29 @@ def _resolve_profile_resume_path(
     return str(resolved)
 
 
+def _load_resume_text_from_path(resume_path: Optional[str]) -> Optional[str]:
+    if not resume_path:
+        return None
+
+    resolved = Path(str(resume_path)).expanduser()
+    if not resolved.exists() or not resolved.is_file():
+        return None
+
+    if resolved.suffix.lower() not in TEXT_RESUME_SUFFIXES:
+        return None
+
+    for encoding in ("utf-8", "utf-8-sig"):
+        try:
+            content = resolved.read_text(encoding=encoding)
+        except UnicodeDecodeError:
+            continue
+        except OSError:
+            return None
+        if content.strip():
+            return content
+    return None
+
+
 def _load_profile_configs_from_file(config_path: Path) -> list[dict[str, Any]]:
     if not config_path.exists():
         raise FileNotFoundError(
@@ -237,6 +261,10 @@ def _load_profile_configs_from_file(config_path: Path) -> list[dict[str, Any]]:
             profile_config.get("resume_path"),
             base_dir=base_dir,
         )
+        if not normalized_profile.get("resume_text"):
+            normalized_profile["resume_text"] = _load_resume_text_from_path(
+                normalized_profile.get("resume_path")
+            )
         profile_configs.append(normalized_profile)
     return profile_configs
 
