@@ -325,3 +325,31 @@ class TestLinkedInNotifierGenerate:
         mock_generate_cover_letter.assert_awaited_once_with("tailored-1")
         assert mock_db.set_master_resume.call_args_list[0].args == ("resume-1",)
         assert mock_db.set_master_resume.call_args_list[-1].args == ("master-old",)
+
+
+@patch("app.routers.linkedin_notifier.parse_resume_to_json", new_callable=AsyncMock)
+async def test_ensure_resume_ready_surfaces_upstream_provider_details(
+    mock_parse_resume_to_json,
+    isolated_database,
+):
+    resume = db.create_resume(
+        content="# Resume",
+        content_type="md",
+        filename="resume.md",
+        is_master=False,
+        processed_data=None,
+        processing_status="pending",
+        original_markdown="# Resume",
+    )
+    mock_parse_resume_to_json.side_effect = RuntimeError(
+        "FATAL_API::endpoint=xcode model_name=gpt-5.4 status=403 error=insufficient_user_quota"
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await linkedin_notifier_router._ensure_resume_ready(resume)
+
+    assert exc_info.value.status_code == 502
+    assert "endpoint=xcode" in exc_info.value.detail
+    assert "insufficient_user_quota" in exc_info.value.detail
+    stored = db.get_resume(resume["resume_id"])
+    assert stored["processing_status"] == "failed"

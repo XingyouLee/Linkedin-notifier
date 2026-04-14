@@ -64,6 +64,7 @@ TEXT_CONTENT_TYPES = {
     "application/octet-stream",
 }
 DEFAULT_SESSION_FALLBACK_TTL_SECONDS = 60 * 60 * 24 * 7
+MAX_PARSE_ERROR_DETAIL_LENGTH = 600
 
 
 def _get_notifier_setting(name: str) -> str:
@@ -385,6 +386,43 @@ def _restore_master_resume(previous_master_id: str | None, selected_resume_id: s
         db.update_resume(selected_resume_id, {"is_master": False})
 
 
+def _compact_error_detail(detail: str) -> str:
+    normalized = " ".join(str(detail or "").split()).strip()
+    if not normalized:
+        return ""
+    if len(normalized) <= MAX_PARSE_ERROR_DETAIL_LENGTH:
+        return normalized
+    return normalized[: MAX_PARSE_ERROR_DETAIL_LENGTH - 3] + "..."
+
+
+def _describe_resume_parse_failure(exc: Exception) -> tuple[int, str]:
+    detail = _compact_error_detail(str(exc))
+    if detail.startswith("FATAL_API::"):
+        upstream_detail = detail.split("::", 1)[1] or "unknown upstream failure"
+        return (
+            502,
+            "LLM provider failure while parsing the selected resume: "
+            f"{upstream_detail}",
+        )
+    if detail.startswith("TRANSIENT_API::"):
+        upstream_detail = detail.split("::", 1)[1] or "temporary upstream failure"
+        return (
+            503,
+            "Transient LLM provider failure while parsing the selected resume: "
+            f"{upstream_detail}",
+        )
+    if detail:
+        return (
+            422,
+            "Failed to parse the selected resume into structured data: "
+            f"{detail}",
+        )
+    return (
+        422,
+        "Failed to parse the selected resume into structured data.",
+    )
+
+
 async def _ensure_resume_ready(resume: dict[str, Any]) -> dict[str, Any]:
     if resume.get("processed_data"):
         updates: dict[str, Any] = {}
@@ -400,15 +438,16 @@ async def _ensure_resume_ready(resume: dict[str, Any]) -> dict[str, Any]:
     try:
         processed_data = await parse_resume_to_json(resume.get("content", ""))
     except Exception as exc:
-        logger.warning(
+        logger.exception(
             "Structured parsing failed for integration resume %s: %s",
             resume["resume_id"],
             exc,
         )
         db.update_resume(resume["resume_id"], {"processing_status": "failed"})
+        status_code, detail = _describe_resume_parse_failure(exc)
         raise HTTPException(
-            status_code=422,
-            detail="Failed to parse the selected resume into structured data.",
+            status_code=status_code,
+            detail=detail,
         ) from exc
 
     return db.update_resume(

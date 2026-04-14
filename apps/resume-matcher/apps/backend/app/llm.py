@@ -257,16 +257,18 @@ def _parse_shared_llm_endpoints() -> list[dict[str, str]]:
             api_key = str(entry.get("api_key") or "").strip()
             api_key_env = str(entry.get("api_key_env") or "").strip()
             name = str(entry.get("name") or f"endpoint_{index + 1}").strip()
+            model = str(entry.get("model") or "").strip()
             if not api_key and api_key_env:
                 api_key = _shared_env_get(api_key_env).strip()
             if request_url and api_key:
-                endpoints.append(
-                    {
-                        "name": name or f"endpoint_{index + 1}",
-                        "request_url": request_url,
-                        "api_key": api_key,
-                    }
-                )
+                endpoint = {
+                    "name": name or f"endpoint_{index + 1}",
+                    "request_url": request_url,
+                    "api_key": api_key,
+                }
+                if model:
+                    endpoint["model"] = model
+                endpoints.append(endpoint)
 
     if endpoints:
         return endpoints
@@ -345,11 +347,12 @@ def _request_shared_responses_text_with_fallback(
 
     for endpoint in _parse_shared_llm_endpoints():
         endpoint_name = endpoint.get("name") or endpoint.get("request_url") or "endpoint"
+        endpoint_model_name = str(endpoint.get("model") or model_name).strip() or model_name
         try:
             return _request_shared_responses_text(
                 request_url=endpoint["request_url"],
                 api_key=endpoint["api_key"],
-                model_name=model_name,
+                model_name=endpoint_model_name,
                 messages=messages,
                 max_tokens=max_tokens,
             )
@@ -360,15 +363,22 @@ def _request_shared_responses_text_with_fallback(
                 error_body = exc.read().decode("utf-8", "ignore")
             except Exception:
                 error_body = str(exc)
-            message = f"endpoint={endpoint_name} status={status_code} error={error_body or exc}"
+            message = (
+                f"endpoint={endpoint_name} model_name={endpoint_model_name} "
+                f"status={status_code} error={error_body or exc}"
+            )
             if _is_transient_fallback_http_status(status_code):
                 transient_errors.append(message)
                 continue
             fatal_errors.append(message)
         except (urllib_error.URLError, TimeoutError) as exc:
-            transient_errors.append(f"endpoint={endpoint_name} error={exc}")
+            transient_errors.append(
+                f"endpoint={endpoint_name} model_name={endpoint_model_name} error={exc}"
+            )
         except Exception as exc:
-            fatal_errors.append(f"endpoint={endpoint_name} error={exc}")
+            fatal_errors.append(
+                f"endpoint={endpoint_name} model_name={endpoint_model_name} error={exc}"
+            )
 
     if transient_errors and not fatal_errors:
         raise RuntimeError("TRANSIENT_API::" + " | ".join(transient_errors))

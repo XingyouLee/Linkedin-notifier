@@ -2,7 +2,13 @@
 
 from unittest.mock import AsyncMock, patch
 
-from app.llm import LLMConfig, check_llm_health, complete, complete_json
+from app.llm import (
+    LLMConfig,
+    _request_shared_responses_text_with_fallback,
+    check_llm_health,
+    complete,
+    complete_json,
+)
 
 
 def _missing_key_config() -> LLMConfig:
@@ -15,6 +21,40 @@ def _missing_key_config() -> LLMConfig:
 
 
 class TestSharedEnvFallback:
+    @patch("app.llm._request_shared_responses_text")
+    @patch(
+        "app.llm._parse_shared_llm_endpoints",
+        return_value=[
+            {
+                "name": "yuan",
+                "request_url": "https://example.test/v1/responses",
+                "api_key": "test-key",
+                "model": "glm-5.1",
+            }
+        ],
+    )
+    def test_shared_env_fallback_uses_endpoint_model_override(
+        self,
+        _mock_endpoints,
+        mock_request,
+    ):
+        mock_request.return_value = '{"ok": true}'
+
+        result = _request_shared_responses_text_with_fallback(
+            messages=[{"role": "user", "content": "Return JSON."}],
+            model_name="gpt-5.4",
+            max_tokens=256,
+        )
+
+        assert result == '{"ok": true}'
+        mock_request.assert_called_once_with(
+            request_url="https://example.test/v1/responses",
+            api_key="test-key",
+            model_name="glm-5.1",
+            messages=[{"role": "user", "content": "Return JSON."}],
+            max_tokens=256,
+        )
+
     @patch("app.llm._complete_via_shared_responses", new_callable=AsyncMock)
     @patch("app.llm._shared_env_completion_is_enabled", return_value=True)
     async def test_complete_json_uses_shared_env_fallback(

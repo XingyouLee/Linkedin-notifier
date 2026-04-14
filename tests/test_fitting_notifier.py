@@ -244,6 +244,79 @@ def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
     ]
 
 
+def test_parse_llm_endpoints_from_env_preserves_per_endpoint_model_override(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "nc",
+                    "request_url": "https://nowcoding.ai/v1/responses",
+                    "api_key_env": "NC_API_KEY",
+                },
+                {
+                    "name": "yuan",
+                    "request_url": "https://us.mcxhm.cn/v1/responses",
+                    "api_key_env": "YUAN_API_KEY",
+                    "model": "glm-5.1",
+                },
+            ]
+        ),
+    )
+    monkeypatch.setenv("NC_API_KEY", "nc-key")
+    monkeypatch.setenv("YUAN_API_KEY", "yuan-key")
+
+    endpoints = fitting_notifier._parse_llm_endpoints_from_env()
+
+    assert endpoints == [
+        {
+            "name": "nc",
+            "request_url": "https://nowcoding.ai/v1/responses",
+            "api_key": "nc-key",
+        },
+        {
+            "name": "yuan",
+            "request_url": "https://us.mcxhm.cn/v1/responses",
+            "api_key": "yuan-key",
+            "model": "glm-5.1",
+        },
+    ]
+
+
+def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch):
+    calls = []
+
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+        calls.append((request_url, model_name, prompt))
+        return {"fit_score": 77, "decision": "Moderate Fit"}
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    parsed = fitting_notifier._request_llm_json_with_fallback(
+        endpoints=[
+            {
+                "name": "nc",
+                "request_url": "https://nowcoding.ai/v1/responses",
+                "api_key": "key-1",
+            },
+            {
+                "name": "yuan",
+                "request_url": "https://us.mcxhm.cn/v1/responses",
+                "api_key": "key-2",
+                "model": "glm-5.1",
+            },
+        ],
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+        start_index=1,
+    )
+
+    assert parsed == {"fit_score": 77, "decision": "Moderate Fit"}
+    assert calls == [
+        ("https://us.mcxhm.cn/v1/responses", "glm-5.1", "Return JSON only"),
+    ]
+
+
 def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_all_endpoints_fail(
     monkeypatch,
 ):
