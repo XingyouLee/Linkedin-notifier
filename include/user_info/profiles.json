@@ -6,7 +6,6 @@
     "bootstrap_existing_jobs": true,
     "resume_path": "resume/xingyouli.md",
     "discord_channel_id": "1476129860450779147",
-    "model_name": "gpt-5.4",
     "candidate_summary": {
       "summary": "Early-career data engineer in the Netherlands with one internship plus strong graduate-level and project-based data engineering work. Strongest on Python, SQL, Spark, Databricks, Airflow, Azure, ETL/ELT, and warehouse-oriented analytics engineering. Good fit for junior data engineering, analytics engineering, Python-heavy backend/data workflow roles, and traineeships. Not a strong fit for senior ownership, deep architecture leadership, or jobs that require fluent Dutch.",
       "target_roles": [
@@ -75,7 +74,6 @@
     "bootstrap_existing_jobs": false,
     "resume_path": "resume/georgegu.md",
     "discord_channel_id": "1486781670505054268",
-    "model_name": "gpt-5.4",
     "candidate_summary": {
       "summary": "Early-career backend and data engineer with roughly two years of meaningful professional engineering experience across backend services, scraping/data ingestion, large-scale processing, and production APIs. Strongest on Python, SQL, Django REST, FastAPI, PostgreSQL, distributed processing, and data pipelines. Good fit for junior-to-mid backend/data engineering roles and production-oriented platform/data workflow roles. Not a strong fit for frontend-heavy roles, senior architecture ownership, people management, or research-heavy ML positions.",
       "target_roles": [
