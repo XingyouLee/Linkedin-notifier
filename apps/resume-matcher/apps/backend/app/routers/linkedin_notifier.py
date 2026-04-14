@@ -18,7 +18,7 @@ from psycopg import connect
 from psycopg.rows import dict_row
 
 from app.database import db
-from app.runtime_env import get_shared_setting
+from app.runtime_env import get_shared_setting, resolve_repo_roots
 from app.routers import resumes as resumes_router
 from app.schemas import (
     ImproveResumeConfirmRequest,
@@ -47,10 +47,7 @@ router = APIRouter(
     tags=["LinkedIn Notifier Integration"],
 )
 
-REPO_ROOT = Path(__file__).resolve().parents[6]
-PRIMARY_REPO_ROOT = (
-    REPO_ROOT.parent.parent if REPO_ROOT.parent.name == ".worktrees" else REPO_ROOT
-)
+REPO_ROOT, PRIMARY_REPO_ROOT = resolve_repo_roots(Path(__file__))
 USER_INFO_DIR = REPO_ROOT / "include" / "user_info"
 MAX_FILE_SIZE = 4 * 1024 * 1024
 DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx"}

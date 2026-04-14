@@ -6,8 +6,6 @@ import logging
 import os
 import re
 import threading
-from functools import lru_cache
-from pathlib import Path
 from typing import Any
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -16,9 +14,9 @@ import litellm
 from litellm import Router
 from litellm.router import RetryPolicy
 from pydantic import BaseModel
-from dotenv import dotenv_values
 
 from app.config import settings
+from app.runtime_env import load_shared_env_values
 
 LITELLM_LOGGER_NAMES = ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy")
 
@@ -216,34 +214,11 @@ def _load_stored_config() -> dict:
     return {}
 
 
-REPO_ROOT = Path(__file__).resolve().parents[5]
-PRIMARY_REPO_ROOT = (
-    REPO_ROOT.parent.parent if REPO_ROOT.parent.name == ".worktrees" else REPO_ROOT
-)
-
-
-@lru_cache(maxsize=1)
-def _load_shared_env_values() -> dict[str, str]:
-    values: dict[str, str] = {}
-    env_roots = [REPO_ROOT]
-    if PRIMARY_REPO_ROOT != REPO_ROOT:
-        env_roots.append(PRIMARY_REPO_ROOT)
-
-    for root in env_roots:
-        for path in (root / ".env", root / "dags" / ".env"):
-            if not path.exists():
-                continue
-            for key, value in dotenv_values(path).items():
-                if key and value and key not in values:
-                    values[key] = str(value)
-    return values
-
-
 def _shared_env_get(name: str) -> str:
     value = os.getenv(name)
     if value:
         return value
-    return _load_shared_env_values().get(name, "")
+    return load_shared_env_values().get(name, "")
 
 
 def _extract_responses_output_text(response_json: dict[str, Any]) -> str | None:
