@@ -299,6 +299,45 @@ def _is_transient_fallback_http_status(status_code: int | str | None) -> bool:
     return code == 408 or code == 429 or code >= 500
 
 
+def _serialize_shared_responses_input(messages: list[dict[str, str]]) -> str:
+    """Flatten chat messages into one prompt string for proxy compatibility.
+
+    Some OpenAI-compatible proxy endpoints used by this project reject
+    Responses API payloads that contain message arrays with a `system` role,
+    while the same content succeeds when sent as a single string input.
+    Keep the shared-env path compatible with those proxies by collapsing the
+    conversation into one text prompt.
+    """
+    instruction_parts: list[str] = []
+    conversation_parts: list[str] = []
+
+    for message in messages:
+        role = str(message.get("role") or "user").strip().lower()
+        content = str(message.get("content") or "").strip()
+        if not content:
+            continue
+
+        if role in {"system", "developer"}:
+            instruction_parts.append(content)
+            continue
+
+        if role == "user":
+            conversation_parts.append(content)
+            continue
+
+        conversation_parts.append(f"{role.upper()}:\n{content}")
+
+    if instruction_parts and not conversation_parts:
+        return "\n\n".join(instruction_parts)
+
+    parts: list[str] = []
+    if instruction_parts:
+        parts.append("\n\n".join(instruction_parts))
+    if conversation_parts:
+        parts.append("\n\n".join(conversation_parts))
+    return "\n\n".join(parts).strip()
+
+
 def _request_shared_responses_text(
     *,
     request_url: str,
@@ -309,14 +348,7 @@ def _request_shared_responses_text(
 ) -> str:
     payload = {
         "model": model_name,
-        "input": [
-            {
-                "type": "message",
-                "role": message["role"],
-                "content": [{"type": "input_text", "text": message["content"]}],
-            }
-            for message in messages
-        ],
+        "input": _serialize_shared_responses_input(messages),
         "max_output_tokens": max_tokens,
     }
     request = urllib_request.Request(

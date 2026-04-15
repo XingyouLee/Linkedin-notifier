@@ -11,13 +11,14 @@ from pathlib import Path
 from typing import Any, NoReturn
 from uuid import uuid4
 
-from fastapi import APIRouter, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, File, HTTPException, Query, Request, UploadFile
 from fastapi.responses import Response
 
 from app.config_cache import get_content_language, load_config as _load_config
 from app.database import db
 from app.pdf import render_resume_pdf, PDFRenderError
 from app.config import settings
+from app.workspace_auth import WORKSPACE_SESSION_COOKIE_NAME
 
 logger = logging.getLogger(__name__)
 from app.schemas import (
@@ -71,6 +72,20 @@ def _get_default_prompt_id() -> str:
 
 def _hash_job_content(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _build_pdf_request_headers(request: Request) -> dict[str, str] | None:
+    """Forward workspace session cookies to frontend print pages.
+
+    The print pages are server-rendered Next.js routes that re-fetch resume data
+    from the backend using the incoming request cookie. Without forwarding the
+    workspace session cookie, launch-scoped resumes are invisible during backend
+    PDF generation and the print selector never appears.
+    """
+    workspace_cookie = request.cookies.get(WORKSPACE_SESSION_COOKIE_NAME)
+    if not workspace_cookie:
+        return None
+    return {"cookie": f"{WORKSPACE_SESSION_COOKIE_NAME}={workspace_cookie}"}
 
 
 def _normalize_payload(value: Any) -> Any:
@@ -1352,6 +1367,7 @@ async def update_resume_endpoint(
 
 @router.get("/{resume_id}/pdf")
 async def download_resume_pdf(
+    request: Request,
     resume_id: str,
     template: str = Query("swiss-single"),
     pageSize: str = Query("A4", pattern="^(A4|LETTER)$"),
@@ -1425,7 +1441,12 @@ async def download_resume_pdf(
 
     # Render PDF with margins applied to every page
     try:
-        pdf_bytes = await render_resume_pdf(url, pageSize, margins=pdf_margins)
+        pdf_bytes = await render_resume_pdf(
+            url,
+            pageSize,
+            margins=pdf_margins,
+            extra_headers=_build_pdf_request_headers(request),
+        )
     except PDFRenderError as e:
         raise HTTPException(status_code=503, detail=str(e))
 
@@ -1720,6 +1741,7 @@ async def get_job_description_for_resume(resume_id: str) -> dict:
 
 @router.get("/{resume_id}/cover-letter/pdf")
 async def download_cover_letter_pdf(
+    request: Request,
     resume_id: str,
     pageSize: str = Query("A4", pattern="^(A4|LETTER)$"),
     lang: str | None = Query(None, pattern="^[a-z]{2}(-[A-Z]{2})?$"),
@@ -1749,7 +1771,10 @@ async def download_cover_letter_pdf(
     # Render PDF with cover letter selector
     try:
         pdf_bytes = await render_resume_pdf(
-            url, pageSize, selector=".cover-letter-print"
+            url,
+            pageSize,
+            selector=".cover-letter-print",
+            extra_headers=_build_pdf_request_headers(request),
         )
     except PDFRenderError as e:
         raise HTTPException(status_code=503, detail=str(e))

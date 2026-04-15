@@ -176,3 +176,52 @@ class TestRetryProcessing:
         async with client:
             resp = await client.post("/api/v1/resumes/res-123/retry-processing")
         assert resp.status_code == 400
+
+
+class TestPdfDownloads:
+    """PDF download endpoints should forward workspace session cookies."""
+
+    @patch("app.routers.resumes.render_resume_pdf", new_callable=AsyncMock)
+    @patch("app.routers.resumes.db")
+    async def test_resume_pdf_forwards_workspace_cookie(
+        self,
+        mock_db,
+        mock_render_pdf,
+        client,
+        mock_resume_record,
+    ):
+        mock_db.get_resume.return_value = mock_resume_record
+        mock_render_pdf.return_value = b"%PDF-resume"
+
+        async with client:
+            response = await client.get("/api/v1/resumes/res-123/pdf")
+
+        assert response.status_code == 200
+        assert response.content == b"%PDF-resume"
+        extra_headers = mock_render_pdf.await_args.kwargs["extra_headers"]
+        assert "cookie" in extra_headers
+        assert extra_headers["cookie"].startswith("resume_matcher_session=")
+
+    @patch("app.routers.resumes.render_resume_pdf", new_callable=AsyncMock)
+    @patch("app.routers.resumes.db")
+    async def test_cover_letter_pdf_forwards_workspace_cookie(
+        self,
+        mock_db,
+        mock_render_pdf,
+        client,
+        mock_resume_record,
+    ):
+        mock_db.get_resume.return_value = {
+            **mock_resume_record,
+            "cover_letter": "Dear hiring team",
+        }
+        mock_render_pdf.return_value = b"%PDF-cover"
+
+        async with client:
+            response = await client.get("/api/v1/resumes/res-123/cover-letter/pdf")
+
+        assert response.status_code == 200
+        assert response.content == b"%PDF-cover"
+        extra_headers = mock_render_pdf.await_args.kwargs["extra_headers"]
+        assert "cookie" in extra_headers
+        assert extra_headers["cookie"].startswith("resume_matcher_session=")
