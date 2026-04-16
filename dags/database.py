@@ -9,7 +9,7 @@ import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
 
-JOB_REQUIRED_COLUMNS = ["id", "site", "job_url", "title", "company"]
+JOB_REQUIRED_COLUMNS = ["id", "site", "job_url", "title", "company", "source_job_id"]
 JD_QUEUE_COLUMNS = ["id", "job_url"]
 LLM_RESULT_COLUMNS = ["id", "llm_match", "llm_match_error"]
 PROFILE_JOB_COLUMNS = ["profile_id", "job_id", "search_config_id", "matched_term"]
@@ -19,6 +19,8 @@ DEFAULT_PROFILE_SOURCE_SIGNATURE = ("__default_profile__", 0, 0)
 USER_INFO_DIR = Path(__file__).resolve().parent.parent / "user_info"
 INCLUDE_USER_INFO_DIR = Path(__file__).resolve().parent.parent / "include" / "user_info"
 BOOTSTRAP_EXISTING_JOBS_KEY = "existing_jobs_v1"
+LINKEDIN_TEST_MODE_ENV_VAR = "LINKEDIN_TEST_MODE"
+TEST_JOB_ID_PREFIX = "test-"
 _SCHEMA_INITIALIZED = False
 _PROFILE_SOURCE_SIGNATURE: tuple[str, int, int] | None = None
 TEXT_RESUME_SUFFIXES = {".md", ".txt"}
@@ -181,6 +183,16 @@ def _coerce_bool(value, default: bool = True) -> bool:
     return default
 
 
+def is_test_mode_enabled() -> bool:
+    return _coerce_bool(os.getenv(LINKEDIN_TEST_MODE_ENV_VAR), False)
+
+
+def _profile_mode_clause(alias: str = "p") -> str:
+    expected_flag = "TRUE" if is_test_mode_enabled() else "FALSE"
+    return (
+        f"{alias}.is_active = TRUE "
+        f"AND COALESCE({alias}.is_test_profile, FALSE) = {expected_flag}"
+    )
 
 
 def _serialize_candidate_summary_config(candidate_summary_config) -> str | None:
@@ -313,6 +325,7 @@ def _default_profile_config() -> dict[str, Any]:
         "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL"),
         "model_name": os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
         "is_active": True,
+        "is_test_profile": False,
         "search_configs": [
             {
                 "name": os.getenv("DEFAULT_SEARCH_CONFIG_NAME", "default"),
@@ -348,6 +361,12 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
         )
         bootstrap_existing_jobs = _coerce_bool(
             profile_config.get("bootstrap_existing_jobs"),
+            False,
+        )
+        is_test_profile = _coerce_bool(
+            profile_config.get("test_mode_only")
+            if "test_mode_only" in profile_config
+            else profile_config.get("is_test_profile"),
             False,
         )
         search_configs = []
@@ -421,6 +440,7 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
                 "model_name": profile_config.get("model_name")
                 or os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
                 "is_active": profile_is_active,
+                "is_test_profile": is_test_profile,
                 "search_configs": search_configs,
             }
         )
@@ -453,9 +473,10 @@ def _sync_profile_configs(
                 discord_webhook_url,
                 model_name,
                 is_active,
+                is_test_profile,
                 updated_at
             )
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
             ON CONFLICT(profile_key) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
                 resume_path = EXCLUDED.resume_path,
@@ -466,6 +487,7 @@ def _sync_profile_configs(
                 discord_webhook_url = EXCLUDED.discord_webhook_url,
                 model_name = EXCLUDED.model_name,
                 is_active = EXCLUDED.is_active,
+                is_test_profile = EXCLUDED.is_test_profile,
                 updated_at = CURRENT_TIMESTAMP
             RETURNING id
             """,
@@ -482,6 +504,7 @@ def _sync_profile_configs(
                 profile_config.get("discord_webhook_url"),
                 profile_config.get("model_name"),
                 profile_config.get("is_active", True),
+                profile_config.get("is_test_profile", False),
             ),
         )
         profile_id = cursor.fetchone()[0]
@@ -594,6 +617,8 @@ def _backfill_profile_jobs_from_existing_jobs(cursor, profile_id: int):
             j.notify_status,
             j.notify_error
         FROM jobs j
+        WHERE j.id NOT LIKE 'test-%'
+          AND j.source_job_id IS NULL
         ON CONFLICT(profile_id, job_id) DO NOTHING
         """,
         (profile_id,),
@@ -640,6 +665,7 @@ def _bootstrap_flagged_profiles(
         profile_config["profile_key"]
         for profile_config in normalized_profiles
         if profile_config.get("bootstrap_existing_jobs")
+        and not profile_config.get("is_test_profile", False)
     ]
     if not flagged_profile_keys:
         return 0
@@ -761,6 +787,7 @@ def init_db():
                     job_url TEXT,
                     title TEXT,
                     company TEXT,
+                    source_job_id TEXT,
                     batch_id BIGINT,
                     description TEXT,
                     description_error TEXT,
@@ -823,9 +850,17 @@ def init_db():
                     discord_webhook_url TEXT,
                     model_name TEXT,
                     is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    is_test_profile BOOLEAN NOT NULL DEFAULT FALSE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE jobs
+                ADD COLUMN IF NOT EXISTS source_job_id TEXT
                 """
             )
 
@@ -840,6 +875,13 @@ def init_db():
                 """
                 ALTER TABLE profiles
                 ADD COLUMN IF NOT EXISTS fit_prompt_config TEXT
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE profiles
+                ADD COLUMN IF NOT EXISTS is_test_profile BOOLEAN NOT NULL DEFAULT FALSE
                 """
             )
 
@@ -947,6 +989,13 @@ def init_db():
 
             cursor.execute(
                 """
+                CREATE INDEX IF NOT EXISTS idx_profiles_active_test_profile
+                ON profiles (is_active, is_test_profile)
+                """
+            )
+
+            cursor.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_search_configs_profile_active
                 ON search_configs (profile_id, is_active)
                 """
@@ -1002,22 +1051,42 @@ def save_jobs(jobs_df: pd.DataFrame):
             cursor.execute("INSERT INTO batches DEFAULT VALUES RETURNING id")
             batch_id = cursor.fetchone()[0]
 
+            safe_df = filtered_df.copy()
+            safe_df["source_job_id"] = (
+                safe_df["source_job_id"]
+                .fillna("")
+                .astype(str)
+                .str.strip()
+                .replace({"": None})
+            )
             records = [
                 (*row, batch_id)
-                for row in filtered_df.itertuples(index=False, name=None)
+                for row in safe_df.itertuples(index=False, name=None)
             ]
 
             written_count = 0
             for record in records:
                 cursor.execute(
                     """
-                    INSERT INTO jobs (id, site, job_url, title, company, batch_id)
-                    VALUES (%s, %s, %s, %s, %s, %s)
+                    INSERT INTO jobs (
+                        id,
+                        site,
+                        job_url,
+                        title,
+                        company,
+                        source_job_id,
+                        batch_id
+                    )
+                    VALUES (%s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT(id) DO UPDATE SET
                         site = COALESCE(NULLIF(BTRIM(EXCLUDED.site), ''), jobs.site),
                         job_url = COALESCE(NULLIF(BTRIM(EXCLUDED.job_url), ''), jobs.job_url),
                         title = COALESCE(NULLIF(BTRIM(EXCLUDED.title), ''), jobs.title),
                         company = COALESCE(NULLIF(BTRIM(EXCLUDED.company), ''), jobs.company),
+                        source_job_id = COALESCE(
+                            NULLIF(BTRIM(EXCLUDED.source_job_id), ''),
+                            jobs.source_job_id
+                        ),
                         batch_id = EXCLUDED.batch_id
                     """,
                     record,
@@ -1042,8 +1111,9 @@ def upsert_profile_configs(profile_configs) -> int:
 def get_active_search_configs() -> list[dict[str, Any]]:
     """Return active search configs with their owning profile and terms."""
     sync_profiles_from_source()
+    profile_mode_clause = _profile_mode_clause("p")
 
-    query = """
+    query = f"""
         SELECT
             p.id AS profile_id,
             p.profile_key,
@@ -1053,6 +1123,7 @@ def get_active_search_configs() -> list[dict[str, Any]]:
             p.discord_channel_id,
             p.discord_webhook_url,
             p.model_name,
+            COALESCE(p.is_test_profile, FALSE) AS is_test_profile,
             c.id AS search_config_id,
             c.name AS search_config_name,
             c.location,
@@ -1064,7 +1135,7 @@ def get_active_search_configs() -> list[dict[str, Any]]:
         FROM profiles p
         JOIN search_configs c ON c.profile_id = p.id
         JOIN search_terms t ON t.search_config_id = c.id
-        WHERE p.is_active = TRUE
+        WHERE {profile_mode_clause}
           AND c.is_active = TRUE
         ORDER BY p.id ASC, c.id ASC, t.id ASC
     """
@@ -1090,6 +1161,7 @@ def get_active_search_configs() -> list[dict[str, Any]]:
                 "discord_webhook_url": row["discord_webhook_url"],
                 "model_name": row["model_name"]
                 or os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
+                "is_test_profile": bool(row.get("is_test_profile")),
                 "search_config_id": search_config_id,
                 "search_config_name": row["search_config_name"],
                 "location": row["location"]
@@ -1254,8 +1326,9 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     """Atomically claim pending fitting tasks for processing."""
     sync_profiles_from_source()
     stale_minutes = _get_positive_int_env("FITTING_CLAIM_STALE_MINUTES", 30)
+    profile_mode_clause = _profile_mode_clause("p")
 
-    select_query = """
+    select_query = f"""
         SELECT pj.profile_id, pj.job_id, COALESCE(pj.fit_attempts, 0) AS attempts
         FROM profile_jobs pj
         JOIN jobs j ON j.id = pj.job_id
@@ -1270,7 +1343,7 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
                     ) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
                 )
               )
-          AND p.is_active = TRUE
+          AND {profile_mode_clause}
           AND j.description IS NOT NULL
           AND pj.llm_match IS NULL
         ORDER BY COALESCE(pj.fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC
@@ -1478,15 +1551,23 @@ def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
     """Fetch jobs that still need JD scraping and are eligible for retry."""
     init_db()
     stale_minutes = _get_positive_int_env("JD_CLAIM_STALE_MINUTES", 30)
+    profile_mode_clause = _profile_mode_clause("p")
 
-    query = """
-        SELECT j.id, j.site, j.job_url, j.title, j.company,
+    query = f"""
+        SELECT j.id, j.site, j.job_url, j.title, j.company, j.source_job_id,
                q.status AS jd_status,
                COALESCE(q.attempts, 0) AS jd_attempts
         FROM jobs j
         LEFT JOIN jd_queue q ON q.job_id = j.id
         WHERE j.description IS NULL
           AND NULLIF(TRIM(COALESCE(j.job_url, '')), '') IS NOT NULL
+          AND EXISTS (
+                SELECT 1
+                FROM profile_jobs pj
+                JOIN profiles p ON p.id = pj.profile_id
+                WHERE pj.job_id = j.id
+                  AND {profile_mode_clause}
+              )
           AND (
                 q.job_id IS NULL
                 OR q.status = 'pending'
@@ -1517,14 +1598,15 @@ def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
 def get_profile_jobs_ready_for_fitting() -> pd.DataFrame:
     """Fetch profile jobs that already have JD and still need to enter fitting."""
     sync_profiles_from_source()
+    profile_mode_clause = _profile_mode_clause("p")
 
-    query = """
+    query = f"""
         SELECT pj.profile_id, pj.job_id
         FROM profile_jobs pj
         JOIN jobs j ON j.id = pj.job_id
         JOIN profiles p ON p.id = pj.profile_id
         WHERE j.description IS NOT NULL
-          AND p.is_active = TRUE
+          AND {profile_mode_clause}
           AND pj.llm_match IS NULL
           AND COALESCE(pj.fit_status, '') NOT IN (
                 'pending_fit', 'fitting', 'fit_done', 'notified', 'fit_failed', 'notify_failed'
@@ -1611,7 +1693,18 @@ def save_llm_matches(jobs_df: pd.DataFrame):
 def get_jobs_to_notify() -> pd.DataFrame:
     """Get unnotified fit results that are ready to notify per profile."""
     sync_profiles_from_source()
-    query = """
+    profile_mode_clause = _profile_mode_clause("p")
+    if is_test_mode_enabled():
+        decision_filter = """
+          AND pj.llm_match IS NOT NULL
+          AND NULLIF(TRIM(COALESCE(pj.llm_match_error, '')), '') IS NULL
+        """
+    else:
+        decision_filter = """
+          AND pj.fit_decision IN ('Strong Fit', 'Moderate Fit')
+        """
+
+    query = f"""
         SELECT
             pj.profile_id,
             p.profile_key,
@@ -1619,6 +1712,7 @@ def get_jobs_to_notify() -> pd.DataFrame:
             p.discord_channel_id,
             p.discord_webhook_url,
             p.model_name,
+            COALESCE(p.is_test_profile, FALSE) AS is_test_profile,
             j.id,
             j.title,
             j.company,
@@ -1634,10 +1728,10 @@ def get_jobs_to_notify() -> pd.DataFrame:
         FROM profile_jobs pj
         JOIN jobs j ON j.id = pj.job_id
         JOIN profiles p ON p.id = pj.profile_id
-        WHERE pj.fit_decision IN ('Strong Fit', 'Moderate Fit')
+        WHERE {profile_mode_clause}
           AND pj.notified_at IS NULL
           AND pj.fit_status IN ('fit_done', 'notify_failed')
-          AND p.is_active = TRUE
+          {decision_filter}
         ORDER BY pj.profile_id ASC, COALESCE(j.batch_id, 0) DESC, pj.fit_score DESC
     """
     with _connect(row_factory=dict_row) as conn:
@@ -1737,13 +1831,15 @@ def claim_pending_jd_requests(
     """Atomically claim pending JD requests for one worker run."""
     init_db()
     stale_minutes = _get_positive_int_env("JD_CLAIM_STALE_MINUTES", 30)
+    profile_mode_clause = _profile_mode_clause("p")
     normalized_job_ids = [str(job_id) for job_id in (job_ids or []) if job_id]
     if job_ids is not None and not normalized_job_ids:
         return pd.DataFrame(columns=["job_id", "job_url"])
 
-    select_query = """
-        SELECT q.job_id, q.job_url
+    select_query = f"""
+        SELECT q.job_id, q.job_url, j.source_job_id
         FROM jd_queue q
+        JOIN jobs j ON j.id = q.job_id
         WHERE (
                 q.status = 'pending'
                 OR (
@@ -1753,6 +1849,13 @@ def claim_pending_jd_requests(
                         TIMESTAMP '1970-01-01 00:00:00'
                     ) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
                 )
+              )
+          AND EXISTS (
+                SELECT 1
+                FROM profile_jobs pj
+                JOIN profiles p ON p.id = pj.profile_id
+                WHERE pj.job_id = q.job_id
+                  AND {profile_mode_clause}
               )
     """
     params: List[Any] = [stale_minutes]
