@@ -446,6 +446,10 @@ def _coerce_bool(value) -> bool:
     return normalized in {"true", "1", "yes", "y", "on"}
 
 
+def _is_test_mode_enabled() -> bool:
+    return _coerce_bool(os.getenv("LINKEDIN_TEST_MODE"))
+
+
 def _normalize_string_list(values) -> list[str]:
     if not values:
         return []
@@ -1041,7 +1045,20 @@ def _has_experience_blocker(llm_match) -> bool:
     return _coerce_bool(experience_check.get("experience_blocker"))
 
 
+def _has_successful_match_payload(job: dict | None) -> bool:
+    if not isinstance(job, dict):
+        return False
+    if job.get("llm_match_error"):
+        return False
+    parsed_match = _parse_llm_match_payload(job.get("llm_match"))
+    return bool(parsed_match)
+
+
 def _filter_notification_jobs(job_records: list[dict]) -> list[dict]:
+    if _is_test_mode_enabled():
+        return [
+            job for job in (job_records or []) if _has_successful_match_payload(job)
+        ]
     return [
         job
         for job in (job_records or [])
@@ -2039,6 +2056,7 @@ def linkedin_fitting_notifier():
             "fit_decision",
             "job_url",
             "llm_match",
+            "llm_match_error",
         ]
         for col in notify_columns:
             if col not in jobs_df.columns:
@@ -2046,11 +2064,16 @@ def linkedin_fitting_notifier():
 
         eligible_records = df_to_xcom_records(jobs_df[notify_columns])
         filtered_records = _filter_notification_jobs(eligible_records)
-        blocked_count = len(eligible_records) - len(filtered_records)
-        if blocked_count > 0:
-            print(
-                f"Suppressed {blocked_count} notification candidates due to experience_blocker."
-            )
+        suppressed_count = len(eligible_records) - len(filtered_records)
+        if suppressed_count > 0:
+            if _is_test_mode_enabled():
+                print(
+                    f"Suppressed {suppressed_count} notification candidates because they lacked a successful fit payload in test mode."
+                )
+            else:
+                print(
+                    f"Suppressed {suppressed_count} notification candidates due to experience_blocker."
+                )
         return filtered_records
 
     @task

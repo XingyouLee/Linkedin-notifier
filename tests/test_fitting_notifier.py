@@ -173,6 +173,45 @@ def test_filter_notification_jobs_suppresses_experience_blocker_only():
     assert [job["id"] for job in filtered] == ["1", "3"]
 
 
+def test_filter_notification_jobs_in_test_mode_allows_successful_fit_even_with_experience_blocker(
+    monkeypatch,
+):
+    monkeypatch.setenv("LINKEDIN_TEST_MODE", "true")
+
+    allowed_job = {
+        "id": "1",
+        "llm_match": json.dumps(
+            {
+                "fit_score": 41,
+                "decision": "Weak Fit",
+                "experience_check": {"experience_blocker": True},
+            }
+        ),
+        "llm_match_error": None,
+    }
+    failed_job = {
+        "id": "2",
+        "llm_match": json.dumps(
+            {
+                "fit_score": 66,
+                "decision": "Moderate Fit",
+            }
+        ),
+        "llm_match_error": "llm_timeout",
+    }
+    invalid_payload_job = {
+        "id": "3",
+        "llm_match": "not-json",
+        "llm_match_error": None,
+    }
+
+    filtered = fitting_notifier._filter_notification_jobs(
+        [allowed_job, failed_job, invalid_payload_job]
+    )
+
+    assert [job["id"] for job in filtered] == ["1"]
+
+
 def test_sort_notification_jobs_orders_by_fit_score_desc():
     jobs = [
         {"id": "b", "fit_score": 61, "profile_id": 2},
