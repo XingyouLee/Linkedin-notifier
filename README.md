@@ -67,6 +67,7 @@ Multi-user config
 - The loader checks `include/user_info/profiles.json` first so Airflow containers can see the config during local Astro runs.
 - `resume_path` values in the profile config are resolved relative to that file, so `resume/xingyouli.md` maps to `include/user_info/resume/xingyouli.md`.
 - Each profile can have its own `active` flag, optional `bootstrap_existing_jobs` one-time migration flag, `resume_path`, Discord destination, model name, full `fit_prompt` template, and one or more search configs with distinct terms.
+- Calibration notes for the 2026-04-16 experience-filtering pass live in `include/user_info/fit-calibration-2026-04-16.md`; use that document when tightening `Moderate Fit` prompt behavior without harming junior/plausible-mid recall.
 - Set `bootstrap_existing_jobs: true` only for the legacy profile that should inherit pre-multi-user `jobs` history; leave it `false` for newly added users.
 - Search config supports `location` again, but not `geo_id`; the current scan flow sends `keywords`, `location`, `distance`, `start`, and `f_TPR`.
 
