@@ -130,12 +130,29 @@ def _fetch_job_posting_html(session: requests.Session, job_id: str) -> str:
     return response.text
 
 
+def _normalize_optional_text(value) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, float) and value != value:
+        return None
+    normalized = str(value).strip()
+    if not normalized or normalized.lower() == "nan":
+        return None
+    return normalized
+
+
 def run_once(limit: int = 5, job_ids=None) -> int:
     pending_df = database.claim_pending_jd_requests(limit=limit, job_ids=job_ids)
+    if not pending_df.empty and "source_job_id" not in pending_df.columns:
+        pending_df["source_job_id"] = None
     items = (
         []
         if pending_df.empty
-        else list(pending_df[["job_id", "job_url"]].itertuples(index=False, name=None))
+        else list(
+            pending_df[["job_id", "job_url", "source_job_id"]].itertuples(
+                index=False, name=None
+            )
+        )
     )
     if not items:
         print("No claimable JD requests")
@@ -143,17 +160,24 @@ def run_once(limit: int = 5, job_ids=None) -> int:
 
     processed = 0
     with requests.Session() as session:
-        for job_id, _job_url in items:
-            print(f"Fetching JD via guest jobPosting for {job_id}")
+        for job_id, _job_url, source_job_id in items:
+            persisted_job_id = _normalize_optional_text(job_id)
+            fetch_job_id = _normalize_optional_text(source_job_id) or persisted_job_id
+            if not persisted_job_id or not fetch_job_id:
+                continue
+            print(
+                f"Fetching JD via guest jobPosting for {persisted_job_id} "
+                f"(source_job_id={fetch_job_id})"
+            )
             try:
-                html_text = _fetch_job_posting_html(session, str(job_id))
+                html_text = _fetch_job_posting_html(session, fetch_job_id)
                 description = extract_description(html_text)
                 if description:
-                    database.save_jd_result(str(job_id), description=description)
+                    database.save_jd_result(persisted_job_id, description=description)
                 else:
                     database.save_jd_result(
-                        str(job_id), description_error="empty_description"
-                )
+                        persisted_job_id, description_error="empty_description"
+                    )
             except requests.HTTPError as error:
                 status_code = (
                     error.response.status_code
@@ -161,11 +185,11 @@ def run_once(limit: int = 5, job_ids=None) -> int:
                     else "unknown"
                 )
                 database.save_jd_result(
-                    str(job_id),
+                    persisted_job_id,
                     description_error=f"job_posting_http_error status={status_code}",
                 )
             except Exception as error:
-                database.save_jd_result(str(job_id), description_error=str(error))
+                database.save_jd_result(persisted_job_id, description_error=str(error))
             processed += 1
 
     return processed
