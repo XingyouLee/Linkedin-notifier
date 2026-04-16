@@ -37,9 +37,9 @@ def test_george_profile_prompt_requires_explicit_backend_or_data_centrality_for_
     profile = _load_profile('George Gu')
     candidate_summary = profile['candidate_summary']
 
-    assert 'Generic software or full-stack roles are only credible when backend/data work clearly dominates' in candidate_summary['summary']
-    assert 'Software Engineer (backend/data-focused)' in candidate_summary['target_roles']
-    assert 'Platform/Integration Engineer (hands-on backend/data workflows)' in candidate_summary['target_roles']
+    assert 'Generic software or full-stack roles are only credible when backend/API ownership is clearly central' in candidate_summary['summary']
+    assert 'Software Engineer (backend/API-focused)' in candidate_summary['target_roles']
+    assert 'Integration Engineer (implementation-focused)' in candidate_summary['target_roles']
 
     prompt = fitting_notifier._build_fit_prompt(
         'Software Engineer 1',
@@ -51,4 +51,4 @@ def test_george_profile_prompt_requires_explicit_backend_or_data_centrality_for_
 
     assert 'Software Engineer 1, Graduate Software Engineer, or New Grad Software Engineer' in prompt
     assert 'broad rotation/team-placement language should default to Weak Fit' in prompt
-    assert 'default to Weak Fit unless backend/data scope is explicit and central' in prompt
+    assert 'default to Weak Fit unless backend/API scope is explicit and central' in prompt

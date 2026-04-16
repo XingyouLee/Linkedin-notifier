@@ -31,11 +31,11 @@ def test_george_profile_penalizes_generic_new_grad_and_fullstack_posts():
     summary = profile["candidate_summary"]
     prompt = profile["fit_prompt"]
 
-    assert "Generic software or full-stack roles are only credible when backend/data work clearly dominates" in summary["summary"]
-    assert "Software Engineer (backend/data-focused)" in summary["target_roles"]
-    assert "Broad generalist full-stack ownership" in summary["obvious_gaps"]
+    assert "Generic software or full-stack roles are only credible when backend/API ownership is clearly central" in summary["summary"]
+    assert "Software Engineer (backend/API-focused)" in summary["target_roles"]
+    assert "Frontend-only specialization" in summary["obvious_gaps"]
     assert "Software Engineer 1, Graduate Software Engineer, or New Grad Software Engineer" in prompt
-    assert "default to Weak Fit unless backend/data scope is explicit and central" in prompt
+    assert "default to Weak Fit unless backend/API scope is explicit and central" in prompt
     assert "broad rotation/team-placement language should default to Weak Fit" in prompt
 
 

@@ -1,6 +1,6 @@
 # George Gu
 
-Data Analytics
+Software Engineer
 
 - Email: george00928@gmail.com
 - Phone: +31 0659363256
@@ -9,10 +9,7 @@ Data Analytics
 
 ## Profile
 
-Data Engineer with a strong background in building scalable data pipelines and backend systems.
-Experienced in handling large-scale datasets (100M+ records), optimizing data processing performance, and ensuring data reliability.
-Skilled in Python, SQL, and distributed processing, with hands-on experience in data ingestion, transformation, and system optimization.
-Interested in building robust data infrastructure to support analytics and business decision-making.
+Software Engineer with a strong foundation in both Computer Science and Psychology. Driven by a desire to understand how people think, decide, and interact with technology, then turn those insights into scalable, reliable software. Interested in building fast APIs and dependable systems that support experimentation, personalization, and better digital products.
 
 ## Core Skills
 
@@ -54,31 +51,26 @@ Interested in building robust data infrastructure to support analytics and busin
 - Jira
 - Maven
 
-### Cloud
-
-- GCP (Firebase)
-
 ## Work Experience
 
-### Software Engineer Intern
+### Software Engineer Intern, Capisoft
 
-Capisoft  
-07/2025 - 11/2025 | Amsterdam, NL
+Jul 2025 - Nov 2025 | Amsterdam, NL
 
-- Built and maintained backend services and data workflows using Django REST.
-- Automated data collection and processing using Puppeteer, improving data availability and reducing manual effort.
-- Ensured data consistency and integrity across systems through API design and validation.
-- Collaborated in an agile team using Git, Jira, and CI/CD practices.
+- Built and improved user-facing features in React and TypeScript, focusing on clear UI states and smoother end-to-end user flows.
+- Improved backend APIs in Django REST to support product workflows and maintain consistent data across the platform.
+- Implemented authentication and access control across web and iOS surfaces, helping create a more reliable user experience.
+- Built automation tools to collect and analyze operational data, enabling faster insights and reducing manual work.
+- Worked in an iterative team environment using Git, Jira, and CI/CD to ship improvements and fixes continuously.
 
-### Python Engineer
+### Python Engineer, KK World
 
-KK World  
-09/2018 - 02/2020 | Beijing, CN
+Sep 2018 - Feb 2020 | Beijing, CN
 
-- Designed and built a scalable data ingestion pipeline processing 100M+ records using Scrapy.
-- Optimized data processing performance by 8x through multiprocessing and distributed techniques (PySpark, Redis).
-- Structured, cleaned, and validated large-scale raw datasets to ensure data quality for downstream analytics.
-- Improved database throughput and query efficiency, enhancing data accessibility and usability.
+- Built a large-scale data pipeline that collected and structured over 100M records for downstream product and analysis use.
+- Improved processing throughput by 8x through parallelization and workflow optimization, increasing system efficiency and reducing delays.
+- Cleaned, validated, and structured raw data to improve quality and usability for downstream teams.
+- Collaborated with engineers to identify bottlenecks, benchmark performance, and continuously improve system stability.
 
 ## Projects
 
@@ -94,8 +86,8 @@ KK World
 
 ### BSc in Psychology, Vrije Universiteit Amsterdam
 
-2021-2025, Netherlands
+2021 - 2025 | Netherlands
 
 ### BEng in Software Engineering, Beijing University of Technology
 
-2013-2017, China
+2013 - 2017 | China

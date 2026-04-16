@@ -76,36 +76,39 @@
     "discord_channel_id": "1486781670505054268",
     "model_name": "gpt-5.4",
     "candidate_summary": {
-      "summary": "Early-career backend and data engineer with roughly two years of meaningful professional engineering experience across backend services, scraping/data ingestion, large-scale processing, and production APIs. Strongest on Python, SQL, Django REST, FastAPI, PostgreSQL, distributed processing, and data pipelines. Good fit for junior-to-mid backend/data engineering roles and production-oriented platform/data workflow roles. Not a strong fit for frontend-heavy roles, senior architecture ownership, people management, or research-heavy ML positions.",
+      "summary": "Early-career software engineer with roughly two years of meaningful professional engineering experience across backend APIs, product-facing web features, authentication workflows, automation tooling, and large-scale data pipelines. Strongest on Java, Python, SQL, Django REST, React/TypeScript, PostgreSQL, and building reliable systems that support product workflows. Good fit for junior-to-mid backend, backend-leaning software engineering, Java/Python API, and implementation-heavy integration roles. Generic software or full-stack roles are only credible when backend/API ownership is clearly central. Not a strong fit for senior architecture ownership, people management, frontend-only specialization, research-heavy machine learning, or Dutch-required roles.",
       "target_roles": [
-        "Data Engineer",
         "Backend Engineer",
+        "Software Engineer (backend/API-focused)",
+        "Java Backend Engineer",
         "Python Engineer",
-        "Software Engineer",
-        "Platform Engineer",
-        "Machine Learning Engineer (production-oriented only)"
+        "Full Stack Engineer (backend-leaning)",
+        "Integration Engineer (implementation-focused)"
       ],
       "candidate_years": 2.0,
       "candidate_seniority": "mid",
       "core_skills": [
+        "Java",
         "Python",
         "SQL",
-        "Java",
+        "React",
+        "TypeScript",
         "Django REST",
-        "FastAPI",
+        "Spring Boot",
         "PostgreSQL",
-        "Data Ingestion",
-        "Distributed Processing",
-        "Docker",
-        "CI/CD",
-        "Backend APIs"
+        "FastAPI",
+        "Backend APIs",
+        "Authentication/Access Control",
+        "Data Pipelines",
+        "CI/CD"
       ],
       "obvious_gaps": [
         "Senior architecture ownership",
         "People management",
-        "Deep frontend specialization",
+        "Frontend-only specialization",
         "Research-heavy machine learning",
-        "Fluent Dutch"
+        "Fluent Dutch",
+        "Pure data-science modeling"
       ],
       "language_signals": {
         "dutch_level": "none",
@@ -115,18 +118,18 @@
     },
     "search_configs": [
       {
-        "name": "george-data",
+        "name": "george-backend",
         "location": "Netherlands",
         "distance": 50,
         "hours_old": 120,
         "results_per_term": 300,
         "terms": [
-          "python",
+          "backend engineer",
           "software engineer",
-          "frontend",
-          "backend",
-          "full stack engineer",
-          "developer"
+          "java backend engineer",
+          "java developer",
+          "spring boot developer",
+          "python engineer"
         ]
       }
     ]
