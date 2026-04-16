@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -8,11 +7,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PROCESS_SOURCE = (REPO_ROOT / "dags" / "process.py").read_text(encoding="utf-8")
 DATABASE_SOURCE = (REPO_ROOT / "dags" / "database.py").read_text(encoding="utf-8")
-PROFILES = json.loads(
-    (REPO_ROOT / "include" / "user_info" / "profiles.json").read_text(
-        encoding="utf-8"
-    )
-)
 
 
 def _slice(source: str, start_marker: str, end_marker: str) -> str:
@@ -36,6 +30,11 @@ BACKFILL_SOURCE = _slice(
     "def _backfill_profile_jobs_from_existing_jobs(",
     "def _backfill_default_profile_jobs(",
 )
+BOOTSTRAP_FLAGGED_SOURCE = _slice(
+    DATABASE_SOURCE,
+    "def _bootstrap_flagged_profiles(",
+    "def _sync_profiles_from_source(",
+)
 GET_JOBS_NEEDING_JD_SOURCE = _slice(
     DATABASE_SOURCE,
     "def get_jobs_needing_jd(",
@@ -56,24 +55,6 @@ GET_JOBS_TO_NOTIFY_SOURCE = _slice(
     "def get_jobs_to_notify(",
     "def mark_job_notified(",
 )
-
-
-def test_profiles_json_declares_one_dormant_test_profile_with_exact_scan_shape():
-    test_profiles = [
-        profile
-        for profile in PROFILES
-        if profile.get("test_mode_only") or profile.get("is_test_profile")
-    ]
-
-    assert len(test_profiles) == 1
-    test_profile = test_profiles[0]
-    search_configs = test_profile["search_configs"]
-
-    assert test_profile["bootstrap_existing_jobs"] is False
-    assert test_profile["discord_channel_id"] == "1476129860450779147"
-    assert len(search_configs) == 1
-    assert search_configs[0]["results_per_term"] == 20
-    assert len(search_configs[0]["terms"]) == 2
 
 
 def test_process_scan_config_uses_profile_results_per_term_without_env_override():
@@ -106,7 +87,9 @@ def test_filter_jobs_checks_test_mode_before_applying_production_company_and_tit
     assert min(FILTER_JOBS_SOURCE.index(marker) for marker in test_mode_markers) < production_filter_index
 
 
-def test_database_source_declares_test_profile_and_raw_source_job_id_fields():
+def test_database_source_declares_test_mode_helpers_and_raw_source_job_id_fields():
+    assert "def is_test_mode_enabled()" in DATABASE_SOURCE
+    assert "def _profile_mode_clause(" in DATABASE_SOURCE
     assert "is_test_profile" in DATABASE_SOURCE
     assert "source_job_id" in DATABASE_SOURCE
 
@@ -120,11 +103,13 @@ def test_database_mode_aware_selectors_guard_dormant_test_rows_after_mode_off():
     }
 
     for selector_name, selector_source in selector_sources.items():
-        assert (
-            "is_test_profile" in selector_source or "test-%" in selector_source
-        ), f"{selector_name} is missing test-row/profile gating"
+        assert "_profile_mode_clause" in selector_source, (
+            f"{selector_name} is missing mode-aware dormant test-row gating"
+        )
 
 
-def test_database_bootstrap_source_excludes_test_rows_from_formal_backfill():
+def test_database_bootstrap_source_excludes_test_rows_and_test_profiles():
     assert "INSERT INTO profile_jobs" in BACKFILL_SOURCE
-    assert "test-%" in BACKFILL_SOURCE or "is_test_profile" in BACKFILL_SOURCE
+    assert "NOT LIKE 'test-%'" in BACKFILL_SOURCE
+    assert "source_job_id IS NULL" in BACKFILL_SOURCE
+    assert 'not profile_config.get("is_test_profile", False)' in BOOTSTRAP_FLAGGED_SOURCE
