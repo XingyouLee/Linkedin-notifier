@@ -45,6 +45,10 @@ def _get_nonnegative_int_env(var_name: str, default: int) -> int:
     return max(0, value)
 
 
+def _default_scan_results_per_term() -> int:
+    return _get_nonnegative_int_env("SCAN_RESULTS_PER_TERM", 10)
+
+
 def _coerce_bool(value, default: bool = False) -> bool:
     if value is None:
         return default
@@ -112,11 +116,10 @@ def _transform_scan_job_identity(
 def _build_scan_config(
     results_wanted: int, hours_old: int, distance: int | None = None
 ) -> dict:
-    resolved_results_per_term = (
-        _get_nonnegative_int_env("SCAN_RESULTS_PER_TERM", 10)
-        if results_wanted is None
-        else max(0, int(results_wanted))
-    )
+    if results_wanted is None:
+        results_wanted = _default_scan_results_per_term()
+    else:
+        results_wanted = max(0, int(results_wanted))
     return {
         "request_page_size": int(os.getenv("SCAN_REQUEST_PAGE_SIZE", "10")),
         "http_max_retries": max(0, int(os.getenv("SCAN_HTTP_MAX_RETRIES", "6"))),
@@ -129,7 +132,7 @@ def _build_scan_config(
             os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0")
         ),
         "request_timeout_sec": int(os.getenv("SCAN_REQUEST_TIMEOUT_SEC", "45")),
-        "results_per_term": resolved_results_per_term,
+        "results_per_term": int(results_wanted),
         "hours_old": int(hours_old),
         "distance": int(
             distance if distance is not None else os.getenv("SCAN_DISTANCE", "25")
