@@ -27,3 +27,4 @@ apps/**/xcuserdata/
 apps/**/*.app/
 apps/**/Products/
 apps/**/LinkedinNotifierApp */
+.omx/
