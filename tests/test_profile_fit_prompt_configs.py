@@ -37,3 +37,27 @@ def test_george_profile_penalizes_generic_new_grad_and_fullstack_posts():
     assert "Software Engineer 1, Graduate Software Engineer, or New Grad Software Engineer" in prompt
     assert "default to Weak Fit unless backend/data scope is explicit and central" in prompt
     assert "broad rotation/team-placement language should default to Weak Fit" in prompt
+
+
+def test_test_mode_profile_routes_to_xingyou_channel_with_exact_scan_limits():
+    profiles = _load_profiles()
+
+    xingyou_profile = profiles["Xingyou Li"]
+    test_profiles = [
+        profile
+        for profile in profiles.values()
+        if profile.get("test_mode_only") or profile.get("is_test_profile")
+    ]
+
+    assert len(test_profiles) == 1
+
+    test_profile = test_profiles[0]
+    assert test_profile["discord_channel_id"] == xingyou_profile["discord_channel_id"]
+    assert test_profile.get("bootstrap_existing_jobs") is False
+
+    search_configs = test_profile["search_configs"]
+    assert len(search_configs) == 1
+
+    search_config = search_configs[0]
+    assert search_config["results_per_term"] == 20
+    assert len(search_config["terms"]) == 2

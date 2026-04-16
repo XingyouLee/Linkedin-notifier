@@ -180,5 +180,48 @@
         ]
       }
     ]
+  },
+  {
+    "profile_key": "Test Mode Profile",
+    "display_name": "Test Mode Profile",
+    "active": true,
+    "test_mode_only": true,
+    "bootstrap_existing_jobs": false,
+    "resume_path": "resume/xingyouli.md",
+    "discord_channel_id": "1476129860450779147",
+    "candidate_summary": {
+      "summary": "Synthetic test-only profile for validating the full LinkedIn notifier pipeline without affecting formal candidate evaluation.",
+      "target_roles": [
+        "Test Mode Validation"
+      ],
+      "candidate_years": 0,
+      "candidate_seniority": "junior",
+      "core_skills": [
+        "Pipeline validation"
+      ],
+      "obvious_gaps": [
+        "Not a real candidate",
+        "Must never be used outside LINKEDIN_TEST_MODE"
+      ],
+      "language_signals": {
+        "dutch_level": "n/a",
+        "english_level": "n/a",
+        "notes": "Dedicated test-mode profile only."
+      }
+    },
+    "search_configs": [
+      {
+        "name": "test-mode-validation",
+        "location": "Netherlands",
+        "geo_id": "102890719",
+        "distance": 50,
+        "hours_old": 120,
+        "results_per_term": 20,
+        "terms": [
+          "Data Engineer",
+          "Backend Engineer (Python)"
+        ]
+      }
+    ]
   }
 ]
