@@ -3,7 +3,7 @@ from __future__ import annotations
 from airflow.sdk import dag, task
 
 import ast
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 from datetime import datetime
 import os
@@ -192,6 +192,10 @@ def _is_transient_llm_http_status(status_code) -> bool:
     )
 
 
+def _strip_prefix(text: str, prefix: str) -> str:
+    return text[len(prefix) :] if text.startswith(prefix) else text
+
+
 def _summarize_api_errors(api_error_messages):
     normalized_messages = [
         str(message) for message in (api_error_messages or []) if message
@@ -222,6 +226,111 @@ def _summarize_logged_model_names(
     if model_names:
         return ",".join(model_names)
     return fallback_model_name or "unknown"
+
+
+def _execute_prepared_fitting_items(
+    prepared_items,
+    *,
+    concurrency: int,
+    process_single_item,
+    default_model_name_fn,
+):
+    completed_events = []
+    fatal_events = []
+    if not prepared_items:
+        return completed_events, fatal_events
+
+    max_workers = max(1, int(concurrency or 1))
+    prepared_iter = iter(prepared_items)
+    stop_submitting = False
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        in_flight = {}
+
+        def _submit_next() -> bool:
+            try:
+                prepared = next(prepared_iter)
+            except StopIteration:
+                return False
+
+            future = executor.submit(process_single_item, prepared)
+            in_flight[future] = prepared
+            return True
+
+        for _ in range(min(max_workers, len(prepared_items))):
+            _submit_next()
+
+        while in_flight:
+            done, _ = wait(tuple(in_flight), return_when=FIRST_COMPLETED)
+            completed_count = len(done)
+
+            for future in done:
+                prepared = in_flight.pop(future)
+                try:
+                    _, job_result = future.result()
+                except Exception as error:
+                    error_text = str(error)
+                    error_model_name = _summarize_logged_model_names(
+                        error_text,
+                        default_model_name_fn(prepared),
+                    )
+                    if error_text.startswith("TRANSIENT_API::"):
+                        completed_events.append(
+                            {
+                                "kind": "transient_api_error",
+                                "prepared": prepared,
+                                "error_message": _strip_prefix(
+                                    error_text,
+                                    "TRANSIENT_API::",
+                                ),
+                                "model_name": error_model_name,
+                            }
+                        )
+                        continue
+                    if error_text.startswith("FATAL_API::"):
+                        fatal_events.append(
+                            {
+                                "prepared": prepared,
+                                "error_message": _strip_prefix(
+                                    error_text,
+                                    "FATAL_API::",
+                                ),
+                                "model_name": error_model_name,
+                            }
+                        )
+                        continue
+
+                    completed_events.append(
+                        {
+                            "kind": "job_result",
+                            "prepared": prepared,
+                            "job_result": _build_job_match_result(
+                                prepared["item"]["profile_id"],
+                                prepared["item"]["job_id"],
+                                llm_match_error=f"unexpected_job_error: {error}",
+                                model_name=error_model_name,
+                            ),
+                        }
+                    )
+                    continue
+
+                completed_events.append(
+                    {
+                        "kind": "job_result",
+                        "prepared": prepared,
+                        "job_result": job_result,
+                    }
+                )
+
+            if fatal_events:
+                stop_submitting = True
+
+            if not stop_submitting:
+                for _ in range(completed_count):
+                    if not _submit_next():
+                        break
+
+    return completed_events, fatal_events
 
 
 def _log_job_match_result(job_result):
@@ -1243,7 +1352,7 @@ def linkedin_fitting_notifier():
                         )
                         print(
                             f"llm_result profile_id={profile_id} job_id={job_id} "
-                            f"model_name={retry_model_name} status=api_retry attempt={attempt + 1}/3 error={error_message.removeprefix('TRANSIENT_API::')}"
+                            f"model_name={retry_model_name} status=api_retry attempt={attempt + 1}/3 error={_strip_prefix(error_message, 'TRANSIENT_API::')}"
                         )
                         time.sleep(min(2**attempt, 4))
                         continue
@@ -1556,53 +1665,52 @@ def linkedin_fitting_notifier():
         print(
             f"Starting LLM fitting with concurrency={concurrency} jobs={len(ready_items)}"
         )
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            future_to_prepared = {
-                executor.submit(_process_single_item, prepared): prepared
-                for prepared in ready_items
-            }
-            for future in as_completed(future_to_prepared):
-                prepared = future_to_prepared[future]
-                item = prepared["item"]
-                try:
-                    _, job_result = future.result()
-                except Exception as error:
-                    error_text = str(error)
-                    error_model_name = _summarize_logged_model_names(
-                        error_text,
-                        _default_prepared_model_name(prepared),
-                    )
-                    if error_text.startswith("TRANSIENT_API::"):
-                        _record_transient_api_error(
-                            item,
-                            error_text.removeprefix("TRANSIENT_API::"),
-                            error_model_name,
-                        )
-                        continue
-                    if error_text.startswith("FATAL_API::"):
-                        fatal_error = error_text.removeprefix("FATAL_API::")
-                        claim_key = _job_ref_key(item["profile_id"], item["job_id"])
-                        print(
-                            f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
-                            f"model_name={error_model_name} status=api_error error={fatal_error}"
-                        )
-                        return _return_api_error(
-                            fatal_error,
-                            matched_jobs,
-                            retry_items=[item],
-                            retry_job_errors={claim_key: fatal_error},
-                        )
-                    job_result = _build_job_match_result(
-                        item["profile_id"],
-                        item["job_id"],
-                        llm_match_error=f"unexpected_job_error: {error}",
-                        model_name=error_model_name,
-                    )
+        completed_events, fatal_events = _execute_prepared_fitting_items(
+            ready_items,
+            concurrency=concurrency,
+            process_single_item=_process_single_item,
+            default_model_name_fn=_default_prepared_model_name,
+        )
 
-                matched_jobs.append(job_result)
-                _persist_job_result(job_result)
-                _finalize_job_result(item, job_result)
-                _log_job_match_result(job_result)
+        for event in completed_events:
+            item = event["prepared"]["item"]
+            if event["kind"] == "transient_api_error":
+                _record_transient_api_error(
+                    item,
+                    event["error_message"],
+                    event["model_name"],
+                )
+                continue
+
+            job_result = event["job_result"]
+            matched_jobs.append(job_result)
+            _persist_job_result(job_result)
+            _finalize_job_result(item, job_result)
+            _log_job_match_result(job_result)
+
+        if fatal_events:
+            fatal_messages = []
+            fatal_retry_job_errors = dict(requeue_job_errors)
+            fatal_retry_items = []
+            for fatal_event in fatal_events:
+                item = fatal_event["prepared"]["item"]
+                fatal_error = fatal_event["error_message"]
+                fatal_messages.append(fatal_error)
+                fatal_retry_items.append(item)
+                fatal_retry_job_errors[
+                    _job_ref_key(item["profile_id"], item["job_id"])
+                ] = fatal_error
+                print(
+                    f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
+                    f"model_name={fatal_event['model_name']} status=api_error error={fatal_error}"
+                )
+
+            return _return_api_error(
+                _summarize_api_errors(fatal_messages) or fatal_messages[0],
+                matched_jobs,
+                retry_items=fatal_retry_items,
+                retry_job_errors=fatal_retry_job_errors,
+            )
 
         api_error_message = _summarize_api_errors(api_error_messages)
         requeue_items = [

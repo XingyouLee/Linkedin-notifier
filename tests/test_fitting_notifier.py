@@ -1,4 +1,5 @@
 import json
+import time
 
 import pytest
 import requests
@@ -382,6 +383,45 @@ def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(mo
         "https://a.example/v1/responses",
         "https://a.example/v1/responses",
     ]
+
+
+def test_execute_prepared_fitting_items_stops_submitting_after_fatal_api():
+    started_job_ids = []
+
+    def process_single_item(prepared):
+        job_id = prepared["item"]["job_id"]
+        started_job_ids.append(job_id)
+        if job_id == "fatal":
+            raise RuntimeError("FATAL_API::endpoint outage")
+        time.sleep(0.02)
+        return prepared["item"], fitting_notifier._build_job_match_result(
+            prepared["item"]["profile_id"],
+            job_id,
+            llm_match=json.dumps({"fit_score": 77, "decision": "Moderate Fit"}),
+            model_name="gpt-5.4",
+        )
+
+    completed_events, fatal_events = fitting_notifier._execute_prepared_fitting_items(
+        [
+            {"item": {"profile_id": 1, "job_id": "ok-1"}},
+            {"item": {"profile_id": 1, "job_id": "fatal"}},
+            {"item": {"profile_id": 1, "job_id": "ok-2"}},
+            {"item": {"profile_id": 1, "job_id": "ok-3"}},
+        ],
+        concurrency=2,
+        process_single_item=process_single_item,
+        default_model_name_fn=lambda prepared: "gpt-5.4",
+    )
+
+    assert len(started_job_ids) == 2
+    assert set(started_job_ids) == {"ok-1", "fatal"}
+    assert len(fatal_events) == 1
+    assert fatal_events[0]["prepared"]["item"]["job_id"] == "fatal"
+    assert any(
+        event["kind"] == "job_result"
+        and event["job_result"]["job_id"] == "ok-1"
+        for event in completed_events
+    )
 
 
 def test_request_llm_json_uses_plain_string_input_payload(monkeypatch):
