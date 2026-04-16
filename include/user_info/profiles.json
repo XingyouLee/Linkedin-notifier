@@ -70,6 +70,52 @@
     ]
   },
   {
+    "profile_key": "LinkedIn Test Mode",
+    "display_name": "LinkedIn Test Mode",
+    "active": true,
+    "test_mode_only": true,
+    "bootstrap_existing_jobs": false,
+    "resume_text": "Synthetic validation profile for LINKEDIN_TEST_MODE only. This is not a real candidate and must never be used for formal matching or reporting. Use this profile only to verify the end-to-end scan, JD fetch, fitting, and Discord notification pipeline.",
+    "discord_channel_id": "1476129860450779147",
+    "candidate_summary": {
+      "summary": "Synthetic validation profile used only for end-to-end pipeline testing when LINKEDIN_TEST_MODE=true. It exists to exercise scan, JD fetch, fitting, and Discord delivery without contaminating formal candidate or job history.",
+      "target_roles": [
+        "Data Engineer",
+        "Python Developer"
+      ],
+      "candidate_years": 0,
+      "candidate_seniority": "unknown",
+      "core_skills": [
+        "Python",
+        "SQL",
+        "Data Pipelines"
+      ],
+      "obvious_gaps": [
+        "Real candidate history",
+        "Formal resume evidence"
+      ],
+      "language_signals": {
+        "dutch_level": "unknown",
+        "english_level": "working",
+        "notes": "Synthetic test-only profile for runtime validation."
+      }
+    },
+    "search_configs": [
+      {
+        "name": "linkedin-test-mode",
+        "location": "Netherlands",
+        "geo_id": "102890719",
+        "distance": 50,
+        "hours_old": 120,
+        "results_per_term": 20,
+        "terms": [
+          "Data Engineer",
+          "Python Developer"
+        ]
+      }
+    ]
+  },
+  {
     "profile_key": "George Gu",
     "display_name": "George Gu",
     "active": true,
