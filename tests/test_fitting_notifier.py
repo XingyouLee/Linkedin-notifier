@@ -387,6 +387,7 @@ def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(mo
 
 def test_execute_prepared_fitting_items_stops_submitting_after_fatal_api():
     started_job_ids = []
+    handled_events = []
 
     def process_single_item(prepared):
         job_id = prepared["item"]["job_id"]
@@ -401,7 +402,7 @@ def test_execute_prepared_fitting_items_stops_submitting_after_fatal_api():
             model_name="gpt-5.4",
         )
 
-    completed_events, fatal_events = fitting_notifier._execute_prepared_fitting_items(
+    fatal_events = fitting_notifier._execute_prepared_fitting_items(
         [
             {"item": {"profile_id": 1, "job_id": "ok-1"}},
             {"item": {"profile_id": 1, "job_id": "fatal"}},
@@ -411,6 +412,7 @@ def test_execute_prepared_fitting_items_stops_submitting_after_fatal_api():
         concurrency=2,
         process_single_item=process_single_item,
         default_model_name_fn=lambda prepared: "gpt-5.4",
+        handle_completed_event=handled_events.append,
     )
 
     assert len(started_job_ids) == 2
@@ -420,7 +422,7 @@ def test_execute_prepared_fitting_items_stops_submitting_after_fatal_api():
     assert any(
         event["kind"] == "job_result"
         and event["job_result"]["job_id"] == "ok-1"
-        for event in completed_events
+        for event in handled_events
     )
 
 

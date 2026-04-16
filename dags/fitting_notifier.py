@@ -234,11 +234,11 @@ def _execute_prepared_fitting_items(
     concurrency: int,
     process_single_item,
     default_model_name_fn,
+    handle_completed_event,
 ):
-    completed_events = []
     fatal_events = []
     if not prepared_items:
-        return completed_events, fatal_events
+        return fatal_events
 
     max_workers = max(1, int(concurrency or 1))
     prepared_iter = iter(prepared_items)
@@ -275,7 +275,7 @@ def _execute_prepared_fitting_items(
                         default_model_name_fn(prepared),
                     )
                     if error_text.startswith("TRANSIENT_API::"):
-                        completed_events.append(
+                        handle_completed_event(
                             {
                                 "kind": "transient_api_error",
                                 "prepared": prepared,
@@ -300,7 +300,7 @@ def _execute_prepared_fitting_items(
                         )
                         continue
 
-                    completed_events.append(
+                    handle_completed_event(
                         {
                             "kind": "job_result",
                             "prepared": prepared,
@@ -314,7 +314,7 @@ def _execute_prepared_fitting_items(
                     )
                     continue
 
-                completed_events.append(
+                handle_completed_event(
                     {
                         "kind": "job_result",
                         "prepared": prepared,
@@ -330,7 +330,7 @@ def _execute_prepared_fitting_items(
                     if not _submit_next():
                         break
 
-    return completed_events, fatal_events
+    return fatal_events
 
 
 def _log_job_match_result(job_result):
@@ -1665,14 +1665,7 @@ def linkedin_fitting_notifier():
         print(
             f"Starting LLM fitting with concurrency={concurrency} jobs={len(ready_items)}"
         )
-        completed_events, fatal_events = _execute_prepared_fitting_items(
-            ready_items,
-            concurrency=concurrency,
-            process_single_item=_process_single_item,
-            default_model_name_fn=_default_prepared_model_name,
-        )
-
-        for event in completed_events:
+        def _handle_completed_event(event):
             item = event["prepared"]["item"]
             if event["kind"] == "transient_api_error":
                 _record_transient_api_error(
@@ -1680,13 +1673,21 @@ def linkedin_fitting_notifier():
                     event["error_message"],
                     event["model_name"],
                 )
-                continue
+                return
 
             job_result = event["job_result"]
             matched_jobs.append(job_result)
             _persist_job_result(job_result)
             _finalize_job_result(item, job_result)
             _log_job_match_result(job_result)
+
+        fatal_events = _execute_prepared_fitting_items(
+            ready_items,
+            concurrency=concurrency,
+            process_single_item=_process_single_item,
+            default_model_name_fn=_default_prepared_model_name,
+            handle_completed_event=_handle_completed_event,
+        )
 
         if fatal_events:
             fatal_messages = []
