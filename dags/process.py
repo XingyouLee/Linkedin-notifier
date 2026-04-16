@@ -9,6 +9,7 @@ import random
 import re
 import time
 from html import unescape
+from urllib.parse import urlencode
 
 import requests
 from dags import database
@@ -88,6 +89,7 @@ def _build_scan_params(
     start: int,
     *,
     location: str | None,
+    geo_id: str | None,
     distance: int,
     hours_old: int,
 ) -> dict:
@@ -98,9 +100,29 @@ def _build_scan_params(
     }
     if location:
         params["location"] = str(location).strip()
+    if geo_id:
+        params["geoId"] = str(geo_id).strip()
     if hours_old > 0:
         params["f_TPR"] = f"r{hours_old * 3600}"
     return params
+
+
+def _build_scan_headers(
+    term: str,
+    *,
+    location: str | None,
+    geo_id: str | None,
+) -> dict[str, str]:
+    referer_params = {"keywords": term}
+    if location:
+        referer_params["location"] = str(location).strip()
+    if geo_id:
+        referer_params["geoId"] = str(geo_id).strip()
+    return {
+        "User-Agent": SCAN_USER_AGENT,
+        "Accept-Language": os.getenv("SCAN_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
+        "Referer": f"https://www.linkedin.com/jobs/search/?{urlencode(referer_params)}",
+    }
 
 
 def _parse_scan_items(html_text: str) -> list[dict]:
@@ -144,11 +166,16 @@ def _scan_fetch_page(
                     term=term,
                     start=start,
                     location=scan_config.get("location"),
+                    geo_id=scan_config.get("geo_id"),
                     distance=scan_config["distance"],
                     hours_old=scan_config["hours_old"],
                 ),
                 timeout=scan_config["request_timeout_sec"],
-                headers={"User-Agent": SCAN_USER_AGENT},
+                headers=_build_scan_headers(
+                    term=term,
+                    location=scan_config.get("location"),
+                    geo_id=scan_config.get("geo_id"),
+                ),
             )
         except requests.RequestException as error:
             if attempt >= scan_config["http_max_retries"]:
@@ -292,11 +319,13 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                 distance=search_config.get("distance") or 25,
             )
             scan_config["location"] = search_config.get("location") or "Netherlands"
+            scan_config["geo_id"] = search_config.get("geo_id")
 
             print(
                 f"Scanning profile={profile_label} config={search_config.get('search_config_name')} "
                 f"terms={terms} location={scan_config['location']} hours_old={scan_config['hours_old']} "
-                f"results_per_term={scan_config['results_per_term']} distance={scan_config['distance']}"
+                f"results_per_term={scan_config['results_per_term']} distance={scan_config['distance']} "
+                f"geo_id={scan_config.get('geo_id')}"
             )
 
             if scan_config["results_per_term"] <= 0:

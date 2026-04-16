@@ -52,6 +52,7 @@
       {
         "name": "xingyou-data",
         "location": "Netherlands",
+        "geo_id": "102890719",
         "distance": 50,
         "hours_old": 120,
         "results_per_term": 300,
@@ -119,6 +120,7 @@
       {
         "name": "george-data",
         "location": "Netherlands",
+        "geo_id": "102890719",
         "distance": 50,
         "hours_old": 120,
         "results_per_term": 300,

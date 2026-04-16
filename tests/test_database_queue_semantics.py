@@ -124,6 +124,51 @@ def test_coerce_profile_configs_preserves_zero_results_per_term():
     assert profiles[0]["search_configs"][0]["results_per_term"] == 0
 
 
+def test_coerce_profile_configs_defaults_netherlands_geo_id():
+    profiles = database._coerce_profile_configs(
+        [
+            {
+                "profile_key": "nl-default-geo",
+                "search_configs": [
+                    {
+                        "name": "default",
+                        "location": "Netherlands",
+                        "distance": 25,
+                        "hours_old": 24,
+                        "results_per_term": 10,
+                        "terms": ["data engineer"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert profiles[0]["search_configs"][0]["geo_id"] == "102890719"
+
+
+def test_coerce_profile_configs_preserves_explicit_geo_id():
+    profiles = database._coerce_profile_configs(
+        [
+            {
+                "profile_key": "explicit-geo",
+                "search_configs": [
+                    {
+                        "name": "default",
+                        "location": "Germany",
+                        "geo_id": "90000001",
+                        "distance": 25,
+                        "hours_old": 24,
+                        "results_per_term": 10,
+                        "terms": ["python"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert profiles[0]["search_configs"][0]["geo_id"] == "90000001"
+
+
 def test_coerce_profile_configs_requires_results_per_term():
     try:
         database._coerce_profile_configs(
@@ -214,6 +259,7 @@ def test_get_active_search_configs_preserves_zero_results_per_term(monkeypatch):
             "search_config_id": 10,
             "search_config_name": "default",
             "location": "Netherlands",
+            "geo_id": None,
             "distance": 25,
             "hours_old": 24,
             "results_per_term": 0,
@@ -226,6 +272,7 @@ def test_get_active_search_configs_preserves_zero_results_per_term(monkeypatch):
 
     assert len(configs) == 1
     assert configs[0]["results_per_term"] == 0
+    assert configs[0]["geo_id"] == "102890719"
 
 
 def test_collect_scan_rows_requires_results_per_term_with_clear_profile_context():

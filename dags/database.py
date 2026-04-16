@@ -22,6 +22,9 @@ BOOTSTRAP_EXISTING_JOBS_KEY = "existing_jobs_v1"
 _SCHEMA_INITIALIZED = False
 _PROFILE_SOURCE_SIGNATURE: tuple[str, int, int] | None = None
 TEXT_RESUME_SUFFIXES = {".md", ".txt"}
+DEFAULT_LINKEDIN_GEO_IDS = {
+    "netherlands": "102890719",
+}
 
 DEFAULT_FIT_PROMPT_TEXT = (
     "If output is not valid JSON, regenerate until valid. "
@@ -84,6 +87,20 @@ def _coerce_nonnegative_int(value, default: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(0, coerced)
+
+
+def _default_linkedin_geo_id(location) -> str | None:
+    normalized_location = str(location or "").strip().lower()
+    if not normalized_location:
+        return None
+    return DEFAULT_LINKEDIN_GEO_IDS.get(normalized_location)
+
+
+def _coerce_geo_id(value) -> str | None:
+    if value is None:
+        return None
+    normalized_value = str(value).strip()
+    return normalized_value or None
 
 
 def _resolve_db_url() -> str:
@@ -298,6 +315,10 @@ def _default_profile_config() -> dict[str, Any]:
             {
                 "name": os.getenv("DEFAULT_SEARCH_CONFIG_NAME", "default"),
                 "location": os.getenv("SCAN_LOCATION", "Netherlands"),
+                "geo_id": os.getenv("SCAN_GEO_ID")
+                or _default_linkedin_geo_id(
+                    os.getenv("SCAN_LOCATION", "Netherlands")
+                ),
                 "distance": _get_positive_int_env("SCAN_DISTANCE", 25),
                 "hours_old": _get_positive_int_env("SCAN_HOURS_OLD", 168),
                 "results_per_term": results_default,
@@ -337,6 +358,19 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
             terms = _parse_terms(search_config.get("terms"))
             if not terms:
                 continue
+            location = str(search_config.get("location") or "Netherlands").strip()
+            if not location:
+                location = "Netherlands"
+            raw_geo_id = (
+                search_config.get("geo_id")
+                if "geo_id" in search_config
+                else search_config.get("geoId")
+            )
+            geo_id = (
+                _coerce_geo_id(raw_geo_id)
+                if raw_geo_id is not None
+                else _default_linkedin_geo_id(location)
+            )
             if "results_per_term" not in search_config or search_config.get(
                 "results_per_term"
             ) is None:
@@ -347,10 +381,8 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
             search_configs.append(
                 {
                     "name": config_name,
-                    "location": str(
-                        search_config.get("location") or "Netherlands"
-                    ).strip()
-                    or "Netherlands",
+                    "location": location,
+                    "geo_id": geo_id,
                     "distance": int(search_config.get("distance") or 25),
                     "hours_old": int(search_config.get("hours_old") or 168),
                     "results_per_term": _coerce_nonnegative_int(
@@ -460,15 +492,17 @@ def _sync_profile_configs(
                     profile_id,
                     name,
                     location,
+                    geo_id,
                     distance,
                     hours_old,
                     results_per_term,
                     is_active,
                     updated_at
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, CURRENT_TIMESTAMP)
                 ON CONFLICT(profile_id, name) DO UPDATE SET
                     location = EXCLUDED.location,
+                    geo_id = EXCLUDED.geo_id,
                     distance = EXCLUDED.distance,
                     hours_old = EXCLUDED.hours_old,
                     results_per_term = EXCLUDED.results_per_term,
@@ -480,6 +514,7 @@ def _sync_profile_configs(
                     profile_id,
                     search_config["name"],
                     search_config.get("location"),
+                    search_config.get("geo_id"),
                     search_config.get("distance"),
                     search_config.get("hours_old"),
                     search_config.get("results_per_term"),
@@ -813,6 +848,7 @@ def init_db():
                     profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
                     name TEXT NOT NULL,
                     location TEXT,
+                    geo_id TEXT,
                     distance INTEGER,
                     hours_old INTEGER,
                     results_per_term INTEGER,
@@ -828,6 +864,13 @@ def init_db():
                 """
                 ALTER TABLE search_configs
                 ADD COLUMN IF NOT EXISTS location TEXT
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE search_configs
+                ADD COLUMN IF NOT EXISTS geo_id TEXT
                 """
             )
 
@@ -1011,6 +1054,7 @@ def get_active_search_configs() -> list[dict[str, Any]]:
             c.id AS search_config_id,
             c.name AS search_config_name,
             c.location,
+            c.geo_id,
             c.distance,
             c.hours_old,
             c.results_per_term,
@@ -1048,6 +1092,10 @@ def get_active_search_configs() -> list[dict[str, Any]]:
                 "search_config_name": row["search_config_name"],
                 "location": row["location"]
                 or os.getenv("SCAN_LOCATION", "Netherlands"),
+                "geo_id": row.get("geo_id")
+                or _default_linkedin_geo_id(
+                    row["location"] or os.getenv("SCAN_LOCATION", "Netherlands")
+                ),
                 "distance": row["distance"]
                 if row["distance"] is not None
                 else _get_positive_int_env("SCAN_DISTANCE", 25),

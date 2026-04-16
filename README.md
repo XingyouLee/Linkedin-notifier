@@ -69,7 +69,8 @@ Multi-user config
 - Each profile can have its own `active` flag, optional `bootstrap_existing_jobs` one-time migration flag, `resume_path`, Discord destination, model name, full `fit_prompt` template, and one or more search configs with distinct terms.
 - Calibration notes for the 2026-04-16 experience-filtering pass live in `include/user_info/fit-calibration-2026-04-16.md`; use that document when tightening `Moderate Fit` prompt behavior without harming junior/plausible-mid recall.
 - Set `bootstrap_existing_jobs: true` only for the legacy profile that should inherit pre-multi-user `jobs` history; leave it `false` for newly added users.
-- Search config supports `location` again, but not `geo_id`; the current scan flow sends `keywords`, `location`, `distance`, `start`, and `f_TPR`.
+- Search config supports both `location` and optional `geo_id`; the scan flow now sends `keywords`, `location`, `geoId`, `distance`, `start`, and `f_TPR`.
+- For Netherlands-wide searches, use LinkedIn `geo_id` `102890719` unless you have a more specific regional geoId to target.
 
 
 Data storage
