@@ -16,9 +16,9 @@ def test_xingyou_profile_prompt_tightens_moderate_precision_without_killing_ligh
     profile = _load_profile('Xingyou Li')
     candidate_summary = profile['candidate_summary']
 
-    assert 'Plausible on light-mid roles only when pipeline, SQL/warehouse, and scoped execution are clearly central.' in candidate_summary['summary']
-    assert 'Backend Engineer (Python, data workflow)' in candidate_summary['target_roles']
-    assert 'Python Developer (data workflow)' in candidate_summary['target_roles']
+    assert 'Adjacent BI/analyst roles are only credible' in candidate_summary['summary']
+    assert 'Backend Engineer (Python, data/workflow-oriented)' in candidate_summary['target_roles']
+    assert 'Python Developer (data/workflow-oriented)' in candidate_summary['target_roles']
 
     prompt = fitting_notifier._build_fit_prompt(
         'Software Engineer',
@@ -28,18 +28,18 @@ def test_xingyou_profile_prompt_tightens_moderate_precision_without_killing_ligh
         prompt_text=profile['fit_prompt'],
     )
 
-    assert 'MODERATE PRECISION GUARDRAILS' in prompt
-    assert 'Analyst, support, BI, and consulting-flavored data roles are only Moderate when hands-on pipeline' in prompt
-    assert 'Protect recall for true junior or light-mid data roles' in prompt
+    assert 'Adjacent BI/analyst roles are only credible' in candidate_summary['summary']
+    assert 'Pure dashboarding, business-insights, marketing analytics, or stakeholder-reporting roles should usually be Weak Fit' in prompt
+    assert 'dashboarding, stakeholder reporting, campaign/eCommerce insights, or BI tooling support' in prompt
 
 
 def test_george_profile_prompt_requires_explicit_backend_or_data_centrality_for_generic_titles():
     profile = _load_profile('George Gu')
     candidate_summary = profile['candidate_summary']
 
-    assert 'Plausible for generic software engineer titles only when backend or data responsibilities are explicit and clearly dominant.' in candidate_summary['summary']
-    assert 'Software Engineer (backend/data-leaning only)' in candidate_summary['target_roles']
-    assert 'Platform/Data Workflow Engineer' in candidate_summary['target_roles']
+    assert 'Generic software or full-stack roles are only credible when backend/data work clearly dominates' in candidate_summary['summary']
+    assert 'Software Engineer (backend/data-focused)' in candidate_summary['target_roles']
+    assert 'Platform/Integration Engineer (hands-on backend/data workflows)' in candidate_summary['target_roles']
 
     prompt = fitting_notifier._build_fit_prompt(
         'Software Engineer 1',
@@ -49,6 +49,6 @@ def test_george_profile_prompt_requires_explicit_backend_or_data_centrality_for_
         prompt_text=profile['fit_prompt'],
     )
 
-    assert 'Frontend-heavy, product-generalist, or broad full-stack roles are weak-fit by default' in prompt
-    assert 'Generic Software Engineer, Developer, or Full Stack titles should usually stay Weak Fit' in prompt
-    assert 'Protect recall for plausible junior-to-mid backend/data roles' in prompt
+    assert 'Software Engineer 1, Graduate Software Engineer, or New Grad Software Engineer' in prompt
+    assert 'broad rotation/team-placement language should default to Weak Fit' in prompt
+    assert 'default to Weak Fit unless backend/data scope is explicit and central' in prompt
