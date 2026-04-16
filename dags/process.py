@@ -32,6 +32,9 @@ SCAN_TITLE_RE = re.compile(r"<h3[^>]*>(.*?)</h3>", re.S)
 SCAN_COMPANY_RE = re.compile(r"<h4[^>]*>(.*?)</h4>", re.S)
 SCAN_JOB_ID_RE = re.compile(r"-(\d+)\?")
 SCAN_ITEM_RE = re.compile(r"<li>(.*?)</li>", re.S)
+RAW_SCAN_JOB_ID_RE = re.compile(r"\d+")
+TEST_JOB_ID_PREFIX = "test-"
+PERSISTED_SCAN_JOB_ID_RE = re.compile(rf"(?:{re.escape(TEST_JOB_ID_PREFIX)})?(\d+)")
 
 
 def _get_nonnegative_int_env(var_name: str, default: int) -> int:
@@ -42,9 +45,78 @@ def _get_nonnegative_int_env(var_name: str, default: int) -> int:
     return max(0, value)
 
 
+def _coerce_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _is_test_mode_enabled() -> bool:
+    return _coerce_bool(os.getenv("LINKEDIN_TEST_MODE"), False)
+
+
+def _is_test_profile(value) -> bool:
+    if isinstance(value, dict):
+        if "is_test_profile" in value:
+            return _coerce_bool(value.get("is_test_profile"), False)
+        if "test_mode_only" in value:
+            return _coerce_bool(value.get("test_mode_only"), False)
+    return _coerce_bool(value, False)
+
+
+def _normalize_source_job_id(source_job_id) -> str | None:
+    if source_job_id is None:
+        return None
+    normalized = str(source_job_id).strip()
+    if not normalized:
+        return None
+    if RAW_SCAN_JOB_ID_RE.fullmatch(normalized):
+        return normalized
+    match = PERSISTED_SCAN_JOB_ID_RE.fullmatch(normalized)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _transform_scan_job_identity(
+    job_id: str,
+    *,
+    is_test_profile: bool,
+    source_job_id=None,
+) -> tuple[str, str | None]:
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return "", None
+
+    if RAW_SCAN_JOB_ID_RE.fullmatch(normalized_job_id):
+        if is_test_profile:
+            raw_job_id = _normalize_source_job_id(source_job_id) or normalized_job_id
+            return f"{TEST_JOB_ID_PREFIX}{raw_job_id}", raw_job_id
+        return normalized_job_id, None
+
+    match = PERSISTED_SCAN_JOB_ID_RE.fullmatch(normalized_job_id)
+    if match:
+        raw_job_id = _normalize_source_job_id(source_job_id) or match.group(1)
+        return normalized_job_id, raw_job_id
+
+    return "", None
+
+
 def _build_scan_config(
     results_wanted: int, hours_old: int, distance: int | None = None
 ) -> dict:
+    resolved_results_per_term = (
+        _get_nonnegative_int_env("SCAN_RESULTS_PER_TERM", 10)
+        if results_wanted is None
+        else max(0, int(results_wanted))
+    )
     return {
         "request_page_size": int(os.getenv("SCAN_REQUEST_PAGE_SIZE", "10")),
         "http_max_retries": max(0, int(os.getenv("SCAN_HTTP_MAX_RETRIES", "6"))),
@@ -57,10 +129,7 @@ def _build_scan_config(
             os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0")
         ),
         "request_timeout_sec": int(os.getenv("SCAN_REQUEST_TIMEOUT_SEC", "45")),
-        "results_per_term": _get_nonnegative_int_env(
-            "SCAN_RESULTS_PER_TERM",
-            int(results_wanted),
-        ),
+        "results_per_term": resolved_results_per_term,
         "hours_old": int(hours_old),
         "distance": int(
             distance if distance is not None else os.getenv("SCAN_DISTANCE", "25")
@@ -347,6 +416,7 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                     row["profile_id"] = search_config.get("profile_id")
                     row["search_config_id"] = search_config.get("search_config_id")
                     row["search_term"] = term
+                    row["is_test_profile"] = _is_test_profile(search_config)
                 all_rows.extend(term_rows)
 
                 if (
@@ -418,11 +488,31 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
                 ),
                 errors="coerce",
             ),
+            "is_test_profile": jobs_df.get(
+                "is_test_profile",
+                pd.Series(False, index=jobs_df.index, dtype="object"),
+            ).map(_is_test_profile),
+            "source_job_id": jobs_df.get(
+                "source_job_id", pd.Series(index=jobs_df.index, dtype="object")
+            ),
         }
     )
+    transformed_identities = normalized_df.apply(
+        lambda row: _transform_scan_job_identity(
+            row["id"],
+            is_test_profile=_is_test_profile(row["is_test_profile"]),
+            source_job_id=row.get("source_job_id"),
+        ),
+        axis=1,
+        result_type="expand",
+    )
+    normalized_df["id"] = transformed_identities[0]
+    normalized_df["source_job_id"] = transformed_identities[1]
     normalized_df["site"] = normalized_df["site"].fillna("linkedin")
     normalized_df = normalized_df[
-        normalized_df["id"].str.fullmatch(r"[0-9]+", na=False)
+        normalized_df["id"].map(
+            lambda value: bool(PERSISTED_SCAN_JOB_ID_RE.fullmatch(str(value or "").strip()))
+        )
     ]
     normalized_count = len(normalized_df)
     invalid_id_count = raw_count - normalized_count
@@ -461,7 +551,15 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
             ascending=[True, False, False, False],
         )
         .drop_duplicates(subset=["id"], keep="first")
-        .drop(columns=["quality_score", "title_len", "company_len", "search_term"])
+        .drop(
+            columns=[
+                "quality_score",
+                "title_len",
+                "company_len",
+                "search_term",
+                "is_test_profile",
+            ]
+        )
         .reset_index(drop=True)
     )
     unique_count = len(deduped_df)
@@ -474,7 +572,9 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
         f"duplicates={duplicate_count}, invalid_ids={invalid_id_count}"
     )
 
-    database.save_jobs(deduped_df[["id", "site", "job_url", "title", "company"]])
+    database.save_jobs(
+        deduped_df[["id", "site", "job_url", "title", "company", "source_job_id"]]
+    )
 
     profile_job_df = (
         normalized_df[["profile_id", "search_config_id", "id", "search_term"]]
@@ -590,6 +690,14 @@ def linkedin_notifier():
                 df[col] = None
 
         filtered_df = df[filter_columns].copy()
+        if _is_test_mode_enabled():
+            filtered_records = df_to_xcom_records(filtered_df)
+            print(
+                f"JD backlog candidates in test mode: {len(filtered_records)} "
+                f"(production pre-JD filters bypassed, max_attempts={jd_max_attempts})"
+            )
+            return filtered_records
+
         company_col = filtered_df["company"].fillna("").astype(str).str.strip()
         title_col = filtered_df["title"].fillna("").astype(str).str.lower()
         filtered_df = filtered_df[
