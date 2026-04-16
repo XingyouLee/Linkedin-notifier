@@ -9,7 +9,7 @@ import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
 
-JOB_REQUIRED_COLUMNS = ["id", "site", "job_url", "title", "company"]
+JOB_REQUIRED_COLUMNS = ["id", "site", "job_url", "title", "company", "source_job_id"]
 JD_QUEUE_COLUMNS = ["id", "job_url"]
 LLM_RESULT_COLUMNS = ["id", "llm_match", "llm_match_error"]
 PROFILE_JOB_COLUMNS = ["profile_id", "job_id", "search_config_id", "matched_term"]
@@ -19,6 +19,7 @@ DEFAULT_PROFILE_SOURCE_SIGNATURE = ("__default_profile__", 0, 0)
 USER_INFO_DIR = Path(__file__).resolve().parent.parent / "user_info"
 INCLUDE_USER_INFO_DIR = Path(__file__).resolve().parent.parent / "include" / "user_info"
 BOOTSTRAP_EXISTING_JOBS_KEY = "existing_jobs_v1"
+TEST_JOB_ID_PREFIX = "test-"
 _SCHEMA_INITIALIZED = False
 _PROFILE_SOURCE_SIGNATURE: tuple[str, int, int] | None = None
 TEXT_RESUME_SUFFIXES = {".md", ".txt"}
@@ -179,6 +180,18 @@ def _coerce_bool(value, default: bool = True) -> bool:
     if normalized in {"false", "0", "no", "n", "off"}:
         return False
     return default
+
+
+def is_test_mode_enabled() -> bool:
+    return _coerce_bool(os.getenv("LINKEDIN_TEST_MODE"), False)
+
+
+def _profile_mode_predicate(alias: str = "p") -> str:
+    test_flag = "TRUE" if is_test_mode_enabled() else "FALSE"
+    return (
+        f"{alias}.is_active = TRUE "
+        f"AND COALESCE({alias}.is_test_profile, FALSE) = {test_flag}"
+    )
 
 
 def _serialize_candidate_summary_config(candidate_summary_config) -> str | None:
