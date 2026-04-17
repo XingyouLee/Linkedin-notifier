@@ -6,7 +6,7 @@
 - LinkedIn: provided
 
 ## Summary
-Recent M.Sc. graduate in Computer Science (Big Data Engineering) from University of Amsterdam with hands-on experience in data engineering, ETL, SQL and data modeling, focused on building reliable data pipelines for business decision-making. Proficient in Python, Spark, Databricks, and Azure. Holding Partner Visa.
+M.Sc. graduate in Computer Science (Big Data Engineering) from the University of Amsterdam with hands-on experience in data engineering, ETL, SQL, and data modeling, focused on building reliable data pipelines and automation workflows for business decision-making. Proficient in Python, Spark, Databricks, and Azure. Holding Partner Visa.
 
 ## Education
 - M.S., Computer Science, University of Amsterdam (NL), Sep 2022 - Aug 2024
@@ -29,9 +29,10 @@ Sep 2023 - May 2024
 - Developed comprehensive ETL pipeline using ADF, Databricks, and HDInsight with automated scheduling and monitoring.
 - Implemented robust CI/CD pipelines in Azure DevOps for managing artifact releases across environments.
 
-### Stock Market ELT Pipeline with Apache Airflow (Jan - Feb 2026)
-- Built an Airflow DAG for a daily ELT pipeline: polling a financial API via custom Sensor, extracting and staging market data to MinIO (S3), and triggering Spark through DockerOperator for transformation.
-- Managed cross-task data passing via XCom and automated warehouse ingestion from S3-compatible storage into PostgreSQL for downstream BI reporting.
+### LinkedIn Job Notifier - Python Automation Project
+- Built an automated LinkedIn job monitoring and filtering system to scan newly posted roles, match them against user-defined preferences, and surface relevant opportunities more efficiently.
+- Integrated configurable job parsing, resume-aware filtering logic, and workflow automation to reduce manual job search effort and support faster application targeting.
+
 
 ## Skills
 - Programming: Python, SQL, R, Java, C, Bash
