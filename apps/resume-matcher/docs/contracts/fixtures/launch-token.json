@@ -1,0 +1,13 @@
+{
+  "secret": "contract-test-secret",
+  "base_url": "https://materials.example.com",
+  "issued_at": 4102441200,
+  "ttl_seconds": 3600,
+  "payload": {
+    "profile_id": 7,
+    "job_id": "li-123",
+    "exp": 4102444800
+  },
+  "token": "eyJleHAiOjQxMDI0NDQ4MDAsImpvYl9pZCI6ImxpLTEyMyIsInByb2ZpbGVfaWQiOjd9.i8x945gZJC6ofTIertmdgBkAA8pW8sP_iEvFQGr1DbA",
+  "launch_url": "https://materials.example.com/launch?token=eyJleHAiOjQxMDI0NDQ4MDAsImpvYl9pZCI6ImxpLTEyMyIsInByb2ZpbGVfaWQiOjd9.i8x945gZJC6ofTIertmdgBkAA8pW8sP_iEvFQGr1DbA"
+}

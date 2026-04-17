@@ -7,7 +7,17 @@ from pathlib import Path
 
 from app.routers import linkedin_notifier as linkedin_notifier_router
 
-FIXTURES_DIR = Path(__file__).resolve().parents[6] / "docs" / "contracts" / "fixtures"
+
+def _resolve_fixtures_dir() -> Path:
+    current = Path(__file__).resolve()
+    for parent in current.parents:
+        candidate = parent / "docs" / "contracts" / "fixtures"
+        if (candidate / "launch-token.json").exists():
+            return candidate
+    raise FileNotFoundError("Could not locate docs/contracts/fixtures for notifier contract tests.")
+
+
+FIXTURES_DIR = _resolve_fixtures_dir()
 
 
 def _load_fixture(name: str) -> dict:
