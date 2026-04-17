@@ -1,7 +1,20 @@
-LinkedIn Notifier (Airflow + Astro)
-==================================
+# LinkedIn Notifier (Airflow + Astro)
 
 This project runs a two-DAG pipeline:
+
+1. `linkedin_notifier` (`/Users/levi/Linkedin-notifier/dags/process.py`)
+   - Scan LinkedIn jobs via scripts guest API scraper (`scripts/linkedin_public_jobs_scraper.py`)
+   - Save canonical jobs into Postgres
+   - Link matched jobs to one or more active profiles/search configs
+   - Queue JD fetching, run LinkedIn `jobPosting` API worker (`dags/jd_api_worker.py`), enqueue fitting tasks
+   - Trigger `linkedin_fitting_notifier`
+
+2. `linkedin_fitting_notifier` (`/Users/levi/Linkedin-notifier/dags/fitting_notifier.py`)
+   - Claim profile-job fitting tasks (`pending_fit` plus stale recoverable `fitting`)
+   - Run LLM fitting with the owning profile resume
+   - Save profile-specific match result + score + decision
+   - Finalize queue status
+   - Send Discord notification for `Strong Fit` / `Moderate Fit` to the owning profile channel/webhook
 
 ## Notifier / Resume Matcher repository boundary
 
@@ -18,23 +31,7 @@ Resume Matcher becomes the separate deployable app that owns `/launch`, workspac
 
 Before cutover, refresh canonical profile content with `sync_profiles_from_source(force=True)` and keep notifier-owned source resumes in `.md` or `.txt`; those are the formats this repo currently hydrates into `profiles.resume_text`.
 
-1. `linkedin_notifier` (`/Users/levi/Linkedin-notifier/dags/process.py`)
-   - Scan LinkedIn jobs via scripts guest API scraper (`scripts/linkedin_public_jobs_scraper.py`)
-   - Save canonical jobs into Postgres
-   - Link matched jobs to one or more active profiles/search configs
-   - Queue JD fetching, run LinkedIn `jobPosting` API worker (`dags/jd_api_worker.py`), enqueue fitting tasks
-   - Trigger `linkedin_fitting_notifier`
-
-2. `linkedin_fitting_notifier` (`/Users/levi/Linkedin-notifier/dags/fitting_notifier.py`)
-   - Claim profile-job fitting tasks (`pending_fit` plus stale recoverable `fitting`)
-   - Run LLM fitting with the owning profile resume
-   - Save profile-specific match result + score + decision
-   - Finalize queue status
-   - Send Discord notification for `Strong Fit` / `Moderate Fit` to the owning profile channel/webhook
-
-
-Run locally
------------
+## Run locally
 
 1. Start local Airflow:
    - `astro dev start`
@@ -43,9 +40,7 @@ Run locally
 3. Or trigger fitting DAG directly:
    - `astro dev run dags trigger linkedin_fitting_notifier`
 
-
-Environment variables
----------------------
+## Environment variables
 
 For Astro local runs, keep runtime vars in:
 
@@ -73,9 +68,7 @@ Common vars:
 - `DISCORD_BOT_TOKEN` (used with per-profile Discord channel ids)
 - `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap for single-user mode)
 
-
-Multi-user config
------------------
+## Multi-user config
 
 - The runtime now stores user-specific state in Postgres: `profiles`, `search_configs`, `search_terms`, and `profile_jobs`.
 - Canonical job data stays shared in `jobs`; JD scraping stays shared in `jd_queue`; fit results and notifications are tracked per profile in `profile_jobs`.
@@ -89,9 +82,7 @@ Multi-user config
 - Search config supports both `location` and optional `geo_id`; the scan flow now sends `keywords`, `location`, `geoId`, `distance`, `start`, and `f_TPR`.
 - For Netherlands-wide searches, use LinkedIn `geo_id` `102890719` unless you have a more specific regional geoId to target.
 
-
-Data storage
-------------
+## Data storage
 
 - Business data is stored in Postgres (`jobsdb`)
 - Main tables:
@@ -104,9 +95,7 @@ Data storage
   - `profile_jobs`
   - `fitting_queue` (legacy table, currently not used by DAG flow)
 
-
-Migrate existing SQLite data (one-time)
---------------------------------------
+## Migrate existing SQLite data (one-time)
 
 1. Decide which Postgres database should receive the migrated business data.
 2. Set `JOBS_DB_URL` to that target, or pass `--pg-url` explicitly.
@@ -115,16 +104,12 @@ Migrate existing SQLite data (one-time)
    - Container: `docker exec -e JOBS_DB_URL="$JOBS_DB_URL" "$(docker ps --filter 'name=scheduler-1' --format '{{.Names}}' | head -n1)" python /usr/local/airflow/scripts/migrate_sqlite_to_postgres.py --sqlite-path /usr/local/airflow/include/jobs.db`
 4. Keep `JOBS_DB_URL` aligned between `/Users/levi/Linkedin-notifier/.env` and your local Airflow runtime env so host tooling and DAG runs talk to the same business database by default.
 
-
-Notes
------
+## Notes
 
 - Job id normalization is required to keep DB dedupe stable (`id` is stored as numeric string).
 - Canonical jobs are shared globally, but discovery / fitting / notification state is tracked per profile.
 
-
-Zeabur deployment
------------------
+## Zeabur deployment
 
 Deploy this repo to Zeabur as **one Docker app service plus two Postgres databases**:
 
