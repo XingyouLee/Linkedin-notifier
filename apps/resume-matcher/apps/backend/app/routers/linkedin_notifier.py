@@ -287,6 +287,30 @@ async def _upload_file_to_markdown(file: UploadFile) -> tuple[str, str]:
     raise HTTPException(status_code=422, detail="Failed to decode uploaded markdown/text file.")
 
 
+async def _canonical_profile_resume_to_markdown(
+    *,
+    resume_text: str | None,
+    resume_path: str | None,
+    fallback_filename: str,
+) -> tuple[str, str]:
+    if resume_path:
+        try:
+            return await _resume_source_to_markdown(
+                resume_text=None,
+                resume_path=resume_path,
+                fallback_filename=fallback_filename,
+            )
+        except HTTPException:
+            if not str(resume_text or "").strip():
+                raise
+
+    return await _resume_source_to_markdown(
+        resume_text=resume_text,
+        resume_path=resume_path,
+        fallback_filename=fallback_filename,
+    )
+
+
 def _summarize_resume(
     *,
     resume_id: str,
@@ -346,6 +370,35 @@ async def _create_hidden_resume(
         is_default=is_default,
     )
     return stored, summary
+
+
+def _refresh_hidden_resume(
+    *,
+    resume_id: str,
+    content: str,
+    filename: str | None,
+    source_label: str,
+    is_default: bool,
+) -> tuple[dict[str, Any], LaunchResumeContext]:
+    refreshed = db.update_resume(
+        resume_id,
+        {
+            "content": content,
+            "filename": filename,
+            "processed_data": None,
+            "processing_status": "pending",
+            "original_markdown": content,
+        },
+    )
+    summary = _summarize_resume(
+        resume_id=refreshed["resume_id"],
+        filename=refreshed.get("filename"),
+        content=refreshed.get("content", ""),
+        source_label=source_label,
+        processing_status=refreshed.get("processing_status", "pending"),
+        is_default=is_default,
+    )
+    return refreshed, summary
 
 
 def _find_existing_default_launch_resume(*, profile_id: int, job_id: str) -> dict[str, Any] | None:
@@ -476,28 +529,39 @@ async def initialize_launch(
     record = _fetch_launch_record(int(payload["profile_id"]), str(payload["job_id"]))
 
     with workspace_scope(workspace_id):
+        markdown_content, filename = await _canonical_profile_resume_to_markdown(
+            resume_text=record.get("resume_text"),
+            resume_path=record.get("resume_path"),
+            fallback_filename=f"profile-{record['profile_id']}.md",
+        )
+        if not str(markdown_content).strip():
+            raise HTTPException(status_code=422, detail="Resolved profile resume is empty.")
+
         existing_resume = _find_existing_default_launch_resume(
             profile_id=int(record["profile_id"]),
             job_id=str(record["job_id"]),
         )
         if existing_resume:
-            resume_summary = _summarize_resume(
-                resume_id=existing_resume["resume_id"],
-                filename=existing_resume.get("filename"),
-                content=existing_resume.get("content", ""),
-                source_label="Profile resume",
-                processing_status=existing_resume.get("processing_status", "pending"),
-                is_default=True,
-            )
+            existing_content = str(existing_resume.get("content") or "")
+            existing_filename = existing_resume.get("filename")
+            if existing_content == str(markdown_content) and existing_filename == filename:
+                resume_summary = _summarize_resume(
+                    resume_id=existing_resume["resume_id"],
+                    filename=existing_resume.get("filename"),
+                    content=existing_resume.get("content", ""),
+                    source_label="Profile resume",
+                    processing_status=existing_resume.get("processing_status", "pending"),
+                    is_default=True,
+                )
+            else:
+                _, resume_summary = _refresh_hidden_resume(
+                    resume_id=existing_resume["resume_id"],
+                    content=markdown_content,
+                    filename=filename,
+                    source_label="Profile resume",
+                    is_default=True,
+                )
         else:
-            markdown_content, filename = await _resume_source_to_markdown(
-                resume_text=record.get("resume_text"),
-                resume_path=record.get("resume_path"),
-                fallback_filename=f"profile-{record['profile_id']}.md",
-            )
-            if not str(markdown_content).strip():
-                raise HTTPException(status_code=422, detail="Resolved profile resume is empty.")
-
             _, resume_summary = await _create_hidden_resume(
                 content=markdown_content,
                 filename=filename,
