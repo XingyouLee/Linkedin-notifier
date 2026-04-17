@@ -1,49 +1,29 @@
-# ADR 2026-04-17: split linkedin-notifier and resume-matcher into separate repositories
+# ADR 2026-04-17: split notifier and matcher with notifier-owned canonical resume backfill
 
-- Status: Accepted
-- Date: 2026-04-17
+## Status
+Accepted
 
 ## Context
-
-The current monorepo contains two separately deployable products:
-
-- root Airflow infrastructure for LinkedIn scanning/fitting/notification
-- `apps/resume-matcher/` for launch workflows, editing, and PDF export
-
-That arrangement hides an important boundary problem: Resume Matcher still contains monorepo-era fallback logic for notifier-owned repo paths and shared env discovery, while operators already deploy the two surfaces with different runtime concerns.
+- The current monorepo contains two deployable surfaces with different runtime concerns.
+- Resume Matcher launch must keep working after extraction into its own repo.
+- The notifier repo already owns `profiles.json`, source resume files, and the shared Postgres schema used by launch flows.
 
 ## Decision
-
-Adopt a contract-first split:
-
-1. linkedin-notifier remains the owner of source resumes, `profiles.json`, shared DB schema/migrations, and launch-link generation
-2. resume-matcher becomes its own repo and consumes launch/profile/job context via shared Postgres plus explicit env/secrets
-3. `profiles.resume_text` becomes the canonical cross-repo resume content for notifier-owned profiles
-4. matcher workspace sessions use `RESUME_MATCHER_SESSION_SECRET`; fallback to `MATERIALS_LINK_SECRET` is migration-only
-5. path-based resume resolution inside Resume Matcher is transitional and must be removed once DB-backed canonical content is verified
+- Split `linkedin-notifier` and `resume-matcher` into separate repositories.
+- Keep notifier as the owner of profile-source resumes and canonical resume hydration into `profiles.resume_text`.
+- Treat `.md` / `.txt` as the only supported notifier-owned profile-source resume formats during this migration.
+- Gate cutover on `sync_profiles_from_source(force=True)` so active profiles fail early when canonical `resume_text` is missing or the source extension is not text-based.
 
 ## Consequences
-
 ### Positive
+- Resume Matcher can launch from shared DB state without notifier checkout paths or shared volumes.
+- Operators get a deterministic cutover gate with profile-specific failure output.
+- Notifier avoids importing matcher-only document parsing dependencies for this migration.
 
-- Each deployable app gets a single obvious repo root, Dockerfile, and README
-- notifier remains the only owner of notifier-specific data ingestion and schema decisions
-- matcher can evolve its frontend/PDF runtime without carrying Airflow deployment assumptions
+### Negative
+- Non-text notifier-owned profile resumes must be converted before cutover.
+- The forced-sync gate can block deployment until profile data is normalized.
 
-### Negative / tradeoffs
-
-- The split requires temporary compatibility logic until cutover evidence is collected
-- Launch behavior now depends on a carefully documented DB contract rather than implicit monorepo proximity
-- Operators must provision one additional explicit secret (`RESUME_MATCHER_SESSION_SECRET`) instead of relying on shared fallback behavior
-
-## Rejected alternative
-
-### Extract first, harden later
-
-Rejected because it would turn local monorepo coupling into a live cross-repo failure mode before token, DB, and resume-content contracts are frozen.
-
-## Follow-up requirements
-
-- keep launch-token parity tests on both sides of the split
-- verify `sync_profiles_from_source(force=True)` before path fallback removal
-- delete matcher code that reads notifier checkout paths after cutover evidence is complete
+## Rejected alternatives
+- Let Resume Matcher keep reading notifier `include/user_info` paths after extraction — rejected because it preserves cross-repo filesystem coupling.
+- Add PDF/DOC/DOCX parsing to notifier during this split — rejected because current live notifier-owned profiles already use markdown and the matcher parser stack should stay matcher-local for now.

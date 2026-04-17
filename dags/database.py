@@ -24,6 +24,7 @@ TEST_JOB_ID_PREFIX = "test-"
 _SCHEMA_INITIALIZED = False
 _PROFILE_SOURCE_SIGNATURE: tuple[str, int, int] | None = None
 TEXT_RESUME_SUFFIXES = {".md", ".txt"}
+MATCHER_CUTOVER_LABEL = "notifier->resume-matcher split"
 DEFAULT_LINKEDIN_GEO_IDS = {
     "netherlands": "102890719",
 }
@@ -298,6 +299,58 @@ def _load_profile_configs_from_file(config_path: Path) -> list[dict[str, Any]]:
             )
         profile_configs.append(normalized_profile)
     return profile_configs
+
+
+def _collect_matcher_cutover_validation_errors(
+    profile_configs: list[dict[str, Any]],
+) -> list[str]:
+    errors: list[str] = []
+    for profile_config in profile_configs or []:
+        if not profile_config.get("is_active", True):
+            continue
+        if not profile_config.get("search_configs"):
+            continue
+
+        profile_key = str(profile_config.get("profile_key") or "").strip() or "<unknown>"
+        display_name = (
+            str(profile_config.get("display_name") or "").strip() or profile_key
+        )
+        resume_path = str(profile_config.get("resume_path") or "").strip()
+        resume_text = str(profile_config.get("resume_text") or "").strip()
+
+        if not resume_path:
+            errors.append(
+                f"{profile_key} ({display_name}): resume_path is required for {MATCHER_CUTOVER_LABEL}"
+            )
+            continue
+
+        suffix = Path(resume_path).suffix.lower()
+        if suffix not in TEXT_RESUME_SUFFIXES:
+            allowed = ", ".join(sorted(TEXT_RESUME_SUFFIXES))
+            errors.append(
+                f"{profile_key} ({display_name}): resume_path {resume_path} must use one of {allowed}"
+            )
+
+        if not resume_text:
+            errors.append(
+                f"{profile_key} ({display_name}): canonical resume_text is empty after source hydration"
+            )
+
+    return errors
+
+
+def _validate_matcher_cutover_profiles(profile_configs: list[dict[str, Any]]) -> None:
+    errors = _collect_matcher_cutover_validation_errors(profile_configs)
+    if not errors:
+        return
+
+    bullet_list = "\n".join(f"- {error}" for error in errors)
+    raise ValueError(
+        f"{MATCHER_CUTOVER_LABEL} validation failed.\n"
+        "Active notifier-owned profiles must use markdown/txt resumes and produce canonical resume_text.\n"
+        "Fix the following profiles before running sync_profiles_from_source(force=True):\n"
+        f"{bullet_list}"
+    )
 
 
 def _compute_profile_source_signature(config_path: Path) -> tuple[str, int, int]:
@@ -730,6 +783,8 @@ def _sync_profiles_from_source(cursor, *, force: bool = False) -> int:
     if config_path.exists():
         profile_configs = _load_profile_configs_from_file(config_path)
         normalized_profiles = _coerce_profile_configs(profile_configs)
+        if force:
+            _validate_matcher_cutover_profiles(normalized_profiles)
         synced_profiles = _sync_profile_configs(
             cursor,
             normalized_profiles,

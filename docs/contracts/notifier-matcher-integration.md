@@ -1,50 +1,18 @@
 # Notifier ↔ Resume Matcher integration contract
 
-## Purpose
+## Ownership
+- `linkedin-notifier` owns `profiles.json`, source resume files, Postgres schema/migrations, and launch-token issuance.
+- `resume-matcher` consumes shared DB rows and shared secrets/env as a read-only integration surface.
+- This migration explicitly removes any requirement for Resume Matcher to read `include/user_info` or notifier checkout paths.
 
-This document freezes the contract between the **linkedin-notifier** repo and the extracted **resume-matcher** repo during the 2026-04-17 split. The goal is to keep launch/material generation working while removing any requirement for Resume Matcher to read notifier checkout paths directly.
+## Shared runtime contract
+- Database: `JOBS_DB_URL`
+- Notifier → matcher base URL: `RESUME_MATCHER_BASE_URL`
+- Launch token signing secret: `MATERIALS_LINK_SECRET`
+- Matcher workspace-session secret: `RESUME_MATCHER_SESSION_SECRET`
 
-## Ownership boundaries
-
-### linkedin-notifier owns
-
-- Airflow DAGs, scan/fitting orchestration, and Discord delivery
-- `include/user_info/profiles.json` plus notifier-owned source resumes under `include/user_info/resume/`
-- Postgres schema/migrations for `jobs`, `profile_jobs`, `profiles`, and related launch tables
-- canonical profile backfills via `dags/database.py::sync_profiles_from_source(force=True)`
-- launch-token creation via `dags/materials_launch.py`
-
-### resume-matcher owns
-
-- `/launch` and workspace/session initialization
-- hidden workspace state, resume/cover-letter editing, and PDF export
-- frontend/backend deployment, health checks, and browser/PDF runtime concerns
-- `RESUME_MATCHER_SESSION_SECRET` provisioning for workspace cookies
-
-### Shared surface (and nothing broader)
-
-- `JOBS_DB_URL`
-- `RESUME_MATCHER_BASE_URL`
-- `MATERIALS_LINK_SECRET`
-- `RESUME_MATCHER_SESSION_SECRET`
-- the Postgres query contract described below
-
-`RESUME_MATCHER_SESSION_SECRET` is matcher-owned. Resume Matcher may temporarily fall back to `MATERIALS_LINK_SECRET` during migration, but that fallback is transitional and should be removed after cutover verification.
-
-## Launch flow contract
-
-1. linkedin-notifier builds `/launch?token=...` links with `build_materials_launch_url(...)`.
-2. The launch token payload contains only `profile_id`, `job_id`, and `exp`, signed with `MATERIALS_LINK_SECRET`.
-3. Resume Matcher verifies that token with the same HMAC semantics before reading shared DB state.
-4. Resume Matcher reads launch context from Postgres only; it must not require notifier checkout paths after cutover.
-5. Resume Matcher creates its own workspace session cookie using `RESUME_MATCHER_SESSION_SECRET`.
-
-Token expiry currently defaults to 7 days on both sides. Any future change must keep notifier creation and matcher verification in parity.
-
-## Shared Postgres query contract
-
-Resume Matcher currently initializes launch state from a single query shaped like:
-
+## Launch data contract
+Resume Matcher launch relies on the notifier-owned query shape:
 - `profile_jobs.profile_id`
 - `profile_jobs.job_id`
 - `profiles.display_name`
@@ -55,44 +23,25 @@ Resume Matcher currently initializes launch state from a single query shaped lik
 - `jobs.job_url`
 - `jobs.description`
 
-Required behavior:
+`profiles.resume_text` is the canonical launch resume payload during this split. `profiles.resume_path` remains notifier-owned metadata only and must not be treated as a readable filesystem path by Resume Matcher.
 
-- the `(profile_id, job_id)` pair must resolve to exactly one live launch context
-- `jobs.description` must be populated before launch succeeds
-- `profiles.resume_text` is the canonical cross-repo resume content
-- `profiles.resume_path` is migration-only metadata until path fallback is removed from Resume Matcher
+## Cutover rule for notifier-owned profile resumes
+- During this migration, notifier-owned profile-source resumes must be `.md` or `.txt`.
+- `sync_profiles_from_source(force=True)` is the forced backfill gate before matcher cutover.
+- The forced sync must fail if any active notifier-owned profile:
+  - uses a non-text source extension, or
+  - does not hydrate non-empty `profiles.resume_text`
 
-## Canonical resume-content contract
+This rule keeps canonical resume extraction inside the notifier repo and avoids importing matcher-only document parsing dependencies into the notifier runtime.
 
-linkedin-notifier is the source of truth for profile-source resumes. During this split:
+## Token / session semantics
+- Notifier signs Discord launch tokens with `MATERIALS_LINK_SECRET`.
+- Matcher verifies launch tokens with the same secret.
+- Matcher workspace sessions must use `RESUME_MATCHER_SESSION_SECRET`; relying on `MATERIALS_LINK_SECRET` as a session fallback is migration-only behavior to remove.
 
-- notifier-owned profile resumes are expected to be `.md` or `.txt`
-- `sync_profiles_from_source(force=True)` refreshes `profiles.resume_text` from `profiles.json` and the source resume files
-- if a profile source is not readable as text, `profiles.resume_text` will not be hydrated by notifier and cutover should be blocked until the source is converted
-- direct uploads inside Resume Matcher remain matcher-local and do not change notifier ownership of profile-source resumes
-
-## Deployment contract
-
-### linkedin-notifier runtime requirements
-
-- `JOBS_DB_URL`
-- `RESUME_MATCHER_BASE_URL`
-- `MATERIALS_LINK_SECRET`
-- `PROFILE_CONFIG_PATH` when `profiles.json` is relocated
-
-### resume-matcher runtime requirements
-
-- `JOBS_DB_URL`
-- `MATERIALS_LINK_SECRET`
-- `RESUME_MATCHER_SESSION_SECRET`
-- matcher-local frontend/PDF/browser env such as `FRONTEND_BASE_URL`
-
-## Cutover checklist
-
-Before deleting `apps/resume-matcher/` from this repo, verify all of the following:
-
-1. `sync_profiles_from_source(force=True)` succeeds against the live notifier config.
-2. Active launchable profiles have canonical `profiles.resume_text` content.
-3. Resume Matcher launches work without access to `include/user_info/`.
-4. `RESUME_MATCHER_SESSION_SECRET` is explicitly configured in the matcher deployment.
-5. The matcher-side `MATERIALS_LINK_SECRET` fallback is tracked for later cleanup, not treated as permanent architecture.
+## Operational validation
+Before cutting matcher over to the extracted repo:
+1. Run `sync_profiles_from_source(force=True)` from notifier.
+2. Confirm no active profile fails the markdown/txt + canonical `resume_text` gate.
+3. Confirm notifier-generated launch links still point at `RESUME_MATCHER_BASE_URL`.
+4. Confirm matcher launch succeeds using shared DB state only.
