@@ -15,6 +15,7 @@ from app.schemas.models import (
     LaunchResumeContext,
     ResumeData,
 )
+from app.workspace_auth import workspace_scope
 
 
 @pytest.fixture
@@ -430,3 +431,47 @@ async def test_ensure_resume_ready_surfaces_upstream_provider_details(
     assert "insufficient_user_quota" in exc_info.value.detail
     stored = db.get_resume(resume["resume_id"])
     assert stored["processing_status"] == "failed"
+
+
+@patch("app.routers.linkedin_notifier._canonical_profile_resume_to_markdown", new_callable=AsyncMock)
+@patch("app.routers.linkedin_notifier._fetch_launch_record")
+async def test_refresh_selected_profile_resume_if_needed_updates_default_launch_resume(
+    mock_fetch_launch_record,
+    mock_canonical_profile_resume_to_markdown,
+    isolated_database,
+):
+    mock_fetch_launch_record.return_value = {
+        "profile_id": 7,
+        "job_id": "job-123",
+        "resume_path": "resume/xingyouli.md",
+        "resume_text": "stale cached text",
+    }
+    mock_canonical_profile_resume_to_markdown.return_value = ("# New Xingyou Resume", "xingyouli.md")
+
+    with workspace_scope("workspace-1"):
+        resume = db.create_resume(
+            content="# Old Xingyou Resume",
+            content_type="md",
+            filename="xingyouli.md",
+            is_master=False,
+            processed_data={"parsed": True},
+            processing_status="ready",
+            original_markdown="# Old Xingyou Resume",
+        )
+        resume = linkedin_notifier_router._mark_hidden_resume(
+            resume["resume_id"],
+            source_profile_id=7,
+            source_job_id="job-123",
+        )
+
+        refreshed = await linkedin_notifier_router._refresh_selected_profile_resume_if_needed(
+            resume=resume,
+            profile_id=7,
+            job_id="job-123",
+        )
+
+        assert refreshed["resume_id"] == resume["resume_id"]
+        assert refreshed["content"] == "# New Xingyou Resume"
+        assert refreshed["original_markdown"] == "# New Xingyou Resume"
+        assert refreshed["processing_status"] == "pending"
+        assert refreshed["processed_data"] is None

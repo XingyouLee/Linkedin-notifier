@@ -401,6 +401,58 @@ def _refresh_hidden_resume(
     return refreshed, summary
 
 
+def _is_default_launch_profile_resume(
+    resume: dict[str, Any] | None,
+    *,
+    profile_id: int,
+    job_id: str,
+) -> bool:
+    if not resume:
+        return False
+    return (
+        resume.get("integration_source") == "linkedin_notifier"
+        and int(resume.get("source_profile_id") or -1) == int(profile_id)
+        and str(resume.get("source_job_id") or "") == str(job_id)
+        and not resume.get("uploaded_via_launch", False)
+    )
+
+
+async def _refresh_selected_profile_resume_if_needed(
+    *,
+    resume: dict[str, Any],
+    profile_id: int,
+    job_id: str,
+    record: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if not _is_default_launch_profile_resume(
+        resume,
+        profile_id=profile_id,
+        job_id=job_id,
+    ):
+        return resume
+
+    launch_record = record or _fetch_launch_record(int(profile_id), str(job_id))
+    markdown_content, filename = await _canonical_profile_resume_to_markdown(
+        resume_text=launch_record.get("resume_text"),
+        resume_path=launch_record.get("resume_path"),
+        fallback_filename=f"profile-{profile_id}.md",
+    )
+    if not str(markdown_content).strip():
+        raise HTTPException(status_code=422, detail="Resolved profile resume is empty.")
+
+    if str(resume.get("content") or "") == str(markdown_content) and resume.get("filename") == filename:
+        return resume
+
+    refreshed, _ = _refresh_hidden_resume(
+        resume_id=resume["resume_id"],
+        content=markdown_content,
+        filename=filename,
+        source_label="Profile resume",
+        is_default=True,
+    )
+    return refreshed
+
+
 def _find_existing_default_launch_resume(*, profile_id: int, job_id: str) -> dict[str, Any] | None:
     matches = [
         resume
@@ -677,6 +729,12 @@ async def generate_materials(
         resume = db.get_resume(payload_request.resume_id)
         if not resume:
             raise HTTPException(status_code=404, detail="Selected resume not found.")
+
+        resume = await _refresh_selected_profile_resume_if_needed(
+            resume=resume,
+            profile_id=int(payload["profile_id"]),
+            job_id=str(payload["job_id"]),
+        )
 
         job = db.get_job(payload_request.job_id)
         if not job:
