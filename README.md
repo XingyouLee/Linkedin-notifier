@@ -3,6 +3,21 @@ LinkedIn Notifier (Airflow + Astro)
 
 This project runs a two-DAG pipeline:
 
+## Notifier / Resume Matcher repository boundary
+
+The ongoing two-repo split treats this repository as the long-term home for **LinkedIn Notifier** only. `apps/resume-matcher/` is a migration-era subtree while the extraction is finalized; new notifier work should stay in the root Airflow tree.
+
+Notifier-owned responsibilities:
+
+- Airflow scanning, JD ingestion, fitting, and Discord notifications
+- `include/user_info/` source resumes + `profiles.json`
+- shared Postgres schema/migrations and `sync_profiles_from_source(force=True)` backfills
+- launch-token generation via `RESUME_MATCHER_BASE_URL` + `MATERIALS_LINK_SECRET`
+
+Resume Matcher becomes the separate deployable app that owns `/launch`, workspace sessions, editing flows, PDF generation, and its own `RESUME_MATCHER_SESSION_SECRET`. The matcher-side fallback to `MATERIALS_LINK_SECRET` is transitional only and should be removed after cutover.
+
+Before cutover, refresh canonical profile content with `sync_profiles_from_source(force=True)` and keep notifier-owned source resumes in `.md` or `.txt`; those are the formats this repo currently hydrates into `profiles.resume_text`.
+
 1. `linkedin_notifier` (`/Users/levi/Linkedin-notifier/dags/process.py`)
    - Scan LinkedIn jobs via scripts guest API scraper (`scripts/linkedin_public_jobs_scraper.py`)
    - Save canonical jobs into Postgres
@@ -45,6 +60,8 @@ Common vars:
 
 - `JOBS_DB_URL`: business DB DSN (for DAG tasks), e.g. `postgresql://jobs_app:jobs_pass@db.example.com:5432/jobsdb`
 - `PROFILE_CONFIG_PATH`: optional override for profile config file; defaults to `include/user_info/profiles.json`
+- `RESUME_MATCHER_BASE_URL`: public Resume Matcher base URL used for Discord deep links (`/launch?token=...`)
+- `MATERIALS_LINK_SECRET`: shared HMAC secret used to sign launch tokens that Resume Matcher verifies
 - `SCAN_REQUEST_PAGE_SIZE`, `SCAN_BETWEEN_REQUESTS_MIN_SEC`, `SCAN_BETWEEN_REQUESTS_MAX_SEC`
 - `SCAN_BETWEEN_TERMS_DELAY_SEC`, `SCAN_HTTP_MAX_RETRIES`, `SCAN_HTTP_BASE_DELAY_SEC`
 - `SCAN_HTTP_MAX_DELAY_SEC`, `SCAN_HTTP_JITTER_SEC`, `SCAN_REQUEST_TIMEOUT_SEC`
