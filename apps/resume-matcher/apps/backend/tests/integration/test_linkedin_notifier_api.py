@@ -24,72 +24,32 @@ def client(make_workspace_session_cookie):
     return AsyncClient(transport=transport, base_url="http://test")
 
 
-def test_resolve_resume_path_maps_airflow_paths_to_primary_repo(tmp_path, monkeypatch):
-    primary_repo = tmp_path / "primary-repo"
-    worktree_repo = primary_repo / ".worktrees" / "materials-generation-rebuild"
-    target = primary_repo / "include" / "user_info" / "resume" / "georgegu.md"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("# George Gu", encoding="utf-8")
-
-    monkeypatch.setattr(linkedin_notifier_router, "REPO_ROOT", worktree_repo)
-    monkeypatch.setattr(linkedin_notifier_router, "PRIMARY_REPO_ROOT", primary_repo)
-    monkeypatch.setattr(
-        linkedin_notifier_router,
-        "USER_INFO_DIR",
-        worktree_repo / "include" / "user_info",
-    )
-
-    resolved = linkedin_notifier_router._resolve_resume_path(
-        "/usr/local/airflow/include/user_info/resume/georgegu.md"
-    )
-
-    assert resolved == target
-
-
-def test_resolve_resume_path_rejects_absolute_paths_outside_user_info(tmp_path, monkeypatch):
-    primary_repo = tmp_path / "primary-repo"
-    worktree_repo = primary_repo / ".worktrees" / "materials-generation-rebuild"
-    outside_file = tmp_path / "outside.md"
-    outside_file.write_text("# Outside", encoding="utf-8")
-
-    monkeypatch.setattr(linkedin_notifier_router, "REPO_ROOT", worktree_repo)
-    monkeypatch.setattr(linkedin_notifier_router, "PRIMARY_REPO_ROOT", primary_repo)
-    monkeypatch.setattr(
-        linkedin_notifier_router,
-        "USER_INFO_DIR",
-        worktree_repo / "include" / "user_info",
-    )
-
-    with pytest.raises(HTTPException) as exc_info:
-        linkedin_notifier_router._resolve_resume_path(str(outside_file))
-
-    assert "Could not resolve profile resume path" in str(exc_info.value)
-
-
-@patch("app.routers.linkedin_notifier._resume_source_to_markdown", new_callable=AsyncMock)
-async def test_canonical_profile_resume_prefers_path_over_stale_resume_text(
-    mock_resume_to_markdown,
-):
-    async def side_effect(*, resume_text, resume_path, fallback_filename):
-        if resume_text is None and resume_path == "resume/xingyouli.md":
-            return "# From file", "xingyouli.md"
-        return "# From cached text", "cached.md"
-
-    mock_resume_to_markdown.side_effect = side_effect
-
+async def test_canonical_profile_resume_prefers_db_text_and_uses_path_only_for_filename():
     content, filename = await linkedin_notifier_router._canonical_profile_resume_to_markdown(
         resume_text="# From cached text",
         resume_path="resume/xingyouli.md",
         fallback_filename="fallback.md",
     )
 
-    assert content == "# From file"
+    assert content == "# From cached text"
     assert filename == "xingyouli.md"
+
+
+async def test_canonical_profile_resume_requires_db_backfill_before_launch():
+    with pytest.raises(HTTPException) as exc_info:
+        await linkedin_notifier_router._canonical_profile_resume_to_markdown(
+            resume_text=None,
+            resume_path="resume/xingyouli.md",
+            fallback_filename="fallback.md",
+        )
+
+    assert exc_info.value.status_code == 422
+    assert "sync_profiles_from_source(force=True)" in exc_info.value.detail
 
 
 class TestLinkedInNotifierLaunch:
     @patch("app.routers.linkedin_notifier._create_hidden_resume", new_callable=AsyncMock)
-    @patch("app.routers.linkedin_notifier._resume_source_to_markdown", new_callable=AsyncMock)
+    @patch("app.routers.linkedin_notifier._canonical_profile_resume_to_markdown", new_callable=AsyncMock)
     @patch("app.routers.linkedin_notifier._fetch_launch_record")
     @patch("app.routers.linkedin_notifier._verify_launch_token")
     @patch("app.routers.linkedin_notifier.db")
@@ -98,7 +58,7 @@ class TestLinkedInNotifierLaunch:
         mock_db,
         mock_verify,
         mock_fetch_record,
-        mock_resume_to_markdown,
+        mock_canonical_profile_resume_to_markdown,
         mock_create_hidden_resume,
         client,
     ):
@@ -114,7 +74,7 @@ class TestLinkedInNotifierLaunch:
             "job_url": "https://example.com/job-123",
             "description": "Build data pipelines with Python and SQL.",
         }
-        mock_resume_to_markdown.return_value = ("# Xingyou Li", "xingyouli.md")
+        mock_canonical_profile_resume_to_markdown.return_value = ("# Xingyou Li", "xingyouli.md")
         mock_create_hidden_resume.return_value = (
             {
                 "resume_id": "res-launch-1",
@@ -149,14 +109,14 @@ class TestLinkedInNotifierLaunch:
         assert payload["resume"]["is_default"] is True
         assert "resume_matcher_session=" in response.headers["set-cookie"]
 
-    @patch("app.routers.linkedin_notifier._resume_source_to_markdown", new_callable=AsyncMock)
+    @patch("app.routers.linkedin_notifier._canonical_profile_resume_to_markdown", new_callable=AsyncMock)
     @patch("app.routers.linkedin_notifier._fetch_launch_record")
     @patch("app.routers.linkedin_notifier._verify_launch_token")
     async def test_launch_reuses_existing_workspace_context_for_same_token(
         self,
         mock_verify,
         mock_fetch_record,
-        mock_resume_to_markdown,
+        mock_canonical_profile_resume_to_markdown,
         client,
         isolated_database,
         monkeypatch,
@@ -174,7 +134,7 @@ class TestLinkedInNotifierLaunch:
             "job_url": "https://example.com/job-123",
             "description": "Build data pipelines with Python and SQL.",
         }
-        mock_resume_to_markdown.return_value = ("# Xingyou Li", "xingyouli.md")
+        mock_canonical_profile_resume_to_markdown.return_value = ("# Xingyou Li", "xingyouli.md")
 
         async with client:
             first = await client.get(
@@ -201,14 +161,14 @@ class TestLinkedInNotifierLaunch:
         assert all_resumes[0]["filename"] == "xingyouli.md"
         assert all_jobs[0]["canonical_job_id"] == "job-123"
 
-    @patch("app.routers.linkedin_notifier._resume_source_to_markdown", new_callable=AsyncMock)
+    @patch("app.routers.linkedin_notifier._canonical_profile_resume_to_markdown", new_callable=AsyncMock)
     @patch("app.routers.linkedin_notifier._fetch_launch_record")
     @patch("app.routers.linkedin_notifier._verify_launch_token")
     async def test_launch_refreshes_existing_profile_resume_when_source_changes(
         self,
         mock_verify,
         mock_fetch_record,
-        mock_resume_to_markdown,
+        mock_canonical_profile_resume_to_markdown,
         client,
         isolated_database,
         monkeypatch,
@@ -226,7 +186,7 @@ class TestLinkedInNotifierLaunch:
             "job_url": "https://example.com/job-123",
             "description": "Build data pipelines with Python and SQL.",
         }
-        mock_resume_to_markdown.side_effect = [
+        mock_canonical_profile_resume_to_markdown.side_effect = [
             ("# Old Xingyou Resume", "xingyouli.md"),
             ("# New Xingyou Resume", "xingyouli.md"),
         ]

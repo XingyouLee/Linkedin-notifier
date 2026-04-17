@@ -3,7 +3,6 @@ import { API_BASE, apiFetch, apiPost } from './client';
 export interface LaunchProfileContext {
   profile_id: number;
   display_name: string;
-  canonical_resume_path?: string | null;
 }
 
 export interface LaunchJobContext {

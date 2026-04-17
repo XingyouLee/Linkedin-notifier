@@ -10,7 +10,11 @@ from httpx import ASGITransport, AsyncClient
 
 from app.database import db
 from app.main import app
-from app.workspace_auth import WORKSPACE_SESSION_COOKIE_NAME, workspace_scope
+from app.workspace_auth import (
+    WORKSPACE_SESSION_COOKIE_NAME,
+    build_workspace_session_token,
+    workspace_scope,
+)
 
 
 @contextmanager
@@ -40,6 +44,16 @@ async def test_resume_routes_require_workspace_session(isolated_database):
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Workspace session is required."
+
+
+def test_workspace_session_requires_explicit_resume_matcher_secret(monkeypatch):
+    monkeypatch.delenv("RESUME_MATCHER_SESSION_SECRET", raising=False)
+    monkeypatch.setenv("MATERIALS_LINK_SECRET", "legacy-secret")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        build_workspace_session_token(workspace_id="workspace-a")
+
+    assert "RESUME_MATCHER_SESSION_SECRET" in str(exc_info.value)
 
 
 async def test_resume_list_and_fetch_are_workspace_scoped(

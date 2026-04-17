@@ -39,7 +39,6 @@ describe('LaunchPage', () => {
       profile: {
         profile_id: 1,
         display_name: 'Levi',
-        canonical_resume_path: '/resume.md',
       },
       job: {
         canonical_job_id: 'job-1',

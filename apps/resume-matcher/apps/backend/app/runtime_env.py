@@ -1,4 +1,4 @@
-"""Shared environment loading helpers for worktree and container layouts."""
+"""Shared environment loading helpers for Resume Matcher repo layouts."""
 
 from __future__ import annotations
 
@@ -9,21 +9,10 @@ from pathlib import Path
 from dotenv import dotenv_values
 
 
-def _resolve_repo_root(anchor: Path) -> Path:
-    """Resolve the best available project root for env/path fallbacks.
-
-    Priority:
-    1) Monorepo root (`include/user_info` + `dags`) when present
-    2) Resume Matcher repo root (`apps/backend` + `apps/frontend`)
-    3) Container runtime root (`backend` + `frontend`)
-    4) Directory containing the anchor
-    """
+def resolve_repo_root(anchor: Path) -> Path:
+    """Resolve the Resume Matcher project root from an anchor path."""
     anchor = anchor.resolve()
     candidates = [anchor.parent, *anchor.parents]
-
-    for candidate in candidates:
-        if (candidate / "include" / "user_info").exists() and (candidate / "dags").exists():
-            return candidate
 
     for candidate in candidates:
         if (candidate / "apps" / "backend").exists() and (candidate / "apps" / "frontend").exists():
@@ -36,37 +25,43 @@ def _resolve_repo_root(anchor: Path) -> Path:
     return anchor.parent
 
 
-def _resolve_primary_repo_root(repo_root: Path) -> Path:
-    if repo_root.parent.name == ".worktrees":
-        return repo_root.parent.parent
-    return repo_root
+def _env_file_candidates(repo_root: Path) -> list[Path]:
+    candidates = [repo_root / ".env"]
+    if (repo_root / "apps" / "backend").exists():
+        candidates.insert(0, repo_root / "apps" / "backend" / ".env")
+    if (repo_root / "backend").exists():
+        candidates.insert(0, repo_root / "backend" / ".env")
+
+    deduped: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(candidate)
+    return deduped
 
 
-REPO_ROOT = _resolve_repo_root(Path(__file__))
-PRIMARY_REPO_ROOT = _resolve_primary_repo_root(REPO_ROOT)
+REPO_ROOT = resolve_repo_root(Path(__file__))
 
 
 def resolve_repo_roots(anchor: Path) -> tuple[Path, Path]:
-    """Resolve runtime repo and primary repo roots from an anchor file path."""
-    repo_root = _resolve_repo_root(anchor)
-    return repo_root, _resolve_primary_repo_root(repo_root)
+    """Backward-compatible wrapper for callers expecting a two-tuple."""
+    repo_root = resolve_repo_root(anchor)
+    return repo_root, repo_root
 
 
 @lru_cache(maxsize=1)
 def load_shared_env_values() -> dict[str, str]:
-    """Load environment values from the repo root and dags/.env files."""
+    """Load environment values from Resume Matcher env files."""
     values: dict[str, str] = {}
-    env_roots = [REPO_ROOT]
-    if PRIMARY_REPO_ROOT != REPO_ROOT:
-        env_roots.append(PRIMARY_REPO_ROOT)
-
-    for root in env_roots:
-        for path in (root / ".env", root / "dags" / ".env"):
-            if not path.exists():
-                continue
-            for key, value in dotenv_values(path).items():
-                if key and value and key not in values:
-                    values[key] = str(value)
+    for path in _env_file_candidates(REPO_ROOT):
+        if not path.exists():
+            continue
+        for key, value in dotenv_values(path).items():
+            if key and value and key not in values:
+                values[key] = str(value)
     return values
 
 

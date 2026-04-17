@@ -711,7 +711,6 @@ class LaunchProfileContext(BaseModel):
 
     profile_id: int
     display_name: str
-    canonical_resume_path: str | None = None
 
 
 class IntegrationLaunchData(BaseModel):

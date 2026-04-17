@@ -31,14 +31,11 @@ def _urlsafe_b64decode(data: str) -> bytes:
 
 
 def _get_workspace_session_secret() -> str:
-    secret = (
-        get_shared_setting("RESUME_MATCHER_SESSION_SECRET").strip()
-        or get_shared_setting("MATERIALS_LINK_SECRET").strip()
-    )
+    secret = get_shared_setting("RESUME_MATCHER_SESSION_SECRET").strip()
     if not secret:
         raise RuntimeError(
             "Resume Matcher workspace session secret is not configured. "
-            "Set RESUME_MATCHER_SESSION_SECRET or MATERIALS_LINK_SECRET."
+            "Set RESUME_MATCHER_SESSION_SECRET."
         )
     return secret
 

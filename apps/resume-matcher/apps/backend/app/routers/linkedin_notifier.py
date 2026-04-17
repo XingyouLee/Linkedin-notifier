@@ -7,7 +7,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import time
 from pathlib import Path
 from typing import Any
@@ -18,7 +17,7 @@ from psycopg import connect
 from psycopg.rows import dict_row
 
 from app.database import db
-from app.runtime_env import get_shared_setting, resolve_repo_roots
+from app.runtime_env import get_shared_setting
 from app.routers import resumes as resumes_router
 from app.schemas import (
     ImproveResumeConfirmRequest,
@@ -47,8 +46,6 @@ router = APIRouter(
     tags=["LinkedIn Notifier Integration"],
 )
 
-REPO_ROOT, PRIMARY_REPO_ROOT = resolve_repo_roots(Path(__file__))
-USER_INFO_DIR = REPO_ROOT / "include" / "user_info"
 MAX_FILE_SIZE = 4 * 1024 * 1024
 DOCUMENT_SUFFIXES = {".pdf", ".doc", ".docx"}
 TEXT_SUFFIXES = {".md", ".txt"}
@@ -149,99 +146,41 @@ def _fetch_launch_record(profile_id: int, job_id: str) -> dict[str, Any]:
     return dict(record)
 
 
-def _user_info_roots() -> list[Path]:
-    roots = [USER_INFO_DIR]
-    primary_user_info_dir = PRIMARY_REPO_ROOT / "include" / "user_info"
-    if primary_user_info_dir != USER_INFO_DIR:
-        roots.append(primary_user_info_dir)
-    return roots
+def _resume_filename(
+    *,
+    resume_path: str | None,
+    fallback_filename: str,
+) -> str:
+    if not resume_path:
+        return fallback_filename
+    filename = Path(str(resume_path)).name.strip()
+    return filename or fallback_filename
 
 
-def _extract_user_info_relative_tail(path: Path) -> Path | None:
-    parts = list(path.parts)
-    for index in range(len(parts) - 1):
-        if parts[index] == "include" and parts[index + 1] == "user_info":
-            tail_parts = parts[index + 2 :]
-            return Path(*tail_parts) if tail_parts else None
-    return None
-
-
-def _resolve_resume_path(resume_path: str) -> Path:
-    raw_path = Path(os.path.expanduser(str(resume_path)))
-    relative_tail = _extract_user_info_relative_tail(raw_path)
-    if raw_path.is_absolute():
-        if relative_tail is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Could not resolve profile resume path: {resume_path}",
-            )
-    else:
-        relative_tail = relative_tail or raw_path
-
-    candidates: list[Path] = []
-    for root in _user_info_roots():
-        root_resolved = root.resolve(strict=False)
-        candidate = (root / relative_tail).resolve(strict=False)
-        if candidate.is_relative_to(root_resolved):
-            candidates.append(candidate)
-
-    deduped_candidates: list[Path] = []
-    seen: set[str] = set()
-    for candidate in candidates:
-        key = str(candidate)
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped_candidates.append(candidate)
-
-    for candidate in deduped_candidates:
-        if candidate.exists() and candidate.is_file():
-            return candidate
-
-    raise HTTPException(
-        status_code=404,
-        detail=f"Could not resolve profile resume path: {resume_path}",
-    )
-
-
-async def _resume_source_to_markdown(
+async def _canonical_profile_resume_to_markdown(
     *,
     resume_text: str | None,
     resume_path: str | None,
     fallback_filename: str,
 ) -> tuple[str, str]:
     if resume_text and str(resume_text).strip():
-        filename = Path(resume_path).name if resume_path else fallback_filename
-        return str(resume_text), filename
+        return str(resume_text), _resume_filename(
+            resume_path=resume_path,
+            fallback_filename=fallback_filename,
+        )
 
-    if not resume_path:
-        raise HTTPException(status_code=422, detail="Profile resume is not configured.")
-
-    resolved_path = _resolve_resume_path(resume_path)
-    suffix = resolved_path.suffix.lower()
-    filename = resolved_path.name
-
-    if suffix in TEXT_SUFFIXES:
-        try:
-            return resolved_path.read_text(encoding="utf-8"), filename
-        except UnicodeDecodeError:
-            return resolved_path.read_text(encoding="utf-8-sig"), filename
-
-    if suffix in DOCUMENT_SUFFIXES:
-        content = resolved_path.read_bytes()
-        markdown_content = await parse_document(content, filename)
-        return markdown_content, filename
-
-    try:
-        return resolved_path.read_text(encoding="utf-8"), filename
-    except UnicodeDecodeError as exc:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Unsupported resume file type. Supported profile resumes are markdown, "
-                "txt, PDF, DOC, and DOCX."
-            ),
-        ) from exc
+    if resume_path:
+        logger.warning(
+            "LinkedIn launch blocked because canonical resume_text is missing for %s",
+            resume_path,
+        )
+    raise HTTPException(
+        status_code=422,
+        detail=(
+            "Canonical profile resume content is unavailable. "
+            "Run sync_profiles_from_source(force=True) in linkedin-notifier before launching."
+        ),
+    )
 
 
 async def _upload_file_to_markdown(file: UploadFile) -> tuple[str, str]:
@@ -285,30 +224,6 @@ async def _upload_file_to_markdown(file: UploadFile) -> tuple[str, str]:
         except UnicodeDecodeError:
             continue
     raise HTTPException(status_code=422, detail="Failed to decode uploaded markdown/text file.")
-
-
-async def _canonical_profile_resume_to_markdown(
-    *,
-    resume_text: str | None,
-    resume_path: str | None,
-    fallback_filename: str,
-) -> tuple[str, str]:
-    if resume_path:
-        try:
-            return await _resume_source_to_markdown(
-                resume_text=None,
-                resume_path=resume_path,
-                fallback_filename=fallback_filename,
-            )
-        except HTTPException:
-            if not str(resume_text or "").strip():
-                raise
-
-    return await _resume_source_to_markdown(
-        resume_text=resume_text,
-        resume_path=resume_path,
-        fallback_filename=fallback_filename,
-    )
 
 
 def _summarize_resume(
@@ -622,7 +537,6 @@ async def initialize_launch(
                 metadata={
                     "source_profile_id": int(record["profile_id"]),
                     "source_job_id": str(record["job_id"]),
-                    "canonical_resume_path": record.get("resume_path"),
                 },
             )
 
@@ -662,7 +576,6 @@ async def initialize_launch(
             profile=LaunchProfileContext(
                 profile_id=int(record["profile_id"]),
                 display_name=str(record.get("display_name") or f"Profile {record['profile_id']}"),
-                canonical_resume_path=record.get("resume_path"),
             ),
             job=LaunchJobContext(
                 canonical_job_id=str(record["job_id"]),
