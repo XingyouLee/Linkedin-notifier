@@ -37,7 +37,8 @@ ENV PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     NODE_ENV=production \
-    NEXT_TELEMETRY_DISABLED=1
+    NEXT_TELEMETRY_DISABLED=1 \
+    PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -99,16 +100,15 @@ RUN sed -i 's/\r$//' /app/start.sh && chmod +x /app/start.sh
 # ============================================
 # Data Directory & Volume
 # ============================================
-RUN mkdir -p /app/backend/data
+RUN mkdir -p /app/backend/data "${PLAYWRIGHT_BROWSERS_PATH}" \
+    && python -m playwright install chromium \
+    && chmod -R a+rX "${PLAYWRIGHT_BROWSERS_PATH}"
 
 # Create a non-root user for security
 RUN useradd -m -u 1000 appuser \
     && chown -R appuser:appuser /app
 
 USER appuser
-
-# Install Playwright Chromium as appuser (so browsers are in correct location)
-RUN python -m playwright install chromium
 
 # Expose the public port (backend remains internal on 8000)
 EXPOSE 3000
