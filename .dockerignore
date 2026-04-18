@@ -18,3 +18,5 @@ __pycache__/
 .claude/
 apps/
 output/
+.omx/
+.playwright-cli/
