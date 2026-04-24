@@ -535,6 +535,70 @@ def test_log_job_match_result_includes_model_name_for_error(capsys):
     assert "model_name=gpt-5.4-mini" in captured.out
 
 
+
+def test_build_discord_notification_summary_message_reports_zero_results():
+    message = fitting_notifier._build_discord_notification_summary_message(
+        {
+            "profile_id": 7,
+            "display_name": "George Gu",
+            "eligible": 0,
+            "sent": 0,
+            "failed": 0,
+            "time": "2026-04-24 12:00:00",
+        }
+    )
+
+    assert "Fitting Notification Summary" in message
+    assert "Profile: George Gu" in message
+    assert "Eligible: 0" in message
+    assert "Sent: 0" in message
+    assert "Failed: 0" in message
+
+
+def test_send_zero_result_notification_summaries_sends_per_active_profile(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(
+        fitting_notifier.database,
+        "get_active_notification_profiles",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "profile_id": 1,
+                    "profile_key": "george",
+                    "display_name": "George Gu",
+                    "discord_channel_id": "chan-1",
+                    "discord_webhook_url": None,
+                },
+                {
+                    "profile_id": 2,
+                    "profile_key": "xingyou",
+                    "display_name": "Xingyou Li",
+                    "discord_channel_id": None,
+                    "discord_webhook_url": "https://discord.example/webhook",
+                },
+            ]
+        ),
+    )
+    sent_messages = []
+
+    def fake_send(content, *, channel_id=None, webhook_url=None):
+        sent_messages.append(
+            {"content": content, "channel_id": channel_id, "webhook_url": webhook_url}
+        )
+        return True, None
+
+    monkeypatch.setattr(fitting_notifier, "_send_discord_message", fake_send)
+
+    sent_count = fitting_notifier._send_zero_result_notification_summaries()
+
+    assert sent_count == 2
+    assert [message["channel_id"] for message in sent_messages] == ["chan-1", None]
+    assert sent_messages[1]["webhook_url"] == "https://discord.example/webhook"
+    assert all("Eligible: 0" in message["content"] for message in sent_messages)
+    assert "Profile: George Gu" in sent_messages[0]["content"]
+    assert "Profile: Xingyou Li" in sent_messages[1]["content"]
+
 def test_build_discord_job_match_message_includes_materials_launch_url(monkeypatch):
     monkeypatch.setenv("RESUME_MATCHER_BASE_URL", "https://materials.example.com")
     monkeypatch.setenv("MATERIALS_LINK_SECRET", "test-secret")

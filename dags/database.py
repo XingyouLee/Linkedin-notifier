@@ -1745,6 +1745,30 @@ def save_llm_matches(jobs_df: pd.DataFrame):
             )
 
 
+def get_active_notification_profiles() -> pd.DataFrame:
+    """Return active profiles that should receive fitting notification summaries."""
+    sync_profiles_from_source()
+    profile_mode_clause = _profile_mode_clause("p")
+
+    query = f"""
+        SELECT
+            p.id AS profile_id,
+            p.profile_key,
+            p.display_name,
+            p.discord_channel_id,
+            p.discord_webhook_url
+        FROM profiles p
+        WHERE {profile_mode_clause}
+          AND p.is_active = TRUE
+        ORDER BY p.id ASC
+    """
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            rows = cursor.fetchall()
+    return pd.DataFrame(rows)
+
+
 def get_jobs_to_notify() -> pd.DataFrame:
     """Get unnotified fit results that are ready to notify per profile."""
     sync_profiles_from_source()

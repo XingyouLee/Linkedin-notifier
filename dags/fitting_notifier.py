@@ -1144,6 +1144,64 @@ def _send_discord_message(
         return False, str(error)
 
 
+def _build_discord_notification_summary_message(profile_summary: dict) -> str:
+    summary_time = profile_summary.get("time") or datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    profile_label = (
+        profile_summary.get("display_name")
+        or profile_summary.get("profile_key")
+        or profile_summary.get("profile_id")
+        or "Unknown profile"
+    )
+    return (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 Fitting Notification Summary\n"
+        f"Profile: {profile_label}\n"
+        f"Time: {summary_time}\n"
+        f"Eligible: {int(profile_summary.get('eligible') or 0)}\n"
+        f"Sent: {int(profile_summary.get('sent') or 0)}\n"
+        f"Failed: {int(profile_summary.get('failed') or 0)}\n"
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
+def _send_zero_result_notification_summaries() -> int:
+    profiles_df = database.get_active_notification_profiles()
+    if profiles_df is None or profiles_df.empty:
+        print("No active profiles found for zero-result notification summary.")
+        return 0
+
+    summary_sent = 0
+    summary_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    profile_records = df_to_xcom_records(profiles_df)
+    for profile in profile_records:
+        profile_id = profile.get("profile_id")
+        summary_message = _build_discord_notification_summary_message(
+            {
+                "profile_id": profile_id,
+                "profile_key": profile.get("profile_key"),
+                "display_name": profile.get("display_name"),
+                "eligible": 0,
+                "sent": 0,
+                "failed": 0,
+                "time": summary_time,
+            }
+        )
+        delivered, summary_error = _send_discord_message(
+            summary_message,
+            channel_id=profile.get("discord_channel_id"),
+            webhook_url=profile.get("discord_webhook_url"),
+        )
+        if delivered:
+            summary_sent += 1
+        else:
+            print(
+                f"Failed to send zero-result summary message profile_id={profile_id}: {summary_error}"
+            )
+    return summary_sent
+
+
 def _build_discord_job_match_message(job: dict) -> str | None:
     profile_id = (
         int(job.get("profile_id")) if job.get("profile_id") is not None else None
@@ -2141,17 +2199,14 @@ def linkedin_fitting_notifier():
                 profile_summary["failed"] += 1
             time.sleep(1)
 
+        if eligible == 0:
+            summary_sent = _send_zero_result_notification_summaries()
+
         summary_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         for profile_id, profile_summary in profile_summaries.items():
-            summary_message = (
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "📌 Fitting Notification Summary\n"
-                f"Profile: {profile_summary['display_name']}\n"
-                f"Time: {summary_time}\n"
-                f"Eligible: {profile_summary['eligible']}\n"
-                f"Sent: {profile_summary['sent']}\n"
-                f"Failed: {profile_summary['failed']}\n"
-                "━━━━━━━━━━━━━━━━━━━━"
+            profile_summary["time"] = summary_time
+            summary_message = _build_discord_notification_summary_message(
+                profile_summary
             )
 
             delivered, summary_error = _send_discord_message(
