@@ -130,6 +130,23 @@ def _ensure_columns(df: pd.DataFrame, required_columns: Iterable[str]) -> pd.Dat
     return normalized_df
 
 
+def _coerce_fit_score(value) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not score == score:
+        return None
+    return int(round(max(0.0, min(100.0, score))))
+
+
+def _coerce_fit_decision(value) -> Optional[str]:
+    decision = str(value or "").strip()
+    return decision or None
+
+
 def _extract_fit_fields(
     llm_match: Optional[str],
 ) -> tuple[Optional[int], Optional[str]]:
@@ -137,7 +154,12 @@ def _extract_fit_fields(
         return None, None
     try:
         parsed = json.loads(llm_match)
-        return parsed.get("fit_score"), parsed.get("decision")
+        if not isinstance(parsed, dict):
+            return None, None
+        return (
+            _coerce_fit_score(parsed.get("fit_score")),
+            _coerce_fit_decision(parsed.get("decision")),
+        )
     except Exception:
         return None, None
 

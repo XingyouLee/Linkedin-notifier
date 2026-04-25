@@ -73,6 +73,44 @@ def _patch_connect(monkeypatch, cursor):
     monkeypatch.setattr(database, "sync_profiles_from_source", lambda force=False: 0)
 
 
+
+def test_extract_fit_fields_rejects_non_numeric_score():
+    payload = json.dumps({"fit_score": "Not Recommended", "decision": "Not Recommended"})
+
+    assert database._extract_fit_fields(payload) == (None, "Not Recommended")
+
+
+def test_save_llm_matches_does_not_write_decision_into_score(monkeypatch):
+    cursor = DummyCursor()
+    _patch_connect(monkeypatch, cursor)
+    df = pd.DataFrame(
+        [
+            {
+                "profile_id": 2,
+                "job_id": "4406173144",
+                "llm_match": json.dumps(
+                    {"fit_score": "Not Recommended", "decision": "Not Recommended"}
+                ),
+                "llm_match_error": None,
+            }
+        ]
+    )
+
+    database.save_llm_matches(df)
+
+    executemany_call = next(call for call in cursor.calls if call[0] == "executemany")
+    records = executemany_call[2]
+    assert records == [
+        (
+            json.dumps({"fit_score": "Not Recommended", "decision": "Not Recommended"}),
+            None,
+            None,
+            "Not Recommended",
+            2,
+            "4406173144",
+        )
+    ]
+
 def test_save_jobs_performs_upsert(monkeypatch):
     cursor = DummyCursor()
     _patch_connect(monkeypatch, cursor)
