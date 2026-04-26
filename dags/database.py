@@ -1055,6 +1055,52 @@ def init_db():
 
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS notification_runs (
+                    id BIGSERIAL PRIMARY KEY,
+                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+                    dag_id TEXT,
+                    dag_run_id TEXT,
+                    run_type TEXT NOT NULL DEFAULT 'discord_notification',
+                    source TEXT NOT NULL DEFAULT 'airflow',
+                    status TEXT NOT NULL DEFAULT 'started',
+                    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    completed_at TIMESTAMP,
+                    eligible_count INTEGER NOT NULL DEFAULT 0,
+                    sent_count INTEGER NOT NULL DEFAULT 0,
+                    failed_count INTEGER NOT NULL DEFAULT 0,
+                    skipped_count INTEGER NOT NULL DEFAULT 0,
+                    summary_status TEXT,
+                    summary_error TEXT,
+                    error TEXT,
+                    backfill_key TEXT UNIQUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_run_jobs (
+                    id BIGSERIAL PRIMARY KEY,
+                    run_id BIGINT NOT NULL REFERENCES notification_runs (id) ON DELETE CASCADE,
+                    profile_id BIGINT NOT NULL,
+                    job_id TEXT NOT NULL REFERENCES jobs (id) ON DELETE CASCADE,
+                    fit_score INTEGER,
+                    fit_decision TEXT,
+                    notify_status TEXT NOT NULL DEFAULT 'pending',
+                    notify_error TEXT,
+                    notified_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (run_id, profile_id, job_id),
+                    FOREIGN KEY (profile_id, job_id) REFERENCES profile_jobs (profile_id, job_id) ON DELETE CASCADE
+                )
+                """
+            )
+
+            cursor.execute(
+                """
                 CREATE INDEX IF NOT EXISTS idx_jobs_fit_status
                 ON jobs (fit_status)
                 """
@@ -1113,6 +1159,41 @@ def init_db():
                 """
                 CREATE INDEX IF NOT EXISTS idx_profile_jobs_job_id
                 ON profile_jobs (job_id)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notification_runs_profile_started
+                ON notification_runs (profile_id, started_at DESC)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notification_runs_dag_run_id
+                ON notification_runs (dag_run_id)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notification_run_jobs_run_id
+                ON notification_run_jobs (run_id)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notification_run_jobs_profile_job
+                ON notification_run_jobs (profile_id, job_id)
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_notification_run_jobs_run_status
+                ON notification_run_jobs (run_id, notify_status)
                 """
             )
 
@@ -1641,7 +1722,7 @@ def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
     profile_mode_clause = _profile_mode_clause("p")
 
     query = f"""
-        SELECT DISTINCT j.id, j.site, j.job_url, j.title, j.company, j.source_job_id,
+        SELECT j.id, j.site, j.job_url, j.title, j.company, j.source_job_id,
                pj.profile_id,
                q.status AS jd_status,
                COALESCE(q.attempts, 0) AS jd_attempts
@@ -2023,6 +2104,337 @@ def mark_job_notified(
                     """,
                     (status, error, profile_id, job_id),
                 )
+
+
+
+def create_notification_run(
+    profile_id: int,
+    *,
+    dag_id: Optional[str] = None,
+    dag_run_id: Optional[str] = None,
+    source: str = "airflow",
+    started_at: Optional[Any] = None,
+    backfill_key: Optional[str] = None,
+) -> int:
+    """Create or fetch a durable notification run row."""
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            if backfill_key:
+                cursor.execute(
+                    """
+                    INSERT INTO notification_runs (
+                        profile_id, dag_id, dag_run_id, source, started_at, backfill_key
+                    )
+                    VALUES (%s, %s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP), %s)
+                    ON CONFLICT (backfill_key) DO UPDATE SET
+                        updated_at = CURRENT_TIMESTAMP
+                    RETURNING id
+                    """,
+                    (profile_id, dag_id, dag_run_id, source, started_at, backfill_key),
+                )
+            else:
+                cursor.execute(
+                    """
+                    INSERT INTO notification_runs (
+                        profile_id, dag_id, dag_run_id, source, started_at
+                    )
+                    VALUES (%s, %s, %s, %s, COALESCE(%s, CURRENT_TIMESTAMP))
+                    RETURNING id
+                    """,
+                    (profile_id, dag_id, dag_run_id, source, started_at),
+                )
+            return int(cursor.fetchone()[0])
+
+
+def add_notification_run_jobs(run_id: int, jobs: Iterable[dict[str, Any]]) -> int:
+    """Add pending job attempts to a notification run idempotently."""
+    init_db()
+    records = []
+    for job in jobs or []:
+        profile_id = job.get("profile_id")
+        job_id = job.get("job_id") or job.get("id")
+        if profile_id is None or not job_id:
+            continue
+        records.append(
+            (
+                int(run_id),
+                int(profile_id),
+                str(job_id),
+                job.get("fit_score"),
+                job.get("fit_decision"),
+            )
+        )
+    if not records:
+        return 0
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.executemany(
+                """
+                INSERT INTO notification_run_jobs (
+                    run_id, profile_id, job_id, fit_score, fit_decision, notify_status
+                )
+                VALUES (%s, %s, %s, %s, %s, 'pending')
+                ON CONFLICT (run_id, profile_id, job_id) DO UPDATE SET
+                    fit_score = EXCLUDED.fit_score,
+                    fit_decision = EXCLUDED.fit_decision,
+                    updated_at = CURRENT_TIMESTAMP
+                """,
+                records,
+            )
+    return len(records)
+
+
+def claim_job_for_notification(profile_id: int, job_id: str, run_id: Optional[int] = None) -> bool:
+    """Atomically claim one profile job before sending a notification."""
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE profile_jobs
+                SET notify_status = 'notifying',
+                    notify_error = NULL,
+                    fit_status = 'notifying'
+                WHERE profile_id = %s
+                  AND job_id = %s
+                  AND notified_at IS NULL
+                  AND fit_status IN ('fit_done', 'notify_failed')
+                RETURNING profile_id, job_id
+                """,
+                (int(profile_id), str(job_id)),
+            )
+            claimed = cursor.fetchone() is not None
+            if not claimed and run_id is not None:
+                mark_notification_run_job(
+                    int(run_id),
+                    int(profile_id),
+                    str(job_id),
+                    status="skipped",
+                    error="already_claimed_or_notified",
+                    cursor=cursor,
+                )
+            return claimed
+
+
+def mark_notification_run_job(
+    run_id: int,
+    profile_id: int,
+    job_id: str,
+    *,
+    status: str,
+    error: Optional[str] = None,
+    cursor=None,
+) -> None:
+    """Update durable per-run job status."""
+    query = """
+        UPDATE notification_run_jobs
+        SET notify_status = %s,
+            notify_error = %s,
+            notified_at = CASE WHEN %s = 'sent' THEN CURRENT_TIMESTAMP ELSE notified_at END,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE run_id = %s
+          AND profile_id = %s
+          AND job_id = %s
+    """
+    params = (status, error, status, int(run_id), int(profile_id), str(job_id))
+    if cursor is not None:
+        cursor.execute(query, params)
+        return
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as own_cursor:
+            own_cursor.execute(query, params)
+
+
+def mark_job_notification_skipped(
+    profile_id: int,
+    job_id: str,
+    error: str = "discord_disabled_or_missing_config",
+) -> None:
+    """Mark a job as skipped without making it terminal/notified."""
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE profile_jobs
+                SET notify_status = 'skipped',
+                    notify_error = %s,
+                    fit_status = 'fit_done'
+                WHERE profile_id = %s
+                  AND job_id = %s
+                  AND notified_at IS NULL
+                """,
+                (error, int(profile_id), str(job_id)),
+            )
+
+
+def finalize_notification_run(
+    run_id: int,
+    *,
+    summary_status: Optional[str] = None,
+    summary_error: Optional[str] = None,
+    error: Optional[str] = None,
+) -> dict[str, Any]:
+    """Finalize run counts/status from notification_run_jobs."""
+    init_db()
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS eligible_count,
+                    COUNT(*) FILTER (WHERE notify_status = 'sent') AS sent_count,
+                    COUNT(*) FILTER (WHERE notify_status = 'failed') AS failed_count,
+                    COUNT(*) FILTER (WHERE notify_status = 'skipped') AS skipped_count
+                FROM notification_run_jobs
+                WHERE run_id = %s
+                """,
+                (int(run_id),),
+            )
+            counts = dict(cursor.fetchone() or {})
+            eligible = int(counts.get("eligible_count") or 0)
+            sent = int(counts.get("sent_count") or 0)
+            failed = int(counts.get("failed_count") or 0)
+            skipped = int(counts.get("skipped_count") or 0)
+            if eligible == 0:
+                status = "completed_zero_results"
+            elif failed > 0 and sent + skipped > 0:
+                status = "partial_failed"
+            elif failed > 0:
+                status = "failed"
+            else:
+                status = "completed"
+            cursor.execute(
+                """
+                UPDATE notification_runs
+                SET status = %s,
+                    completed_at = CURRENT_TIMESTAMP,
+                    eligible_count = %s,
+                    sent_count = %s,
+                    failed_count = %s,
+                    skipped_count = %s,
+                    summary_status = %s,
+                    summary_error = %s,
+                    error = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = %s
+                """,
+                (
+                    status,
+                    eligible,
+                    sent,
+                    failed,
+                    skipped,
+                    summary_status,
+                    summary_error,
+                    error,
+                    int(run_id),
+                ),
+            )
+            return {
+                "run_id": int(run_id),
+                "status": status,
+                "eligible_count": eligible,
+                "sent_count": sent,
+                "failed_count": failed,
+                "skipped_count": skipped,
+            }
+
+
+def backfill_notification_runs() -> dict[str, int]:
+    """Backfill historical notification run tables from notified_at minute buckets."""
+    init_db()
+    created_runs = 0
+    inserted_jobs = 0
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT
+                    pj.profile_id,
+                    date_trunc('minute', pj.notified_at) AS run_minute,
+                    MIN(pj.notified_at) AS started_at,
+                    MAX(pj.notified_at) AS completed_at
+                FROM profile_jobs pj
+                WHERE pj.notified_at IS NOT NULL
+                GROUP BY pj.profile_id, run_minute
+                ORDER BY run_minute ASC, pj.profile_id ASC
+                """
+            )
+            buckets = cursor.fetchall()
+            for bucket in buckets:
+                profile_id = int(bucket["profile_id"])
+                run_minute = bucket["run_minute"]
+                backfill_key = f"profile:{profile_id}:minute:{run_minute:%Y%m%d%H%M}"
+                cursor.execute(
+                    """
+                    INSERT INTO notification_runs (
+                        profile_id, source, status, started_at, completed_at, backfill_key
+                    )
+                    VALUES (%s, 'backfill_minute_bucket', 'completed', %s, %s, %s)
+                    ON CONFLICT (backfill_key) DO NOTHING
+                    RETURNING id
+                    """,
+                    (profile_id, bucket["started_at"], bucket["completed_at"], backfill_key),
+                )
+                row = cursor.fetchone()
+                if row:
+                    created_runs += 1
+                    run_id = int(row["id"])
+                else:
+                    cursor.execute(
+                        "SELECT id FROM notification_runs WHERE backfill_key = %s",
+                        (backfill_key,),
+                    )
+                    run_id = int(cursor.fetchone()["id"])
+                cursor.execute(
+                    """
+                    INSERT INTO notification_run_jobs (
+                        run_id, profile_id, job_id, fit_score, fit_decision,
+                        notify_status, notify_error, notified_at
+                    )
+                    SELECT
+                        %s,
+                        pj.profile_id,
+                        pj.job_id,
+                        pj.fit_score,
+                        pj.fit_decision,
+                        COALESCE(NULLIF(pj.notify_status, ''), 'sent'),
+                        pj.notify_error,
+                        pj.notified_at
+                    FROM profile_jobs pj
+                    WHERE pj.profile_id = %s
+                      AND date_trunc('minute', pj.notified_at) = %s
+                      AND pj.notified_at IS NOT NULL
+                    ON CONFLICT (run_id, profile_id, job_id) DO NOTHING
+                    """,
+                    (run_id, profile_id, run_minute),
+                )
+                inserted_jobs += cursor.rowcount
+                cursor.execute(
+                    """
+                    UPDATE notification_runs nr
+                    SET eligible_count = counts.eligible_count,
+                        sent_count = counts.sent_count,
+                        failed_count = counts.failed_count,
+                        skipped_count = counts.skipped_count,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM (
+                        SELECT
+                            COUNT(*) AS eligible_count,
+                            COUNT(*) FILTER (WHERE notify_status = 'sent') AS sent_count,
+                            COUNT(*) FILTER (WHERE notify_status = 'failed') AS failed_count,
+                            COUNT(*) FILTER (WHERE notify_status = 'skipped') AS skipped_count
+                        FROM notification_run_jobs
+                        WHERE run_id = %s
+                    ) counts
+                    WHERE nr.id = %s
+                    """,
+                    (run_id, run_id),
+                )
+    return {"created_runs": created_runs, "inserted_jobs": inserted_jobs}
 
 
 def save_jd_result(

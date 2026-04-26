@@ -204,3 +204,9 @@ def test_profile_company_blacklist_filter_applies_per_profile():
     )
 
     assert filtered["id"].tolist() == ["2", "3"]
+
+
+def test_get_jobs_needing_jd_does_not_use_invalid_distinct_order_by():
+    assert "SELECT DISTINCT" not in GET_JOBS_NEEDING_JD_SOURCE
+    assert "COALESCE(q.updated_at" in GET_JOBS_NEEDING_JD_SOURCE
+    assert "ORDER BY" in GET_JOBS_NEEDING_JD_SOURCE

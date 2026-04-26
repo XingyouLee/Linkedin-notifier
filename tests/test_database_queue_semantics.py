@@ -601,3 +601,50 @@ def test_sync_profiles_from_source_deactivates_using_normalized_profiles(monkeyp
     assert captured["synced"] == (normalized_profiles, True)
     assert captured["deactivated_keys"] == ["valid-profile"]
     assert captured["bootstrapped"] == normalized_profiles
+
+
+def test_claim_job_for_notification_sets_notifying_before_send(monkeypatch):
+    cursor = DummyCursor()
+    cursor._next_fetch = (7, "job-1")
+    _patch_connect(monkeypatch, cursor)
+
+    claimed = database.claim_job_for_notification(7, "job-1", run_id=42)
+
+    assert claimed is True
+    sql = cursor.calls[0][1]
+    params = cursor.calls[0][2]
+    assert "SET notify_status = 'notifying'" in sql
+    assert "AND notified_at IS NULL" in sql
+    assert "fit_status IN ('fit_done', 'notify_failed')" in sql
+    assert params == (7, "job-1")
+
+
+def test_add_notification_run_jobs_is_idempotent_per_run_job(monkeypatch):
+    cursor = DummyCursor()
+    _patch_connect(monkeypatch, cursor)
+
+    count = database.add_notification_run_jobs(
+        42,
+        [
+            {
+                "profile_id": 7,
+                "id": "job-1",
+                "fit_score": 82,
+                "fit_decision": "Strong Fit",
+            }
+        ],
+    )
+
+    assert count == 1
+    call = next(call for call in cursor.calls if call[0] == "executemany")
+    assert "ON CONFLICT (run_id, profile_id, job_id) DO UPDATE" in call[1]
+    assert call[2] == [(42, 7, "job-1", 82, "Strong Fit")]
+
+
+def test_notification_run_schema_is_created_by_airflow_init_db():
+    source = (Path(__file__).resolve().parents[1] / "dags" / "database.py").read_text()
+
+    assert "CREATE TABLE IF NOT EXISTS notification_runs" in source
+    assert "CREATE TABLE IF NOT EXISTS notification_run_jobs" in source
+    assert "idx_notification_runs_profile_started" in source
+    assert "idx_notification_run_jobs_profile_job" in source

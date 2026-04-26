@@ -1144,6 +1144,32 @@ def _send_discord_message(
         return False, str(error)
 
 
+def _has_discord_delivery_config(job_or_profile: dict) -> bool:
+    return bool(
+        (job_or_profile or {}).get("discord_webhook_url")
+        or os.getenv("DISCORD_WEBHOOK_URL")
+        or (
+            ((job_or_profile or {}).get("discord_channel_id") or os.getenv("DISCORD_CHANNEL_ID"))
+            and os.getenv("DISCORD_BOT_TOKEN")
+        )
+    )
+
+
+def _profile_id_value(record: dict):
+    value = (record or {}).get("profile_id")
+    return int(value) if value is not None else None
+
+
+def _group_jobs_by_profile(job_records: list[dict]) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = {}
+    for job in job_records or []:
+        profile_id = _profile_id_value(job)
+        if profile_id is None:
+            continue
+        grouped.setdefault(profile_id, []).append(job)
+    return grouped
+
+
 def _build_discord_notification_summary_message(profile_summary: dict) -> str:
     summary_time = profile_summary.get("time") or datetime.now().strftime(
         "%Y-%m-%d %H:%M:%S"
@@ -2142,90 +2168,137 @@ def linkedin_fitting_notifier():
         load_env()
 
         jobs_to_notify = _sort_notification_jobs(jobs_to_notify or [])
+        jobs_by_profile = _group_jobs_by_profile(jobs_to_notify)
+        profiles_df = database.get_active_notification_profiles()
+        profile_records = df_to_xcom_records(profiles_df) if profiles_df is not None else []
+        profiles_by_id = {
+            int(profile["profile_id"]): profile
+            for profile in profile_records
+            if profile.get("profile_id") is not None
+        }
+        for profile_id in jobs_by_profile:
+            profiles_by_id.setdefault(profile_id, {"profile_id": profile_id})
+
         eligible = len(jobs_to_notify)
         sent = 0
         failed = 0
+        skipped = 0
         summary_sent = 0
-        profile_summaries = {}
-
-        for job in jobs_to_notify:
-            profile_id = (
-                int(job.get("profile_id"))
-                if job.get("profile_id") is not None
-                else None
-            )
-            job_id = job.get("id")
-            profile_label = (
-                job.get("display_name") or job.get("profile_key") or profile_id
-            )
-
-            if profile_id is None or not job_id:
-                continue
-
-            profile_summary = profile_summaries.setdefault(
-                profile_id,
-                {
-                    "eligible": 0,
-                    "sent": 0,
-                    "failed": 0,
-                    "display_name": profile_label,
-                    "channel_id": job.get("discord_channel_id"),
-                    "webhook_url": job.get("discord_webhook_url"),
-                },
-            )
-            profile_summary["eligible"] += 1
-
-            message = _build_discord_job_match_message(job)
-            if not message:
-                continue
-
-            ok, error = _send_discord_message(
-                message,
-                channel_id=job.get("discord_channel_id"),
-                webhook_url=job.get("discord_webhook_url"),
-            )
-            if ok:
-                database.mark_job_notified(profile_id, job_id, status="sent")
-                sent += 1
-                profile_summary["sent"] += 1
-            else:
-                database.mark_job_notified(
-                    profile_id,
-                    job_id,
-                    status="failed",
-                    error=error,
-                )
-                failed += 1
-                profile_summary["failed"] += 1
-            time.sleep(1)
-
-        if eligible == 0:
-            summary_sent = _send_zero_result_notification_summaries()
-
+        run_results = []
         summary_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for profile_id, profile_summary in profile_summaries.items():
-            profile_summary["time"] = summary_time
-            summary_message = _build_discord_notification_summary_message(
-                profile_summary
-            )
 
-            delivered, summary_error = _send_discord_message(
-                summary_message,
-                channel_id=profile_summary.get("channel_id"),
-                webhook_url=profile_summary.get("webhook_url"),
+        for profile_id in sorted(profiles_by_id):
+            profile = profiles_by_id[profile_id]
+            profile_jobs = jobs_by_profile.get(profile_id, [])
+            run_id = database.create_notification_run(
+                profile_id,
+                dag_id="linkedin_fitting_notifier",
+                dag_run_id=os.getenv("AIRFLOW_CTX_DAG_RUN_ID"),
             )
-            if delivered:
-                summary_sent += 1
-            else:
-                print(
-                    f"Failed to send summary message profile_id={profile_id}: {summary_error}"
+            database.add_notification_run_jobs(run_id, profile_jobs)
+            profile_summary = {
+                "eligible": len(profile_jobs),
+                "sent": 0,
+                "failed": 0,
+                "display_name": (
+                    profile.get("display_name")
+                    or (profile_jobs[0].get("display_name") if profile_jobs else None)
+                    or profile.get("profile_key")
+                    or profile_id
+                ),
+                "profile_key": profile.get("profile_key"),
+                "channel_id": profile.get("discord_channel_id"),
+                "webhook_url": profile.get("discord_webhook_url"),
+                "time": summary_time,
+            }
+
+            for job in profile_jobs:
+                job_id = job.get("id")
+                if not job_id:
+                    continue
+                if not _has_discord_delivery_config(job):
+                    error = "discord_disabled_or_missing_config"
+                    database.mark_job_notification_skipped(profile_id, job_id, error=error)
+                    database.mark_notification_run_job(
+                        run_id, profile_id, job_id, status="skipped", error=error
+                    )
+                    skipped += 1
+                    continue
+                if not database.claim_job_for_notification(profile_id, job_id, run_id):
+                    skipped += 1
+                    continue
+
+                message = _build_discord_job_match_message(job)
+                if not message:
+                    error = "empty_discord_message"
+                    database.mark_job_notification_skipped(profile_id, job_id, error=error)
+                    database.mark_notification_run_job(
+                        run_id, profile_id, job_id, status="skipped", error=error
+                    )
+                    skipped += 1
+                    continue
+
+                ok, error = _send_discord_message(
+                    message,
+                    channel_id=job.get("discord_channel_id"),
+                    webhook_url=job.get("discord_webhook_url"),
                 )
+                if ok:
+                    database.mark_job_notified(profile_id, job_id, status="sent")
+                    database.mark_notification_run_job(
+                        run_id, profile_id, job_id, status="sent"
+                    )
+                    sent += 1
+                    profile_summary["sent"] += 1
+                else:
+                    database.mark_job_notified(
+                        profile_id,
+                        job_id,
+                        status="failed",
+                        error=error,
+                    )
+                    database.mark_notification_run_job(
+                        run_id, profile_id, job_id, status="failed", error=error
+                    )
+                    failed += 1
+                    profile_summary["failed"] += 1
+                time.sleep(1)
+
+            summary_status = "skipped"
+            summary_error = None
+            summary_message = _build_discord_notification_summary_message(profile_summary)
+            if _has_discord_delivery_config(profile):
+                delivered, summary_error = _send_discord_message(
+                    summary_message,
+                    channel_id=profile_summary.get("channel_id"),
+                    webhook_url=profile_summary.get("webhook_url"),
+                )
+                if delivered:
+                    summary_sent += 1
+                    summary_status = "sent"
+                else:
+                    summary_status = "failed"
+                    print(
+                        f"Failed to send summary message profile_id={profile_id}: {summary_error}"
+                    )
+            else:
+                summary_error = "discord_disabled_or_missing_config"
+
+            run_results.append(
+                database.finalize_notification_run(
+                    run_id,
+                    summary_status=summary_status,
+                    summary_error=summary_error,
+                )
+            )
 
         return {
             "eligible": eligible,
             "sent": sent,
             "failed": failed,
+            "skipped": skipped,
             "summary_sent": summary_sent,
+            "runs": run_results,
         }
 
     queue_items_task = claim_fitting_tasks()
