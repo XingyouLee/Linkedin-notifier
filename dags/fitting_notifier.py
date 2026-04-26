@@ -702,13 +702,14 @@ def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
                 )
             request_url = _normalize_text(entry.get("request_url") or entry.get("url"))
             api_key = _normalize_text(entry.get("api_key"))
-            api_key_env = _normalize_text(entry.get("api_key_env"))
             name = _normalize_text(entry.get("name")) or f"endpoint_{index + 1}"
-            if api_key is None and api_key_env:
-                api_key = _normalize_text(os.getenv(api_key_env))
-            if not request_url or not api_key:
+            if not request_url:
                 raise ValueError(
-                    f"invalid_llm_endpoints_json: entry {index} requires request_url and api_key/api_key_env"
+                    f"invalid_llm_endpoints_json: entry {index} requires request_url"
+                )
+            if not api_key:
+                raise ValueError(
+                    f"invalid_llm_endpoints_json: entry {index} requires api_key"
                 )
             entry_dict: dict[str, str] = {
                     "name": name,
@@ -720,23 +721,7 @@ def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
                 entry_dict["model"] = model
             endpoints.append(entry_dict)
 
-    if endpoints:
-        return endpoints
-
-    request_url = _normalize_text(os.getenv("FITTING_REQUEST_URL"))
-    api_key = _normalize_text(os.getenv("LLM_API_KEY")) or _normalize_text(
-        os.getenv("GMN_API_KEY")
-    )
-    if request_url and api_key:
-        return [
-            {
-                "name": "primary",
-                "request_url": request_url,
-                "api_key": api_key,
-            }
-        ]
-
-    return []
+    return endpoints
 
 
 def _request_llm_json_with_fallback(

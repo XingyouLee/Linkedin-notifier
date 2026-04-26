@@ -292,19 +292,17 @@ def test_parse_llm_endpoints_from_env_preserves_per_endpoint_model_override(monk
                 {
                     "name": "nc",
                     "request_url": "https://nowcoding.ai/v1/responses",
-                    "api_key_env": "NC_API_KEY",
+                    "api_key": "nc-key",
                 },
                 {
                     "name": "yuan",
                     "request_url": "https://us.mcxhm.cn/v1/responses",
-                    "api_key_env": "YUAN_API_KEY",
+                    "api_key": "yuan-key",
                     "model": "glm-5.1",
                 },
             ]
         ),
     )
-    monkeypatch.setenv("NC_API_KEY", "nc-key")
-    monkeypatch.setenv("YUAN_API_KEY", "yuan-key")
 
     endpoints = fitting_notifier._parse_llm_endpoints_from_env()
 
@@ -321,6 +319,34 @@ def test_parse_llm_endpoints_from_env_preserves_per_endpoint_model_override(monk
             "model": "glm-5.1",
         },
     ]
+
+
+def test_parse_llm_endpoints_from_env_rejects_api_key_env_indirection(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "nc",
+                    "request_url": "https://nowcoding.ai/v1/responses",
+                    "api_key_env": "NC_API_KEY",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setenv("NC_API_KEY", "nc-key")
+
+    with pytest.raises(ValueError, match="requires api_key"):
+        fitting_notifier._parse_llm_endpoints_from_env()
+
+
+def test_parse_llm_endpoints_from_env_ignores_legacy_single_endpoint_env(monkeypatch):
+    monkeypatch.delenv("LLM_ENDPOINTS_JSON", raising=False)
+    monkeypatch.setenv("FITTING_REQUEST_URL", "https://legacy.example/v1/responses")
+    monkeypatch.setenv("LLM_API_KEY", "legacy-key")
+    monkeypatch.setenv("GMN_API_KEY", "legacy-gmn-key")
+
+    assert fitting_notifier._parse_llm_endpoints_from_env() == []
 
 
 def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch):

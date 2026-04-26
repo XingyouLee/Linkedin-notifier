@@ -64,7 +64,8 @@ Common vars:
 - `JD_CLAIM_STALE_MINUTES`: reclaim stalled JD worker leases after this many minutes
 - `FITTING_MAX_ATTEMPTS`
 - `FITTING_CLAIM_STALE_MINUTES`: reclaim stalled fitting leases after this many minutes
-- `GMN_API_KEY`
+- `FITTING_MODEL_NAME`: default LLM model for fitting when a profile/endpoint does not override it
+- `LLM_ENDPOINTS_JSON`: JSON array of LLM endpoints, including provider API keys, e.g. `[{"name":"nc","request_url":"https://nowcoding.ai/v1/responses","api_key":"sk-..."}]`
 - `DISCORD_BOT_TOKEN` (used with per-profile Discord channel ids)
 - `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap for single-user mode)
 

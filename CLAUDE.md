@@ -88,7 +88,7 @@ When changing fit behavior, inspect both prompt construction and `_apply_fit_cap
 ## Environment
 - Runtime env files are expected at `.env` and/or `dags/.env`.
 - `JOBS_DB_URL` is required for the business database connection. Legacy split `JOBS_DB_HOST`, `JOBS_DB_PORT`, `JOBS_DB_USER`, `JOBS_DB_PASSWORD`, and `JOBS_DB_NAME` fallbacks should not be relied on.
-- Important runtime vars called out by the repo README include `JOBS_DB_URL`, `PROFILE_CONFIG_PATH`, scan tuning vars, JD/fitting stale-claim vars, `GMN_API_KEY`, Discord credentials, and `AIRFLOW_ADMIN_PASSWORD` for fixed SimpleAuthManager login bootstrapping.
+- Important runtime vars called out by the repo README include `JOBS_DB_URL`, `PROFILE_CONFIG_PATH`, scan tuning vars, JD/fitting stale-claim vars, `FITTING_MODEL_NAME`, `LLM_ENDPOINTS_JSON`, Discord credentials, and `AIRFLOW_ADMIN_PASSWORD` for fixed SimpleAuthManager login bootstrapping.
 - The Docker image installs Playwright Chromium during build (`Dockerfile`).
 - Zeabur deployment is a single Docker app service plus two Postgres databases: one for Airflow metadata (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`) and one for business data (`JOBS_DB_URL`).
 - In the single-container cloud deployment, keep `AIRFLOW__API__BASE_URL=http://127.0.0.1:8080` and `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`; do not point them at old multi-service hostnames.
