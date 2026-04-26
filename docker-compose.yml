@@ -8,6 +8,8 @@ services:
       POSTGRES_DB: ${AIRFLOW_DB_NAME:-airflow}
     volumes:
       - airflow-postgres-data:/var/lib/postgresql/data
+    ports:
+      - "${AIRFLOW_POSTGRES_HOST_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${AIRFLOW_DB_USER:-airflow} -d ${AIRFLOW_DB_NAME:-airflow}"]
       interval: 10s
@@ -49,6 +51,7 @@ services:
       DISCORD_CHANNEL_ID: ${DISCORD_CHANNEL_ID:-}
       DISCORD_WEBHOOK_URL: ${DISCORD_WEBHOOK_URL:-}
       CLOUD_DEPLOYMENT: ${CLOUD_DEPLOYMENT:-0}
+      LINKEDIN_TEST_MODE: ${LINKEDIN_TEST_MODE:-false}
       SCAN_REQUEST_PAGE_SIZE: ${SCAN_REQUEST_PAGE_SIZE:-10}
       SCAN_BETWEEN_REQUESTS_MIN_SEC: ${SCAN_BETWEEN_REQUESTS_MIN_SEC:-0.8}
       SCAN_BETWEEN_REQUESTS_MAX_SEC: ${SCAN_BETWEEN_REQUESTS_MAX_SEC:-1.8}

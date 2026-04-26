@@ -855,7 +855,9 @@ def init_db():
 
     with _connect() as conn:
         with conn.cursor() as cursor:
-            # Serialize schema bootstrap across concurrent task processes.
+            # Serialize schema bootstrap across concurrent task processes and avoid
+            # deadlocks with concurrent read-heavy DAG tasks.
+            cursor.execute("SET LOCAL lock_timeout = '30s'")
             cursor.execute("SELECT pg_advisory_xact_lock(%s)", (SCHEMA_LOCK_KEY,))
             cursor.execute(
                 """
