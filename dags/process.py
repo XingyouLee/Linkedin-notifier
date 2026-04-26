@@ -703,14 +703,7 @@ def linkedin_notifier():
     def filter_jobs():
         jd_max_attempts = int(os.getenv("JD_MAX_ATTEMPTS", "3"))
         df = database.get_jobs_needing_jd(max_attempts=jd_max_attempts)
-        blocked_companies = [
-            "Elevation Group",
-            "Capgemini",
-            "Jobster",
-            "Sogeti",
-            "CGI Nederland",
-            "Mercor",
-        ]
+        blocked_companies = database.DEFAULT_COMPANY_BLACKLIST
         if df is None or df.empty:
             print("No jobs currently need JD. Skip JD filtering stage.")
             return []
@@ -737,10 +730,12 @@ def linkedin_notifier():
 
         company_col = filtered_df["company"].fillna("").astype(str).str.strip()
         title_col = filtered_df["title"].fillna("").astype(str).str.lower()
+        default_title_pattern = "|".join(
+            re.escape(keyword) for keyword in database.DEFAULT_TITLE_EXCLUDE_KEYWORDS
+        )
         filtered_df = filtered_df[
             ~company_col.isin(blocked_companies)
-            & ~title_col.str.contains("senior", na=False)
-            & ~title_col.str.contains("medior", na=False)
+            & ~title_col.str.contains(default_title_pattern, na=False)
         ]
         profile_filters = database.get_profile_scan_filters()
         before_profile_filters = len(filtered_df)

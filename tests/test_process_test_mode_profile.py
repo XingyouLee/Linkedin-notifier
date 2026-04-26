@@ -73,8 +73,8 @@ def test_process_source_rewrites_test_ids_and_preserves_raw_source_job_id():
 
 def test_filter_jobs_checks_test_mode_before_applying_production_company_and_title_filters():
     assert "blocked_companies" in FILTER_JOBS_SOURCE
-    assert "senior" in FILTER_JOBS_SOURCE
-    assert "medior" in FILTER_JOBS_SOURCE
+    assert "DEFAULT_TITLE_EXCLUDE_KEYWORDS" in FILTER_JOBS_SOURCE
+    assert "DEFAULT_COMPANY_BLACKLIST" in FILTER_JOBS_SOURCE
 
     test_mode_markers = [
         marker

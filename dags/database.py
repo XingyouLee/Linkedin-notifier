@@ -29,6 +29,16 @@ DEFAULT_LINKEDIN_GEO_IDS = {
     "netherlands": "102890719",
 }
 
+DEFAULT_TITLE_EXCLUDE_KEYWORDS = ["senior", "medior"]
+DEFAULT_COMPANY_BLACKLIST = [
+    "Elevation Group",
+    "Capgemini",
+    "Jobster",
+    "Sogeti",
+    "CGI Nederland",
+    "Mercor",
+]
+
 DEFAULT_FIT_PROMPT_TEXT = (
     "If output is not valid JSON, regenerate until valid. "
     "Do not include markdown. Do not include trailing commas. "
@@ -1764,6 +1774,41 @@ def save_llm_matches(jobs_df: pd.DataFrame):
             )
 
 
+def seed_default_profile_scan_filters(profile_id: int) -> None:
+    """Populate default portal filters for a profile when none exist yet."""
+    ensure_web_portal_schema()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                "SELECT COUNT(*) FROM portal_profiletitleexcludekeyword WHERE profile_id = %s",
+                (profile_id,),
+            )
+            title_count = int((cursor.fetchone() or [0])[0] or 0)
+            if title_count == 0:
+                cursor.executemany(
+                    """
+                    INSERT INTO portal_profiletitleexcludekeyword (profile_id, keyword)
+                    VALUES (%s, %s)
+                    ON CONFLICT(profile_id, keyword) DO NOTHING
+                    """,
+                    [(profile_id, keyword) for keyword in DEFAULT_TITLE_EXCLUDE_KEYWORDS],
+                )
+            cursor.execute(
+                "SELECT COUNT(*) FROM portal_profilecompanyblacklist WHERE profile_id = %s",
+                (profile_id,),
+            )
+            company_count = int((cursor.fetchone() or [0])[0] or 0)
+            if company_count == 0:
+                cursor.executemany(
+                    """
+                    INSERT INTO portal_profilecompanyblacklist (profile_id, company)
+                    VALUES (%s, %s)
+                    ON CONFLICT(profile_id, company) DO NOTHING
+                    """,
+                    [(profile_id, company) for company in DEFAULT_COMPANY_BLACKLIST],
+                )
+
+
 def ensure_web_portal_schema():
     """Create DB-backed settings tables used by the Django web portal."""
     init_db()
@@ -1820,6 +1865,27 @@ def get_profile_scan_filters() -> dict[int, dict[str, list[str]]]:
     """Return per-profile scan filters configured by the Django portal."""
     ensure_web_portal_schema()
     filters: dict[int, dict[str, list[str]]] = {}
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT p.id
+                FROM profiles p
+                WHERE p.is_active = TRUE
+                  AND NOT EXISTS (
+                    SELECT 1 FROM portal_profiletitleexcludekeyword f
+                    WHERE f.profile_id = p.id
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1 FROM portal_profilecompanyblacklist f
+                    WHERE f.profile_id = p.id
+                  )
+                """
+            )
+            profiles_to_seed = [int(row["id"]) for row in cursor.fetchall()]
+    for profile_id in profiles_to_seed:
+        seed_default_profile_scan_filters(profile_id)
+
     with _connect(row_factory=dict_row) as conn:
         with conn.cursor() as cursor:
             cursor.execute(
