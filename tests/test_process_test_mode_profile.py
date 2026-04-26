@@ -113,3 +113,94 @@ def test_database_bootstrap_source_excludes_test_rows_and_test_profiles():
     assert "NOT LIKE 'test-%'" in BACKFILL_SOURCE
     assert "source_job_id IS NULL" in BACKFILL_SOURCE
     assert 'not profile_config.get("is_test_profile", False)' in BOOTSTRAP_FLAGGED_SOURCE
+
+
+def test_process_source_has_per_profile_filter_helpers():
+    assert "def _apply_title_keyword_filter" in PROCESS_SOURCE
+    assert "def _apply_company_blacklist_filter" in PROCESS_SOURCE
+    assert "database.get_profile_scan_filters()" in FILTER_JOBS_SOURCE
+    assert "profile_id" in FILTER_JOBS_SOURCE
+
+
+def test_profile_title_keyword_filter_applies_per_profile():
+    import pandas as pd
+    import re
+
+    namespace = {"pd": pd, "re": re}
+    helper_source = _slice(
+        PROCESS_SOURCE,
+        "def _apply_title_keyword_filter",
+        "def _normalize_source_job_id",
+    )
+    exec(helper_source, namespace)
+
+    jobs = pd.DataFrame(
+        [
+            {
+                "id": "1",
+                "profile_id": 1,
+                "title": "Senior Data Engineer",
+                "company": "GoodCo",
+            },
+            {
+                "id": "2",
+                "profile_id": 2,
+                "title": "Senior Data Engineer",
+                "company": "GoodCo",
+            },
+            {
+                "id": "3",
+                "profile_id": 1,
+                "title": "Junior Data Engineer",
+                "company": "GoodCo",
+            },
+        ]
+    )
+
+    filtered = namespace["_apply_title_keyword_filter"](
+        jobs, {1: {"title_keywords": ["Senior"], "companies": []}}
+    )
+
+    assert filtered["id"].tolist() == ["2", "3"]
+
+
+def test_profile_company_blacklist_filter_applies_per_profile():
+    import pandas as pd
+    import re
+
+    namespace = {"pd": pd, "re": re}
+    helper_source = _slice(
+        PROCESS_SOURCE,
+        "def _apply_company_blacklist_filter",
+        "def _normalize_source_job_id",
+    )
+    exec(helper_source, namespace)
+
+    jobs = pd.DataFrame(
+        [
+            {
+                "id": "1",
+                "profile_id": 1,
+                "title": "Data Engineer",
+                "company": "BadCo",
+            },
+            {
+                "id": "2",
+                "profile_id": 2,
+                "title": "Data Engineer",
+                "company": "BadCo",
+            },
+            {
+                "id": "3",
+                "profile_id": 1,
+                "title": "Data Engineer",
+                "company": "GoodCo",
+            },
+        ]
+    )
+
+    filtered = namespace["_apply_company_blacklist_filter"](
+        jobs, {1: {"title_keywords": [], "companies": ["BadCo"]}}
+    )
+
+    assert filtered["id"].tolist() == ["2", "3"]

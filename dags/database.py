@@ -1631,20 +1631,17 @@ def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
     profile_mode_clause = _profile_mode_clause("p")
 
     query = f"""
-        SELECT j.id, j.site, j.job_url, j.title, j.company, j.source_job_id,
+        SELECT DISTINCT j.id, j.site, j.job_url, j.title, j.company, j.source_job_id,
+               pj.profile_id,
                q.status AS jd_status,
                COALESCE(q.attempts, 0) AS jd_attempts
         FROM jobs j
+        JOIN profile_jobs pj ON pj.job_id = j.id
+        JOIN profiles p ON p.id = pj.profile_id
         LEFT JOIN jd_queue q ON q.job_id = j.id
         WHERE j.description IS NULL
           AND NULLIF(TRIM(COALESCE(j.job_url, '')), '') IS NOT NULL
-          AND EXISTS (
-                SELECT 1
-                FROM profile_jobs pj
-                JOIN profiles p ON p.id = pj.profile_id
-                WHERE pj.job_id = j.id
-                  AND {profile_mode_clause}
-              )
+          AND {profile_mode_clause}
           AND (
                 q.job_id IS NULL
                 OR q.status = 'pending'
@@ -1765,6 +1762,89 @@ def save_llm_matches(jobs_df: pd.DataFrame):
                 """,
                 records,
             )
+
+
+def ensure_web_portal_schema():
+    """Create DB-backed settings tables used by the Django web portal."""
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portal_profilenotificationpreference (
+                    id BIGSERIAL PRIMARY KEY,
+                    profile_id BIGINT NOT NULL UNIQUE REFERENCES profiles (id) ON DELETE CASCADE,
+                    discord_enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portal_profiletitleexcludekeyword (
+                    id BIGSERIAL PRIMARY KEY,
+                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+                    keyword VARCHAR(160) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (profile_id, keyword)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portal_profilecompanyblacklist (
+                    id BIGSERIAL PRIMARY KEY,
+                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
+                    company VARCHAR(255) NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (profile_id, company)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_portal_title_filter_profile
+                ON portal_profiletitleexcludekeyword (profile_id)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_portal_company_filter_profile
+                ON portal_profilecompanyblacklist (profile_id)
+                """
+            )
+
+
+def get_profile_scan_filters() -> dict[int, dict[str, list[str]]]:
+    """Return per-profile scan filters configured by the Django portal."""
+    ensure_web_portal_schema()
+    filters: dict[int, dict[str, list[str]]] = {}
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT profile_id, keyword
+                FROM portal_profiletitleexcludekeyword
+                ORDER BY profile_id, keyword
+                """
+            )
+            for row in cursor.fetchall():
+                filters.setdefault(int(row["profile_id"]), {"title_keywords": [], "companies": []})[
+                    "title_keywords"
+                ].append(row["keyword"])
+            cursor.execute(
+                """
+                SELECT profile_id, company
+                FROM portal_profilecompanyblacklist
+                ORDER BY profile_id, company
+                """
+            )
+            for row in cursor.fetchall():
+                filters.setdefault(int(row["profile_id"]), {"title_keywords": [], "companies": []})[
+                    "companies"
+                ].append(row["company"])
+    return filters
 
 
 def get_active_notification_profiles() -> pd.DataFrame:

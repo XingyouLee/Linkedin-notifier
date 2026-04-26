@@ -75,6 +75,40 @@ def _is_test_profile(value) -> bool:
     return _coerce_bool(value, False)
 
 
+def _apply_title_keyword_filter(jobs_df: pd.DataFrame, profile_filters: dict[int, dict[str, list[str]]]) -> pd.DataFrame:
+    if jobs_df is None or jobs_df.empty or "profile_id" not in jobs_df.columns:
+        return jobs_df
+    filtered = jobs_df.copy()
+    keep_mask = pd.Series(True, index=filtered.index)
+    title_col = filtered.get("title", pd.Series("", index=filtered.index)).fillna("").astype(str).str.lower()
+    for profile_id, config in (profile_filters or {}).items():
+        keywords = [str(keyword).strip().lower() for keyword in config.get("title_keywords", []) if str(keyword).strip()]
+        if not keywords:
+            continue
+        profile_mask = filtered["profile_id"].astype(str) == str(profile_id)
+        keyword_mask = pd.Series(False, index=filtered.index)
+        for keyword in keywords:
+            keyword_mask = keyword_mask | title_col.str.contains(re.escape(keyword), na=False)
+        keep_mask = keep_mask & ~(profile_mask & keyword_mask)
+    return filtered[keep_mask]
+
+
+def _apply_company_blacklist_filter(jobs_df: pd.DataFrame, profile_filters: dict[int, dict[str, list[str]]]) -> pd.DataFrame:
+    if jobs_df is None or jobs_df.empty or "profile_id" not in jobs_df.columns:
+        return jobs_df
+    filtered = jobs_df.copy()
+    keep_mask = pd.Series(True, index=filtered.index)
+    company_col = filtered.get("company", pd.Series("", index=filtered.index)).fillna("").astype(str).str.strip().str.lower()
+    for profile_id, config in (profile_filters or {}).items():
+        companies = {str(company).strip().lower() for company in config.get("companies", []) if str(company).strip()}
+        if not companies:
+            continue
+        profile_mask = filtered["profile_id"].astype(str) == str(profile_id)
+        company_mask = company_col.isin(companies)
+        keep_mask = keep_mask & ~(profile_mask & company_mask)
+    return filtered[keep_mask]
+
+
 def _normalize_source_job_id(source_job_id) -> str | None:
     if source_job_id is None:
         return None
@@ -687,7 +721,7 @@ def linkedin_notifier():
             )
             return []
 
-        filter_columns = ["id", "site", "job_url", "title", "company"]
+        filter_columns = ["id", "site", "job_url", "title", "company", "profile_id"]
         for col in filter_columns:
             if col not in df.columns:
                 df[col] = None
@@ -708,6 +742,16 @@ def linkedin_notifier():
             & ~title_col.str.contains("senior", na=False)
             & ~title_col.str.contains("medior", na=False)
         ]
+        profile_filters = database.get_profile_scan_filters()
+        before_profile_filters = len(filtered_df)
+        filtered_df = _apply_title_keyword_filter(filtered_df, profile_filters)
+        after_title_filter = len(filtered_df)
+        filtered_df = _apply_company_blacklist_filter(filtered_df, profile_filters)
+        print(
+            "Profile scan filters suppressed "
+            f"title={before_profile_filters - after_title_filter} "
+            f"company={after_title_filter - len(filtered_df)}"
+        )
         filtered_records = df_to_xcom_records(filtered_df)
         print(
             f"JD backlog candidates after filters: {len(filtered_records)} "
