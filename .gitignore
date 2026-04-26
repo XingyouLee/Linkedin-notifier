@@ -28,3 +28,6 @@ apps/**/*.app/
 apps/**/Products/
 apps/**/LinkedinNotifierApp */
 .omx/
+
+# Independent Django web UI repo (nested git repository)
+linkedin-notifier-web/
