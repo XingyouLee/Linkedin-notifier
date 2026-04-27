@@ -1858,8 +1858,13 @@ def save_llm_matches(jobs_df: pd.DataFrame):
 
 
 def seed_default_profile_scan_filters(profile_id: int) -> None:
-    """Populate default portal filters for a profile when none exist yet."""
-    ensure_web_portal_schema()
+    """Populate default portal filters for a profile when portal tables exist."""
+    if not _portal_tables_exist():
+        print(
+            "Django portal tables are missing; skip default scan filter seeding. "
+            "Run Django migrations to enable portal-managed filters."
+        )
+        return
     with _connect() as conn:
         with conn.cursor() as cursor:
             cursor.execute(
@@ -1893,60 +1898,57 @@ def seed_default_profile_scan_filters(profile_id: int) -> None:
 
 
 def ensure_web_portal_schema():
-    """Create DB-backed settings tables used by the Django web portal."""
+    """Compatibility hook for portal settings; Django owns portal migrations."""
     init_db()
+    if not _portal_tables_exist():
+        print(
+            "Django portal tables are missing; portal-managed filters are disabled. "
+            "Run Django migrations to enable them."
+        )
+
+
+PORTAL_TABLE_NAMES = [
+    "portal_profilenotificationpreference",
+    "portal_profiletitleexcludekeyword",
+    "portal_profilecompanyblacklist",
+]
+
+
+def _missing_portal_tables() -> list[str]:
+    """Return portal tables that are not present yet. Django owns these migrations."""
+    missing = []
     with _connect() as conn:
         with conn.cursor() as cursor:
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS portal_profilenotificationpreference (
-                    id BIGSERIAL PRIMARY KEY,
-                    profile_id BIGINT NOT NULL UNIQUE REFERENCES profiles (id) ON DELETE CASCADE,
-                    discord_enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            for table in PORTAL_TABLE_NAMES:
+                cursor.execute(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_name = %s
+                    )
+                    """,
+                    (table,),
                 )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS portal_profiletitleexcludekeyword (
-                    id BIGSERIAL PRIMARY KEY,
-                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
-                    keyword VARCHAR(160) NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE (profile_id, keyword)
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE TABLE IF NOT EXISTS portal_profilecompanyblacklist (
-                    id BIGSERIAL PRIMARY KEY,
-                    profile_id BIGINT NOT NULL REFERENCES profiles (id) ON DELETE CASCADE,
-                    company VARCHAR(255) NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    UNIQUE (profile_id, company)
-                )
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_portal_title_filter_profile
-                ON portal_profiletitleexcludekeyword (profile_id)
-                """
-            )
-            cursor.execute(
-                """
-                CREATE INDEX IF NOT EXISTS idx_portal_company_filter_profile
-                ON portal_profilecompanyblacklist (profile_id)
-                """
-            )
+                if not cursor.fetchone()[0]:
+                    missing.append(table)
+    return missing
+
+
+def _portal_tables_exist() -> bool:
+    """Return whether Django-managed portal tables are available."""
+    return not _missing_portal_tables()
 
 
 def get_profile_scan_filters() -> dict[int, dict[str, list[str]]]:
     """Return per-profile scan filters configured by the Django portal."""
-    ensure_web_portal_schema()
+    missing_tables = _missing_portal_tables()
+    if missing_tables:
+        print(
+            "Django portal tables are missing; use built-in scan filters only. "
+            f"Missing portal tables: {', '.join(missing_tables)}"
+        )
+        return {}
+
     filters: dict[int, dict[str, list[str]]] = {}
     with _connect(row_factory=dict_row) as conn:
         with conn.cursor() as cursor:

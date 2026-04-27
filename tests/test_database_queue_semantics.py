@@ -603,6 +603,66 @@ def test_sync_profiles_from_source_deactivates_using_normalized_profiles(monkeyp
     assert captured["bootstrapped"] == normalized_profiles
 
 
+
+def test_get_profile_scan_filters_returns_empty_when_portal_tables_missing(monkeypatch):
+    monkeypatch.setattr(
+        database,
+        "_missing_portal_tables",
+        lambda: ["portal_profiletitleexcludekeyword"],
+    )
+
+    assert database.get_profile_scan_filters() == {}
+
+
+def test_sync_profiles_from_source_does_not_require_portal_tables(monkeypatch):
+    called = {"sync": False}
+
+    monkeypatch.setattr(database, "init_db", lambda: None)
+    monkeypatch.setattr(
+        database,
+        "_missing_portal_tables",
+        lambda: ["portal_profiletitleexcludekeyword"],
+    )
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class Conn:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def cursor(self):
+            return Cursor()
+
+    monkeypatch.setattr(database, "_connect", lambda *args, **kwargs: Conn())
+
+    def fake_sync(cursor, force=False):
+        called["sync"] = True
+        return 3
+
+    monkeypatch.setattr(database, "_sync_profiles_from_source", fake_sync)
+
+    assert database.sync_profiles_from_source(force=True) == 3
+    assert called["sync"] is True
+
+
+def test_seed_default_profile_scan_filters_skips_when_portal_tables_missing(monkeypatch):
+    monkeypatch.setattr(database, "_portal_tables_exist", lambda: False)
+
+    def fail_connect(*args, **kwargs):
+        raise AssertionError("should not connect when portal tables are missing")
+
+    monkeypatch.setattr(database, "_connect", fail_connect)
+
+    database.seed_default_profile_scan_filters(123)
+
 def test_claim_job_for_notification_sets_notifying_before_send(monkeypatch):
     cursor = DummyCursor()
     cursor._next_fetch = (7, "job-1")

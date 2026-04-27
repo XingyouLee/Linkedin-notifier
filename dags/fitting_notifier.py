@@ -1271,7 +1271,18 @@ def _build_discord_job_match_message(job: dict) -> str | None:
 def linkedin_fitting_notifier():
     @task
     def claim_fitting_tasks():
-        claimed = database.claim_pending_fitting_tasks()
+        limit = None
+        if _is_test_mode_enabled():
+            raw_limit = os.getenv("LINKEDIN_TEST_MAX_FIT_JOBS") or os.getenv(
+                "LINKEDIN_TEST_MAX_JOBS", "10"
+            )
+            try:
+                limit = max(1, int(raw_limit))
+            except (TypeError, ValueError):
+                limit = 10
+        claimed = database.claim_pending_fitting_tasks(limit=limit)
+        if limit is not None:
+            print(f"Test mode fitting claim cap: limit={limit}")
         print(f"Fitting claim summary: claimed={len(claimed or [])}")
         return claimed
 

@@ -69,6 +69,49 @@ Common vars:
 - `DISCORD_BOT_TOKEN` (used with per-profile Discord channel ids)
 - `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap for single-user mode)
 
+## Airflow test mode
+
+`LINKEDIN_TEST_MODE=true` means running the real Airflow DAGs against the test-only profile rows. It is **not** the same as running `pytest`, and it is **not** the same as the helper script `scripts/verify_notification_runs_test_mode.py`. Use it when you want an end-to-end smoke run through the actual scheduler/tasks.
+
+Recommended smoke-test env:
+
+```env
+LINKEDIN_TEST_MODE=true
+LINKEDIN_TEST_MAX_JOBS=5
+LINKEDIN_TEST_MAX_SCAN_ROWS=5
+LINKEDIN_TEST_MAX_JD_JOBS=5
+LINKEDIN_TEST_MAX_FIT_JOBS=5
+```
+
+Then trigger the real DAG:
+
+```bash
+airflow dags trigger linkedin_notifier
+```
+
+Expected behavior:
+
+- `linkedin_notifier` only selects profiles marked `test_mode_only` / `is_test_profile`.
+- Scan/filter/JD/fitting paths still execute as real Airflow tasks.
+- Test-mode caps keep the smoke run small instead of processing the full test backlog.
+- `linkedin_notifier` should trigger `linkedin_fitting_notifier`.
+- `linkedin_fitting_notifier` should complete and create a notification run, including a `completed_zero_results` run when no jobs qualify.
+
+Cap variables:
+
+- `LINKEDIN_TEST_MAX_JOBS`: fallback cap used by test-mode stages when a stage-specific cap is not set.
+- `LINKEDIN_TEST_MAX_SCAN_ROWS`: max scanned rows kept before saving jobs/profile links.
+- `LINKEDIN_TEST_MAX_JD_JOBS`: max JD backlog records passed into the in-DAG JD worker.
+- `LINKEDIN_TEST_MAX_FIT_JOBS`: max fitting tasks queued/claimed in test mode.
+
+The helper script remains useful for a deterministic DB/Django contract check:
+
+```bash
+LINKEDIN_TEST_MODE=true python scripts/verify_notification_runs_test_mode.py
+```
+
+But that script is not a replacement for the real Airflow test-mode DAG run above.
+
 ## Multi-user config
 
 - The runtime now stores user-specific state in Postgres: `profiles`, `search_configs`, `search_terms`, and `profile_jobs`.
@@ -94,7 +137,6 @@ Common vars:
   - `search_configs`
   - `search_terms`
   - `profile_jobs`
-  - `fitting_queue` (legacy table, currently not used by DAG flow)
 
 ## Migrate existing SQLite data (one-time)
 

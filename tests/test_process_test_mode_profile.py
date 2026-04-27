@@ -122,6 +122,15 @@ def test_process_source_has_per_profile_filter_helpers():
     assert "profile_id" in FILTER_JOBS_SOURCE
 
 
+
+def test_process_source_caps_test_mode_workloads_before_jd_and_fitting():
+    assert "def _test_mode_cap" in PROCESS_SOURCE
+    assert "LINKEDIN_TEST_MAX_JOBS" in PROCESS_SOURCE
+    assert "LINKEDIN_TEST_MAX_SCAN_ROWS" in PROCESS_SOURCE
+    assert "LINKEDIN_TEST_MAX_JD_JOBS" in FILTER_JOBS_SOURCE
+    assert "LINKEDIN_TEST_MAX_FIT_JOBS" in PROCESS_SOURCE
+    assert "Test mode cap applied" in PROCESS_SOURCE
+
 def test_profile_title_keyword_filter_applies_per_profile():
     import pandas as pd
     import re

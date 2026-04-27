@@ -66,6 +66,29 @@ def _is_test_mode_enabled() -> bool:
     return _coerce_bool(os.getenv("LINKEDIN_TEST_MODE"), False)
 
 
+def _test_mode_cap(var_name: str, default: int) -> int | None:
+    """Return a positive row cap only while LINKEDIN_TEST_MODE is enabled."""
+    if not _is_test_mode_enabled():
+        return None
+    raw_value = os.getenv(var_name) or os.getenv("LINKEDIN_TEST_MAX_JOBS")
+    try:
+        cap = int(raw_value) if raw_value is not None else int(default)
+    except (TypeError, ValueError):
+        cap = int(default)
+    return max(1, cap)
+
+
+def _apply_test_mode_cap(records: list[dict], *, var_name: str, default: int, label: str) -> list[dict]:
+    cap = _test_mode_cap(var_name, default)
+    if cap is None or len(records) <= cap:
+        return records
+    print(
+        f"Test mode cap applied for {label}: keeping {cap} of {len(records)} "
+        f"records ({var_name} or LINKEDIN_TEST_MAX_JOBS)."
+    )
+    return records[:cap]
+
+
 def _is_test_profile(value) -> bool:
     if isinstance(value, dict):
         if "is_test_profile" in value:
@@ -684,6 +707,12 @@ def linkedin_notifier():
                 "profiles": profile_count,
             }
 
+        all_rows = _apply_test_mode_cap(
+            all_rows,
+            var_name="LINKEDIN_TEST_MAX_SCAN_ROWS",
+            default=10,
+            label="scan rows",
+        )
         scan_stats = _normalize_and_save_scan_rows(all_rows)
         print(
             "Scan stage progress: "
@@ -722,8 +751,16 @@ def linkedin_notifier():
         filtered_df = df[filter_columns].copy()
         if _is_test_mode_enabled():
             filtered_records = df_to_xcom_records(filtered_df)
+            total_records = len(filtered_records)
+            filtered_records = _apply_test_mode_cap(
+                filtered_records,
+                var_name="LINKEDIN_TEST_MAX_JD_JOBS",
+                default=10,
+                label="JD backlog",
+            )
             print(
                 f"JD backlog candidates in test mode: {len(filtered_records)} "
+                f"of {total_records} "
                 f"(production pre-JD filters bypassed, max_attempts={jd_max_attempts})"
             )
             return filtered_records
@@ -880,6 +917,14 @@ def linkedin_notifier():
         jobs_df = database.get_profile_jobs_ready_for_fitting()
         if jobs_df is None or jobs_df.empty:
             return {"queued": 0}
+
+        fitting_cap = _test_mode_cap("LINKEDIN_TEST_MAX_FIT_JOBS", 10)
+        if fitting_cap is not None and len(jobs_df) > fitting_cap:
+            print(
+                f"Test mode cap applied for fitting queue: keeping {fitting_cap} "
+                f"of {len(jobs_df)} rows (LINKEDIN_TEST_MAX_FIT_JOBS or LINKEDIN_TEST_MAX_JOBS)."
+            )
+            jobs_df = jobs_df.head(fitting_cap).copy()
 
         queued = database.enqueue_fitting_requests(jobs_df)
         print(f"Queued {queued} fitting requests")

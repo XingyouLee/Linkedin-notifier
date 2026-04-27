@@ -1,5 +1,6 @@
 import json
 import time
+from pathlib import Path
 
 import pytest
 import requests
@@ -673,3 +674,10 @@ def test_build_discord_job_match_message_omits_materials_url_without_config(monk
 
     assert message is not None
     assert "Materials:" not in message
+
+
+def test_fitting_notifier_source_caps_test_mode_claims():
+    source = Path("dags/fitting_notifier.py").read_text(encoding="utf-8")
+    assert "LINKEDIN_TEST_MAX_FIT_JOBS" in source
+    assert "claim_pending_fitting_tasks(limit=limit)" in source
+    assert "Test mode fitting claim cap" in source
