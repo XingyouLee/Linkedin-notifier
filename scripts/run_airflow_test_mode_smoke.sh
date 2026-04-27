@@ -59,7 +59,7 @@ _poll_dag_run_state() {
   local dag_id="$1"
   local run_id="$2"
   local state
-  state=$("${AIRFLOW_CMD[@]}" dags list-runs -d "${dag_id}" -o json 2>/dev/null | python3 -c "
+  state=$("${AIRFLOW_CMD[@]}" dags list-runs "${dag_id}" --no-backfill -o json 2>/dev/null | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for run in data:
@@ -119,7 +119,7 @@ echo "Waiting for linkedin_notifier run ${SCAN_RUN_ID} (timeout: ${MAX_WAIT_SECO
 SCAN_RESULT=$(_wait_for_run "linkedin_notifier" "${SCAN_RUN_ID}")
 
 # Find the triggered fitting run
-FITTING_RUN_ID=$("${AIRFLOW_CMD[@]}" dags list-runs -d linkedin_fitting_notifier -o json 2>/dev/null | python3 -c "
+FITTING_RUN_ID=$("${AIRFLOW_CMD[@]}" dags list-runs linkedin_fitting_notifier --no-backfill -o json 2>/dev/null | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
 for run in data:

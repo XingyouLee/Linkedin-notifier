@@ -745,3 +745,13 @@ def test_get_jobs_to_notify_selects_discord_enabled_when_portal_exists(monkeypat
     sql = cursor.calls[-1][1]
     assert "portal_profilenotificationpreference" in sql
     assert "discord_enabled" in sql
+
+
+def test_profile_job_user_workspace_schema_contract_is_declared():
+    source = (Path(__file__).resolve().parents[1] / "dags" / "database.py").read_text()
+
+    assert "user_status TEXT DEFAULT 'new'" in source
+    assert "user_note TEXT" in source
+    assert "user_status_updated_at TIMESTAMP" in source
+    assert "profile_jobs_user_status_check" in source
+    assert "user_status IN ('new', 'saved', 'dismissed', 'applied')" in source

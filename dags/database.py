@@ -1041,8 +1041,64 @@ def init_db():
                     fit_attempts INTEGER DEFAULT 0,
                     fit_last_error TEXT,
                     fit_updated_at TIMESTAMP,
+                    user_status TEXT DEFAULT 'new',
+                    user_note TEXT,
+                    user_status_updated_at TIMESTAMP,
                     PRIMARY KEY (profile_id, job_id)
                 )
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE profile_jobs
+                ADD COLUMN IF NOT EXISTS user_status TEXT DEFAULT 'new'
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE profile_jobs
+                ADD COLUMN IF NOT EXISTS user_note TEXT
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE profile_jobs
+                ADD COLUMN IF NOT EXISTS user_status_updated_at TIMESTAMP
+                """
+            )
+
+            cursor.execute(
+                """
+                UPDATE profile_jobs
+                SET user_status = 'new'
+                WHERE user_status IS NOT NULL
+                  AND user_status <> ''
+                  AND user_status NOT IN ('new', 'saved', 'dismissed', 'applied')
+                """
+            )
+
+            cursor.execute(
+                """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1
+                        FROM pg_constraint
+                        WHERE conname = 'profile_jobs_user_status_check'
+                          AND conrelid = 'profile_jobs'::regclass
+                    ) THEN
+                        ALTER TABLE profile_jobs
+                        ADD CONSTRAINT profile_jobs_user_status_check
+                        CHECK (
+                            user_status IS NULL
+                            OR user_status = ''
+                            OR user_status IN ('new', 'saved', 'dismissed', 'applied')
+                        );
+                    END IF;
+                END $$;
                 """
             )
 
