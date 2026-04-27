@@ -103,6 +103,7 @@ Cap variables:
 - `LINKEDIN_TEST_MAX_SCAN_ROWS`: max scanned rows kept before saving jobs/profile links.
 - `LINKEDIN_TEST_MAX_JD_JOBS`: max JD backlog records passed into the in-DAG JD worker.
 - `LINKEDIN_TEST_MAX_FIT_JOBS`: max fitting tasks queued/claimed in test mode.
+- `LINKEDIN_TEST_MAX_NOTIFY_JOBS`: max jobs sent to Discord in test mode (default 3); all successful LLM payloads are eligible regardless of fit decision.
 
 The helper script remains useful for a deterministic DB/Django contract check:
 
@@ -118,10 +119,20 @@ LINKEDIN_TEST_MAX_JOBS=3 \
 LINKEDIN_TEST_MAX_SCAN_ROWS=5 \
 LINKEDIN_TEST_MAX_JD_JOBS=5 \
 LINKEDIN_TEST_MAX_FIT_JOBS=5 \
+LINKEDIN_TEST_MAX_NOTIFY_JOBS=3 \
 ./scripts/run_airflow_test_mode_smoke.sh
 ```
 
-This submits the actual `linkedin_notifier` and `linkedin_fitting_notifier` DAGs. It is intentionally separate from `pytest`: use it when you need production-like pipeline evidence against the test-only profile rows.
+The smoke script now:
+- Guards `LINKEDIN_TEST_MODE=true` (exits with code 2 if not set).
+- Diagnoses Discord config: warns if `DISCORD_BOT_TOKEN` is missing.
+- Fails fast on `REQUIRE_DISCORD_VERIFICATION=true` when Discord config is incomplete (exit code 3).
+- Triggers `linkedin_notifier` with full test-mode conf.
+- Polls Airflow for both the scan DAG and the auto-triggered fitting DAG (configurable via `SMOKE_MAX_WAIT_SECONDS` and `SMOKE_POLL_INTERVAL`).
+- Prints a pass/fail summary with exit code 0 (all stages succeeded) or 1 (any stage failed or timed out).
+- Does **not** manually trigger `linkedin_fitting_notifier`: the scan DAG triggers it automatically. Triggering both can cause database DDL/queue deadlocks in local Airflow.
+
+This submits the actual `linkedin_notifier` DAG. It is intentionally separate from `pytest`: use it when you need production-like pipeline evidence against the test-only profile rows.
 
 ## Multi-user config
 
