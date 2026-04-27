@@ -708,3 +708,40 @@ def test_notification_run_schema_is_created_by_airflow_init_db():
     assert "CREATE TABLE IF NOT EXISTS notification_run_jobs" in source
     assert "idx_notification_runs_profile_started" in source
     assert "idx_notification_run_jobs_profile_job" in source
+
+
+def test_get_active_notification_profiles_selects_discord_enabled_when_portal_exists(monkeypatch):
+    cursor = DummyCursor()
+    _patch_connect(monkeypatch, cursor)
+    monkeypatch.setattr(database, "_portal_tables_exist", lambda: True)
+
+    database.get_active_notification_profiles()
+
+    sql = cursor.calls[-1][1]
+    assert "portal_profilenotificationpreference" in sql
+    assert "discord_enabled" in sql
+
+
+def test_get_active_notification_profiles_defaults_discord_enabled_without_portal(monkeypatch):
+    cursor = DummyCursor()
+    _patch_connect(monkeypatch, cursor)
+    monkeypatch.setattr(database, "_portal_tables_exist", lambda: False)
+
+    database.get_active_notification_profiles()
+
+    sql = cursor.calls[-1][1]
+    assert "TRUE AS discord_enabled" in sql
+    assert "portal_profilenotificationpreference" not in sql
+
+
+def test_get_jobs_to_notify_selects_discord_enabled_when_portal_exists(monkeypatch):
+    cursor = DummyCursor()
+    _patch_connect(monkeypatch, cursor)
+    monkeypatch.setattr(database, "_portal_tables_exist", lambda: True)
+    monkeypatch.setattr(database, "is_test_mode_enabled", lambda: False)
+
+    database.get_jobs_to_notify()
+
+    sql = cursor.calls[-1][1]
+    assert "portal_profilenotificationpreference" in sql
+    assert "discord_enabled" in sql

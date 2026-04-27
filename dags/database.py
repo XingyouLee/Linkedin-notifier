@@ -9,6 +9,8 @@ import pandas as pd
 import psycopg
 from psycopg.rows import dict_row
 
+from dags.runtime_utils import runtime_bool
+
 JOB_REQUIRED_COLUMNS = ["id", "site", "job_url", "title", "company", "source_job_id"]
 JD_QUEUE_COLUMNS = ["id", "job_url"]
 LLM_RESULT_COLUMNS = ["id", "llm_match", "llm_match_error"]
@@ -217,7 +219,7 @@ def _coerce_bool(value, default: bool = True) -> bool:
 
 
 def is_test_mode_enabled() -> bool:
-    return _coerce_bool(os.getenv(LINKEDIN_TEST_MODE_ENV_VAR), False)
+    return runtime_bool(LINKEDIN_TEST_MODE_ENV_VAR, False)
 
 
 def _profile_mode_clause(alias: str = "p") -> str:
@@ -2002,6 +2004,14 @@ def get_active_notification_profiles() -> pd.DataFrame:
     """Return active profiles that should receive fitting notification summaries."""
     sync_profiles_from_source()
     profile_mode_clause = _profile_mode_clause("p")
+    pref_join = ""
+    pref_column = "TRUE AS discord_enabled"
+    if _portal_tables_exist():
+        pref_join = """
+        LEFT JOIN portal_profilenotificationpreference pref
+          ON pref.profile_id = p.id
+        """
+        pref_column = "COALESCE(pref.discord_enabled, TRUE) AS discord_enabled"
 
     query = f"""
         SELECT
@@ -2009,8 +2019,10 @@ def get_active_notification_profiles() -> pd.DataFrame:
             p.profile_key,
             p.display_name,
             p.discord_channel_id,
-            p.discord_webhook_url
+            p.discord_webhook_url,
+            {pref_column}
         FROM profiles p
+        {pref_join}
         WHERE {profile_mode_clause}
           AND p.is_active = TRUE
         ORDER BY p.id ASC
@@ -2036,6 +2048,15 @@ def get_jobs_to_notify() -> pd.DataFrame:
           AND pj.fit_decision IN ('Strong Fit', 'Moderate Fit')
         """
 
+    pref_join = ""
+    pref_column = "TRUE AS discord_enabled"
+    if _portal_tables_exist():
+        pref_join = """
+        LEFT JOIN portal_profilenotificationpreference pref
+          ON pref.profile_id = p.id
+        """
+        pref_column = "COALESCE(pref.discord_enabled, TRUE) AS discord_enabled"
+
     query = f"""
         SELECT
             pj.profile_id,
@@ -2043,6 +2064,7 @@ def get_jobs_to_notify() -> pd.DataFrame:
             p.display_name,
             p.discord_channel_id,
             p.discord_webhook_url,
+            {pref_column},
             p.model_name,
             COALESCE(p.is_test_profile, FALSE) AS is_test_profile,
             j.id,
@@ -2060,6 +2082,7 @@ def get_jobs_to_notify() -> pd.DataFrame:
         FROM profile_jobs pj
         JOIN jobs j ON j.id = pj.job_id
         JOIN profiles p ON p.id = pj.profile_id
+        {pref_join}
         WHERE {profile_mode_clause}
           AND pj.notified_at IS NULL
           AND pj.fit_status IN ('fit_done', 'notify_failed')

@@ -13,7 +13,7 @@ import requests
 import time
 from dags import database
 from dags import materials_launch
-from dags.runtime_utils import df_to_xcom_records, load_env
+from dags.runtime_utils import df_to_xcom_records, load_env, runtime_bool, runtime_int
 
 
 load_env(override_if_missing=True)
@@ -447,7 +447,11 @@ def _coerce_bool(value) -> bool:
 
 
 def _is_test_mode_enabled() -> bool:
-    return _coerce_bool(os.getenv("LINKEDIN_TEST_MODE"))
+    return runtime_bool("LINKEDIN_TEST_MODE", False)
+
+
+def _test_mode_notification_limit() -> int:
+    return runtime_int("LINKEDIN_TEST_MAX_NOTIFY_JOBS", 3, minimum=1)
 
 
 def _normalize_string_list(values) -> list[str]:
@@ -702,20 +706,27 @@ def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
                 )
             request_url = _normalize_text(entry.get("request_url") or entry.get("url"))
             api_key = _normalize_text(entry.get("api_key"))
+            api_key_env = _normalize_text(entry.get("api_key_env"))
+            if not api_key and api_key_env:
+                api_key = _normalize_text(os.getenv(api_key_env))
             name = _normalize_text(entry.get("name")) or f"endpoint_{index + 1}"
             if not request_url:
                 raise ValueError(
                     f"invalid_llm_endpoints_json: entry {index} requires request_url"
                 )
             if not api_key:
+                if api_key_env:
+                    raise ValueError(
+                        f"invalid_llm_endpoints_json: entry {index} api_key_env {api_key_env} is unset"
+                    )
                 raise ValueError(
-                    f"invalid_llm_endpoints_json: entry {index} requires api_key"
+                    f"invalid_llm_endpoints_json: entry {index} requires api_key or api_key_env"
                 )
             entry_dict: dict[str, str] = {
-                    "name": name,
-                    "request_url": request_url,
-                    "api_key": api_key,
-                }
+                "name": name,
+                "request_url": request_url,
+                "api_key": api_key,
+            }
             model = _normalize_text(entry.get("model"))
             if model:
                 entry_dict["model"] = model
@@ -1129,7 +1140,24 @@ def _send_discord_message(
         return False, str(error)
 
 
-def _has_discord_delivery_config(job_or_profile: dict) -> bool:
+def _coerce_bool_value(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _is_discord_enabled(job_or_profile: dict) -> bool:
+    return _coerce_bool_value((job_or_profile or {}).get("discord_enabled"), True)
+
+
+def _has_discord_destination(job_or_profile: dict) -> bool:
     return bool(
         (job_or_profile or {}).get("discord_webhook_url")
         or os.getenv("DISCORD_WEBHOOK_URL")
@@ -1138,6 +1166,18 @@ def _has_discord_delivery_config(job_or_profile: dict) -> bool:
             and os.getenv("DISCORD_BOT_TOKEN")
         )
     )
+
+
+def _discord_skip_reason(job_or_profile: dict) -> str | None:
+    if not _is_discord_enabled(job_or_profile):
+        return "discord_disabled"
+    if not _has_discord_destination(job_or_profile):
+        return "discord_missing_destination"
+    return None
+
+
+def _has_discord_delivery_config(job_or_profile: dict) -> bool:
+    return _discord_skip_reason(job_or_profile) is None
 
 
 def _profile_id_value(record: dict):
@@ -1199,6 +1239,10 @@ def _send_zero_result_notification_summaries() -> int:
                 "time": summary_time,
             }
         )
+        skip_reason = _discord_skip_reason(profile)
+        if skip_reason:
+            print(f"Skipped zero-result summary profile_id={profile_id}: {skip_reason}")
+            continue
         delivered, summary_error = _send_discord_message(
             summary_message,
             channel_id=profile.get("discord_channel_id"),
@@ -1244,8 +1288,9 @@ def _build_discord_job_match_message(job: dict) -> str | None:
         job_id=str(job_id),
     )
 
+    header = "🧪 TEST Job Match" if _is_test_mode_enabled() else "🎯 Job Match"
     lines = [
-        "🎯 Job Match",
+        header,
         f"Profile: {profile_label}",
         f"ID: {job_id}",
         f"Title: {title}",
@@ -1273,13 +1318,12 @@ def linkedin_fitting_notifier():
     def claim_fitting_tasks():
         limit = None
         if _is_test_mode_enabled():
-            raw_limit = os.getenv("LINKEDIN_TEST_MAX_FIT_JOBS") or os.getenv(
-                "LINKEDIN_TEST_MAX_JOBS", "10"
+            limit = runtime_int(
+                "LINKEDIN_TEST_MAX_FIT_JOBS",
+                10,
+                fallback_key="LINKEDIN_TEST_MAX_JOBS",
+                minimum=1,
             )
-            try:
-                limit = max(1, int(raw_limit))
-            except (TypeError, ValueError):
-                limit = 10
         claimed = database.claim_pending_fitting_tasks(limit=limit)
         if limit is not None:
             print(f"Test mode fitting claim cap: limit={limit}")
@@ -2129,6 +2173,7 @@ def linkedin_fitting_notifier():
             "display_name",
             "discord_channel_id",
             "discord_webhook_url",
+            "discord_enabled",
             "id",
             "title",
             "company",
@@ -2144,11 +2189,19 @@ def linkedin_fitting_notifier():
 
         eligible_records = df_to_xcom_records(jobs_df[notify_columns])
         filtered_records = _filter_notification_jobs(eligible_records)
+        if _is_test_mode_enabled():
+            before_cap = len(filtered_records)
+            limit = _test_mode_notification_limit()
+            filtered_records = filtered_records[:limit]
+            print(
+                f"Test mode notification candidates: {len(filtered_records)} "
+                f"of {before_cap} successful fit payloads (limit={limit})"
+            )
         suppressed_count = len(eligible_records) - len(filtered_records)
         if suppressed_count > 0:
             if _is_test_mode_enabled():
                 print(
-                    f"Suppressed {suppressed_count} notification candidates because they lacked a successful fit payload in test mode."
+                    f"Suppressed {suppressed_count} notification candidates in test mode due to missing payload or test notification cap."
                 )
             else:
                 print(
@@ -2205,6 +2258,7 @@ def linkedin_fitting_notifier():
                 "profile_key": profile.get("profile_key"),
                 "channel_id": profile.get("discord_channel_id"),
                 "webhook_url": profile.get("discord_webhook_url"),
+                "discord_enabled": profile.get("discord_enabled"),
                 "time": summary_time,
             }
 
@@ -2212,8 +2266,9 @@ def linkedin_fitting_notifier():
                 job_id = job.get("id")
                 if not job_id:
                     continue
-                if not _has_discord_delivery_config(job):
-                    error = "discord_disabled_or_missing_config"
+                skip_reason = _discord_skip_reason(job)
+                if skip_reason:
+                    error = skip_reason
                     database.mark_job_notification_skipped(profile_id, job_id, error=error)
                     database.mark_notification_run_job(
                         run_id, profile_id, job_id, status="skipped", error=error
@@ -2263,7 +2318,8 @@ def linkedin_fitting_notifier():
             summary_status = "skipped"
             summary_error = None
             summary_message = _build_discord_notification_summary_message(profile_summary)
-            if _has_discord_delivery_config(profile):
+            summary_skip_reason = _discord_skip_reason(profile)
+            if summary_skip_reason is None:
                 delivered, summary_error = _send_discord_message(
                     summary_message,
                     channel_id=profile_summary.get("channel_id"),
@@ -2278,7 +2334,7 @@ def linkedin_fitting_notifier():
                         f"Failed to send summary message profile_id={profile_id}: {summary_error}"
                     )
             else:
-                summary_error = "discord_disabled_or_missing_config"
+                summary_error = summary_skip_reason
 
             run_results.append(
                 database.finalize_notification_run(

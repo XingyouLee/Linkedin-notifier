@@ -322,7 +322,7 @@ def test_parse_llm_endpoints_from_env_preserves_per_endpoint_model_override(monk
     ]
 
 
-def test_parse_llm_endpoints_from_env_rejects_api_key_env_indirection(monkeypatch):
+def test_parse_llm_endpoints_from_env_resolves_api_key_env(monkeypatch):
     monkeypatch.setenv(
         "LLM_ENDPOINTS_JSON",
         json.dumps(
@@ -337,7 +337,31 @@ def test_parse_llm_endpoints_from_env_rejects_api_key_env_indirection(monkeypatc
     )
     monkeypatch.setenv("NC_API_KEY", "nc-key")
 
-    with pytest.raises(ValueError, match="requires api_key"):
+    assert fitting_notifier._parse_llm_endpoints_from_env() == [
+        {
+            "name": "nc",
+            "request_url": "https://nowcoding.ai/v1/responses",
+            "api_key": "nc-key",
+        }
+    ]
+
+
+def test_parse_llm_endpoints_from_env_rejects_unset_api_key_env(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "nc",
+                    "request_url": "https://nowcoding.ai/v1/responses",
+                    "api_key_env": "NC_API_KEY",
+                }
+            ]
+        ),
+    )
+    monkeypatch.delenv("NC_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="api_key_env NC_API_KEY is unset"):
         fitting_notifier._parse_llm_endpoints_from_env()
 
 
@@ -625,6 +649,90 @@ def test_send_zero_result_notification_summaries_sends_per_active_profile(monkey
     assert all("Eligible: 0" in message["content"] for message in sent_messages)
     assert "Profile: George Gu" in sent_messages[0]["content"]
     assert "Profile: Xingyou Li" in sent_messages[1]["content"]
+
+
+def test_discord_skip_reason_distinguishes_disabled_and_missing(monkeypatch):
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("DISCORD_CHANNEL_ID", raising=False)
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+
+    assert fitting_notifier._discord_skip_reason({"discord_enabled": False, "discord_webhook_url": "https://discord.example/webhook"}) == "discord_disabled"
+    assert fitting_notifier._discord_skip_reason({"discord_enabled": True}) == "discord_missing_destination"
+    assert fitting_notifier._discord_skip_reason({"discord_enabled": True, "discord_webhook_url": "https://discord.example/webhook"}) is None
+
+
+def test_zero_result_summaries_skip_disabled_discord(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(
+        fitting_notifier.database,
+        "get_active_notification_profiles",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "profile_id": 1,
+                    "profile_key": "disabled",
+                    "display_name": "Disabled",
+                    "discord_channel_id": "chan-1",
+                    "discord_webhook_url": None,
+                    "discord_enabled": False,
+                }
+            ]
+        ),
+    )
+    sent_messages = []
+    monkeypatch.setattr(fitting_notifier, "_send_discord_message", lambda *args, **kwargs: sent_messages.append((args, kwargs)) or (True, None))
+
+    sent_count = fitting_notifier._send_zero_result_notification_summaries()
+
+    assert sent_count == 0
+    assert sent_messages == []
+
+
+def test_filter_notification_jobs_test_mode_allows_blockers_and_caps(monkeypatch):
+    monkeypatch.setenv("LINKEDIN_TEST_MODE", "true")
+    monkeypatch.setenv("LINKEDIN_TEST_MAX_NOTIFY_JOBS", "3")
+    jobs = [
+        {
+            "id": f"job-{index}",
+            "llm_match": json.dumps(
+                {
+                    "fit_score": index,
+                    "decision": "Not Recommended",
+                    "experience_check": {"experience_blocker": True},
+                }
+            ),
+            "llm_match_error": None,
+        }
+        for index in range(5)
+    ]
+
+    filtered = fitting_notifier._filter_notification_jobs(jobs)
+    capped = filtered[: fitting_notifier._test_mode_notification_limit()]
+
+    assert [job["id"] for job in filtered] == [f"job-{index}" for index in range(5)]
+    assert [job["id"] for job in capped] == ["job-0", "job-1", "job-2"]
+
+
+def test_build_discord_job_match_message_marks_test_mode(monkeypatch):
+    monkeypatch.setenv("LINKEDIN_TEST_MODE", "true")
+    monkeypatch.delenv("RESUME_MATCHER_BASE_URL", raising=False)
+    monkeypatch.delenv("MATERIALS_LINK_SECRET", raising=False)
+
+    message = fitting_notifier._build_discord_job_match_message(
+        {
+            "profile_id": 7,
+            "display_name": "LinkedIn Test Mode",
+            "id": "test-1",
+            "title": "Data Engineer",
+            "company": "Example",
+            "fit_score": 5,
+            "fit_decision": "Not Recommended",
+            "job_url": "https://example.test/job",
+        }
+    )
+
+    assert message.startswith("🧪 TEST Job Match")
 
 def test_build_discord_job_match_message_includes_materials_launch_url(monkeypatch):
     monkeypatch.setenv("RESUME_MATCHER_BASE_URL", "https://materials.example.com")

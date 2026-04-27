@@ -65,7 +65,7 @@ Common vars:
 - `FITTING_MAX_ATTEMPTS`
 - `FITTING_CLAIM_STALE_MINUTES`: reclaim stalled fitting leases after this many minutes
 - `FITTING_MODEL_NAME`: default LLM model for fitting when a profile/endpoint does not override it
-- `LLM_ENDPOINTS_JSON`: JSON array of LLM endpoints, including provider API keys, e.g. `[{"name":"nc","request_url":"https://nowcoding.ai/v1/responses","api_key":"sk-..."}]`
+- `LLM_ENDPOINTS_JSON`: JSON array of LLM endpoints, including provider API keys, e.g. `[{"name":"nc","request_url":"https://nowcoding.ai/v1/responses","api_key_env":"NC_API_KEY"}]`
 - `DISCORD_BOT_TOKEN` (used with per-profile Discord channel ids)
 - `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap for single-user mode)
 
@@ -110,7 +110,18 @@ The helper script remains useful for a deterministic DB/Django contract check:
 LINKEDIN_TEST_MODE=true python scripts/verify_notification_runs_test_mode.py
 ```
 
-But that script is not a replacement for the real Airflow test-mode DAG run above.
+For a real Airflow smoke run, use the bounded trigger helper from the project root or Airflow container:
+
+```bash
+LINKEDIN_TEST_MODE=true \
+LINKEDIN_TEST_MAX_JOBS=3 \
+LINKEDIN_TEST_MAX_SCAN_ROWS=5 \
+LINKEDIN_TEST_MAX_JD_JOBS=5 \
+LINKEDIN_TEST_MAX_FIT_JOBS=5 \
+./scripts/run_airflow_test_mode_smoke.sh
+```
+
+This submits the actual `linkedin_notifier` and `linkedin_fitting_notifier` DAGs. It is intentionally separate from `pytest`: use it when you need production-like pipeline evidence against the test-only profile rows.
 
 ## Multi-user config
 

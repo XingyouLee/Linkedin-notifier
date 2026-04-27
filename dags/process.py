@@ -13,7 +13,7 @@ from urllib.parse import urlencode
 
 import requests
 from dags import database
-from dags.runtime_utils import df_to_xcom_records, load_env
+from dags.runtime_utils import df_to_xcom_records, load_env, runtime_bool, runtime_int
 
 
 load_env()
@@ -63,19 +63,16 @@ def _coerce_bool(value, default: bool = False) -> bool:
 
 
 def _is_test_mode_enabled() -> bool:
-    return _coerce_bool(os.getenv("LINKEDIN_TEST_MODE"), False)
+    return runtime_bool("LINKEDIN_TEST_MODE", False)
 
 
 def _test_mode_cap(var_name: str, default: int) -> int | None:
     """Return a positive row cap only while LINKEDIN_TEST_MODE is enabled."""
     if not _is_test_mode_enabled():
         return None
-    raw_value = os.getenv(var_name) or os.getenv("LINKEDIN_TEST_MAX_JOBS")
-    try:
-        cap = int(raw_value) if raw_value is not None else int(default)
-    except (TypeError, ValueError):
-        cap = int(default)
-    return max(1, cap)
+    return runtime_int(
+        var_name, default, fallback_key="LINKEDIN_TEST_MAX_JOBS", minimum=1
+    )
 
 
 def _apply_test_mode_cap(records: list[dict], *, var_name: str, default: int, label: str) -> list[dict]:
@@ -958,7 +955,13 @@ def linkedin_notifier():
     trigger_fitting_notifier = TriggerDagRunOperator(
         task_id="trigger_fitting_notifier",
         trigger_dag_id="linkedin_fitting_notifier",
-        conf={"source_dag_run_id": "{{ dag_run.run_id }}"},
+        conf={
+            "source_dag_run_id": "{{ dag_run.run_id }}",
+            "LINKEDIN_TEST_MODE": "{{ dag_run.conf.get('LINKEDIN_TEST_MODE', false) }}",
+            "LINKEDIN_TEST_MAX_JOBS": "{{ dag_run.conf.get('LINKEDIN_TEST_MAX_JOBS', '') }}",
+            "LINKEDIN_TEST_MAX_FIT_JOBS": "{{ dag_run.conf.get('LINKEDIN_TEST_MAX_FIT_JOBS', '') }}",
+            "LINKEDIN_TEST_MAX_NOTIFY_JOBS": "{{ dag_run.conf.get('LINKEDIN_TEST_MAX_NOTIFY_JOBS', '') }}",
+        },
         wait_for_completion=False,
     )
     fitting_enqueue_meta >> trigger_fitting_notifier
