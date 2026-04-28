@@ -61,7 +61,11 @@ _poll_dag_run_state() {
   local state
   state=$("${AIRFLOW_CMD[@]}" dags list-runs "${dag_id}" --no-backfill -o json 2>/dev/null | python3 -c "
 import json, sys
-data = json.load(sys.stdin)
+raw = sys.stdin.read()
+start = raw.find('[{')
+if start == -1:
+    start = raw.find('[')
+data = json.loads(raw[start:]) if start != -1 else []
 for run in data:
     if run.get('run_id') == '${run_id}':
         print(run.get('state', ''))
@@ -121,7 +125,11 @@ SCAN_RESULT=$(_wait_for_run "linkedin_notifier" "${SCAN_RUN_ID}")
 # Find the triggered fitting run
 FITTING_RUN_ID=$("${AIRFLOW_CMD[@]}" dags list-runs linkedin_fitting_notifier --no-backfill -o json 2>/dev/null | python3 -c "
 import json, sys
-data = json.load(sys.stdin)
+raw = sys.stdin.read()
+start = raw.find('[{')
+if start == -1:
+    start = raw.find('[')
+data = json.loads(raw[start:]) if start != -1 else []
 for run in data:
     conf = run.get('conf', {}) or {}
     if conf.get('source_dag_run_id') == '${SCAN_RUN_ID}':
