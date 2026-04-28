@@ -667,7 +667,7 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
 
 @dag(
     start_date=datetime(2023, 1, 1),
-    schedule="0 */12 * * *",
+    schedule="0 0 * * *",
     catchup=False,
     is_paused_upon_creation=False,
     max_active_runs=1,
