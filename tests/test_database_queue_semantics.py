@@ -663,6 +663,22 @@ def test_seed_default_profile_scan_filters_skips_when_portal_tables_missing(monk
 
     database.seed_default_profile_scan_filters(123)
 
+
+def test_seed_default_profile_scan_filters_writes_created_at(monkeypatch):
+    cursor = DummyCursor()
+    cursor._next_fetch = (0,)
+    _patch_connect(monkeypatch, cursor)
+    monkeypatch.setattr(database, "_portal_tables_exist", lambda: True)
+
+    database.seed_default_profile_scan_filters(590)
+
+    executemany_sql = [call[1] for call in cursor.calls if call[0] == "executemany"]
+    assert len(executemany_sql) == 2
+    assert "portal_profiletitleexcludekeyword (profile_id, keyword, created_at)" in executemany_sql[0]
+    assert "portal_profilecompanyblacklist (profile_id, company, created_at)" in executemany_sql[1]
+    assert "CURRENT_TIMESTAMP" in executemany_sql[0]
+    assert "CURRENT_TIMESTAMP" in executemany_sql[1]
+
 def test_claim_job_for_notification_sets_notifying_before_send(monkeypatch):
     cursor = DummyCursor()
     cursor._next_fetch = (7, "job-1")

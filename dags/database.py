@@ -1933,8 +1933,8 @@ def seed_default_profile_scan_filters(profile_id: int) -> None:
             if title_count == 0:
                 cursor.executemany(
                     """
-                    INSERT INTO portal_profiletitleexcludekeyword (profile_id, keyword)
-                    VALUES (%s, %s)
+                    INSERT INTO portal_profiletitleexcludekeyword (profile_id, keyword, created_at)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP)
                     ON CONFLICT(profile_id, keyword) DO NOTHING
                     """,
                     [(profile_id, keyword) for keyword in DEFAULT_TITLE_EXCLUDE_KEYWORDS],
@@ -1947,8 +1947,8 @@ def seed_default_profile_scan_filters(profile_id: int) -> None:
             if company_count == 0:
                 cursor.executemany(
                     """
-                    INSERT INTO portal_profilecompanyblacklist (profile_id, company)
-                    VALUES (%s, %s)
+                    INSERT INTO portal_profilecompanyblacklist (profile_id, company, created_at)
+                    VALUES (%s, %s, CURRENT_TIMESTAMP)
                     ON CONFLICT(profile_id, company) DO NOTHING
                     """,
                     [(profile_id, company) for company in DEFAULT_COMPANY_BLACKLIST],
