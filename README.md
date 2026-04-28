@@ -23,13 +23,14 @@ The ongoing two-repo split treats this repository as the long-term home for **Li
 Notifier-owned responsibilities:
 
 - Airflow scanning, JD ingestion, fitting, and Discord notifications
-- `include/user_info/` source resumes + `profiles.json`
-- shared Postgres schema/migrations and `sync_profiles_from_source(force=True)` backfills
+- DB-authoritative profile/search/prompt/Discord configuration in Postgres
+- legacy `include/user_info/profiles.json` import/bootstrap support
+- shared Postgres schema/migrations and explicit legacy backfills
 - launch-token generation via `RESUME_MATCHER_BASE_URL` + `MATERIALS_LINK_SECRET`
 
 Resume Matcher becomes the separate deployable app that owns `/launch`, workspace sessions, editing flows, PDF generation, and its own `RESUME_MATCHER_SESSION_SECRET`. The matcher-side fallback to `MATERIALS_LINK_SECRET` is transitional only and should be removed after cutover.
 
-Before cutover, refresh canonical profile content with `sync_profiles_from_source(force=True)` and keep notifier-owned source resumes in `.md` or `.txt`; those are the formats this repo currently hydrates into `profiles.resume_text`.
+Profile configuration is now DB-authoritative. `include/user_info/profiles.json` is retained only for one-time bootstrap/import of legacy rows; normal DAG runtime reads do not sync it back into Postgres.
 
 ## Run locally
 
@@ -54,7 +55,7 @@ Ensure both files are covered by version-control and Docker ignores so secrets n
 Common vars:
 
 - `JOBS_DB_URL`: business DB DSN (for DAG tasks), e.g. `postgresql://jobs_app:jobs_pass@db.example.com:5432/jobsdb`
-- `PROFILE_CONFIG_PATH`: optional override for profile config file; defaults to `include/user_info/profiles.json`
+- `PROFILE_CONFIG_PATH`: optional legacy import/bootstrap file; defaults to `include/user_info/profiles.json` and is not auto-synced during normal DAG runtime once profiles exist in DB
 - `RESUME_MATCHER_BASE_URL`: public Resume Matcher base URL used for Discord deep links (`/launch?token=...`)
 - `MATERIALS_LINK_SECRET`: shared HMAC secret used to sign launch tokens that Resume Matcher verifies
 - `SCAN_REQUEST_PAGE_SIZE`, `SCAN_BETWEEN_REQUESTS_MIN_SEC`, `SCAN_BETWEEN_REQUESTS_MAX_SEC`
@@ -64,10 +65,10 @@ Common vars:
 - `JD_CLAIM_STALE_MINUTES`: reclaim stalled JD worker leases after this many minutes
 - `FITTING_MAX_ATTEMPTS`
 - `FITTING_CLAIM_STALE_MINUTES`: reclaim stalled fitting leases after this many minutes
-- `FITTING_MODEL_NAME`: default LLM model for fitting when a profile/endpoint does not override it
+- `FITTING_MODEL_NAME`: default LLM model for fitting; only a per-endpoint `model` in `LLM_ENDPOINTS_JSON` overrides it
 - `LLM_ENDPOINTS_JSON`: JSON array of LLM endpoints, including provider API keys, e.g. `[{"name":"nc","request_url":"https://nowcoding.ai/v1/responses","api_key_env":"NC_API_KEY"}]`
 - `DISCORD_BOT_TOKEN` (used with per-profile Discord channel ids)
-- `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap for single-user mode)
+- `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap only when the profiles table is empty and no legacy profile config file exists)
 
 ## Airflow test mode
 
@@ -138,11 +139,11 @@ This submits the actual `linkedin_notifier` DAG. It is intentionally separate fr
 
 - The runtime now stores user-specific state in Postgres: `profiles`, `search_configs`, `search_terms`, and `profile_jobs`.
 - Canonical job data stays shared in `jobs`; JD scraping stays shared in `jd_queue`; fit results and notifications are tracked per profile in `profile_jobs`.
-- Put user config in `include/user_info/profiles.json` and resumes in `include/user_info/resume/`.
-- DAG runs auto-sync the profile config JSON into Postgres at runtime; no separate manual sync script is required.
-- The loader checks `include/user_info/profiles.json` first so Airflow containers can see the config during local Astro runs.
-- `resume_path` values in the profile config are resolved relative to that file, so `resume/xingyouli.md` maps to `include/user_info/resume/xingyouli.md`.
-- Each profile can have its own `active` flag, optional `bootstrap_existing_jobs` one-time migration flag, `resume_path`, Discord destination, model name, full `fit_prompt` template, and one or more search configs with distinct terms.
+- Treat Postgres as the source of truth. Edit profile names, resumes, prompts, search terms, scan filters, and Discord destinations through DB/WebUI surfaces.
+- `include/user_info/profiles.json` is legacy/bootstrap input only. Airflow imports it automatically only when the `profiles` table is empty; otherwise DAG runtime never syncs it and will not overwrite WebUI/DB edits.
+- To intentionally re-import legacy profile JSON, run `database.sync_profiles_from_source(force=True)` from a controlled maintenance shell and understand that it overwrites profile/search fields from the file.
+- `resume_path` values in the legacy profile config are resolved relative to that file, so `resume/xingyouli.md` maps to `include/user_info/resume/xingyouli.md` during bootstrap/import.
+- Each profile can have its own `active` flag, optional `bootstrap_existing_jobs` one-time migration flag, `resume_path`/`resume_text`, Discord destination, full `fit_prompt` template, and one or more search configs with distinct terms.
 - Calibration notes for the 2026-04-16 experience-filtering pass live in `include/user_info/fit-calibration-2026-04-16.md`; use that document when tightening `Moderate Fit` prompt behavior without harming junior/plausible-mid recall.
 - Set `bootstrap_existing_jobs: true` only for the legacy profile that should inherit pre-multi-user `jobs` history; leave it `false` for newly added users.
 - Search config supports both `location` and optional `geo_id`; the scan flow now sends `keywords`, `location`, `geoId`, `distance`, `start`, and `f_TPR`.
@@ -204,7 +205,7 @@ Important notes:
 - Set `AIRFLOW__API__BASE_URL=http://127.0.0.1:8080`.
 - Set `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`.
 - Set `AIRFLOW__API_AUTH__JWT_SECRET` to the same long random secret for the whole app service.
-- `PROFILE_CONFIG_PATH` should point to `/usr/local/airflow/include/user_info/profiles.json` unless you deliberately move the config.
+- `PROFILE_CONFIG_PATH` is optional in cloud runtime; set it only if you need legacy empty-DB bootstrap/import from a non-default file.
 - `DISCORD_BOT_TOKEN` should be configured globally if Discord delivery is enabled.
 - `DISCORD_CHANNEL_ID` is only a fallback; profile-specific channel ids from config/database still take precedence.
 - `DISCORD_WEBHOOK_URL` can be left empty if you only use bot-token delivery.

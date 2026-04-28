@@ -19,7 +19,7 @@ The practical implication is that this calibration round should mostly improve *
 
 ## Guardrails for prompt tuning
 
-1. **`include/user_info/profiles.json` is the source of truth.** Runtime sync should copy changes into Postgres; do not treat DB-edited prompt text as canonical.
+1. **Historical note:** this calibration originally treated `include/user_info/profiles.json` as source of truth. Current runtime is DB-authoritative; use the DB/WebUI prompt fields as canonical and treat the JSON file only as legacy bootstrap/import input.
 2. **Use `fit_prompt` as the primary lever.** Only make small `candidate_summary` edits when they stay resume-grounded and clarify the baseline rather than weakening the candidate.
 3. **Protect junior / plausible-mid recall.** Do not solve noise by globally scoring down ambiguous jobs.
 4. **Downgrade aggressively only on explicit blocker signals**, especially:
@@ -57,7 +57,7 @@ When changing profile prompts again, re-check all of the following against a fre
 
 The clean ownership boundary in this area is:
 
-- prompt + baseline config: `include/user_info/profiles.json`
+- prompt + baseline config: DB/WebUI profile fields; `include/user_info/profiles.json` only for legacy bootstrap/import
 - prompt assembly and placeholder normalization: `dags/fitting_notifier.py` and `dags/database.py`
 - policy/regression coverage: `tests/test_fitting_notifier.py`, `tests/test_fitting_notifier_policy.py`, `tests/test_database_queue_semantics.py`
 

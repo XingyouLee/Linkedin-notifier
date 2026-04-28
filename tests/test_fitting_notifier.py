@@ -410,6 +410,18 @@ def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch
     ]
 
 
+def test_default_fitting_model_name_comes_only_from_env(monkeypatch):
+    monkeypatch.setenv("FITTING_MODEL_NAME", "gpt-5.5")
+
+    assert fitting_notifier._default_fitting_model_name() == "gpt-5.5"
+
+
+def test_fitting_notifier_does_not_read_profile_model_name_for_runtime_selection():
+    source = Path(fitting_notifier.__file__).read_text(encoding="utf-8")
+
+    assert 'profile_record.get("model_name")' not in source
+
+
 def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_all_endpoints_fail(
     monkeypatch,
 ):

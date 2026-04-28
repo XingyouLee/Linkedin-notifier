@@ -69,7 +69,7 @@ def _patch_connect(monkeypatch, cursor):
         return DummyConnection(cursor)
 
     monkeypatch.setattr(database, "_connect", _dummy_connect)
-    monkeypatch.setattr(database, "init_db", lambda: None)
+    monkeypatch.setattr(database, "init_db", lambda **kwargs: None)
     monkeypatch.setattr(database, "sync_profiles_from_source", lambda force=False: 0)
 
 
@@ -280,6 +280,43 @@ def test_load_profile_configs_from_file_hydrates_resume_text_from_markdown(tmp_p
     assert len(profiles) == 1
     assert profiles[0]["resume_path"] == str(resume_path.resolve())
     assert "Experience bullets" in (profiles[0].get("resume_text") or "")
+
+
+def test_file_backed_profiles_do_not_persist_model_name(monkeypatch):
+    monkeypatch.setenv("FITTING_MODEL_NAME", "gpt-5.5")
+
+    profiles = database._coerce_profile_configs(
+        [
+            {
+                "profile_key": "candidate",
+                "display_name": "Candidate",
+                "resume_text": "Resume",
+                "search_configs": [
+                    {
+                        "name": "default",
+                        "terms": ["data engineer"],
+                        "results_per_term": 1,
+                    }
+                ],
+            },
+            {
+                "profile_key": "explicit",
+                "display_name": "Explicit",
+                "resume_text": "Resume",
+                "model_name": "profile-model",
+                "search_configs": [
+                    {
+                        "name": "default",
+                        "terms": ["data engineer"],
+                        "results_per_term": 1,
+                    }
+                ],
+            },
+        ]
+    )
+
+    assert profiles[0]["model_name"] is None
+    assert profiles[1]["model_name"] is None
 
 
 def test_get_active_search_configs_preserves_zero_results_per_term(monkeypatch):
@@ -603,6 +640,73 @@ def test_sync_profiles_from_source_deactivates_using_normalized_profiles(monkeyp
     assert captured["bootstrapped"] == normalized_profiles
 
 
+def test_bootstrap_profiles_skips_legacy_source_when_profiles_exist(monkeypatch):
+    cursor = DummyCursor()
+    cursor._next_fetch = (2,)
+
+    def fail_load(*args, **kwargs):
+        raise AssertionError("profiles.json should not be read when DB has profiles")
+
+    monkeypatch.setattr(database, "_load_profile_configs_from_file", fail_load)
+
+    assert database._bootstrap_profiles_from_source_if_empty(cursor) == 0
+
+
+def test_runtime_profile_reads_do_not_sync_profiles_json(monkeypatch):
+    cursor = DummyCursor()
+    cursor._rows = [
+        {
+            "profile_id": 1,
+            "profile_key": "candidate",
+            "display_name": "Candidate",
+            "resume_path": None,
+            "resume_text": "Resume",
+            "discord_channel_id": "123",
+            "discord_webhook_url": None,
+            "model_name": None,
+            "is_test_profile": False,
+            "search_config_id": 10,
+            "search_config_name": "default",
+            "location": "Netherlands",
+            "geo_id": "102890719",
+            "distance": 25,
+            "hours_old": 24,
+            "results_per_term": 1,
+            "term": "data engineer",
+        }
+    ]
+
+    def fail_sync(*args, **kwargs):
+        raise AssertionError("runtime reads must not sync profiles.json")
+
+    def _dummy_connect(*args, **kwargs):
+        return DummyConnection(cursor)
+
+    monkeypatch.setattr(database, "init_db", lambda **kwargs: None)
+    monkeypatch.setattr(database, "_connect", _dummy_connect)
+    monkeypatch.setattr(database, "sync_profiles_from_source", fail_sync)
+
+    configs = database.get_active_search_configs()
+
+    assert configs[0]["profile_key"] == "candidate"
+    assert configs[0]["terms"] == ["data engineer"]
+
+
+def test_runtime_profile_query_functions_are_db_authoritative():
+    source = (Path(__file__).resolve().parents[1] / "dags" / "database.py").read_text()
+    runtime_functions = [
+        ("def get_active_search_configs(", "def upsert_profile_jobs("),
+        ("def claim_pending_fitting_tasks(", "def mark_fitting_done("),
+        ("def get_profile_jobs_ready_for_fitting(", "def get_jobs_ready_for_fitting("),
+        ("def get_profiles_by_ids(", "def save_llm_matches("),
+        ("def get_active_notification_profiles(", "def get_jobs_to_notify("),
+        ("def get_jobs_to_notify(", "def mark_job_notified("),
+    ]
+
+    for start, end in runtime_functions:
+        body = source[source.index(start) : source.index(end)]
+        assert "sync_profiles_from_source()" not in body
+
 
 def test_get_profile_scan_filters_returns_empty_when_portal_tables_missing(monkeypatch):
     monkeypatch.setattr(
@@ -617,7 +721,7 @@ def test_get_profile_scan_filters_returns_empty_when_portal_tables_missing(monke
 def test_sync_profiles_from_source_does_not_require_portal_tables(monkeypatch):
     called = {"sync": False}
 
-    monkeypatch.setattr(database, "init_db", lambda: None)
+    monkeypatch.setattr(database, "init_db", lambda **kwargs: None)
     monkeypatch.setattr(
         database,
         "_missing_portal_tables",

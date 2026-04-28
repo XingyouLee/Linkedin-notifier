@@ -228,6 +228,10 @@ def _summarize_logged_model_names(
     return fallback_model_name or "unknown"
 
 
+def _default_fitting_model_name() -> str:
+    return _normalize_text(os.getenv("FITTING_MODEL_NAME")) or "gpt-5.4"
+
+
 def _execute_prepared_fitting_items(
     prepared_items,
     *,
@@ -1421,10 +1425,7 @@ def linkedin_fitting_notifier():
             finalize_counts["failed"] += 1
 
         def _default_prepared_model_name(prepared: dict) -> str:
-            profile_record = prepared.get("profile_record") or {}
-            return profile_record.get("model_name") or os.getenv(
-                "FITTING_MODEL_NAME", "gpt-5.4"
-            )
+            return _default_fitting_model_name()
 
         def _record_transient_api_error(
             item,
@@ -1458,9 +1459,7 @@ def linkedin_fitting_notifier():
                 candidate_summary,
                 prompt_text=profile_record.get("fit_prompt_config"),
             )
-            model_name = profile_record.get("model_name") or os.getenv(
-                "FITTING_MODEL_NAME", "gpt-5.4"
-            )
+            model_name = _default_fitting_model_name()
 
             parsed = None
             last_error = None
@@ -1601,7 +1600,6 @@ def linkedin_fitting_notifier():
             "fit_prompt_config",
             "discord_channel_id",
             "discord_webhook_url",
-            "model_name",
         ]
         for col in required_profile_columns:
             if col not in profiles_df.columns:

@@ -410,7 +410,7 @@ def _default_profile_config() -> dict[str, Any]:
         "fit_prompt_text": _normalize_fit_prompt_text(None),
         "discord_channel_id": os.getenv("DISCORD_CHANNEL_ID"),
         "discord_webhook_url": os.getenv("DISCORD_WEBHOOK_URL"),
-        "model_name": os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
+        "model_name": None,
         "is_active": True,
         "is_test_profile": False,
         "search_configs": [
@@ -524,8 +524,7 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
                 ),
                 "discord_channel_id": profile_config.get("discord_channel_id"),
                 "discord_webhook_url": profile_config.get("discord_webhook_url"),
-                "model_name": profile_config.get("model_name")
-                or os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
+                "model_name": None,
                 "is_active": profile_is_active,
                 "is_test_profile": is_test_profile,
                 "search_configs": search_configs,
@@ -589,7 +588,7 @@ def _sync_profile_configs(
                 profile_config.get("fit_prompt_text"),
                 profile_config.get("discord_channel_id"),
                 profile_config.get("discord_webhook_url"),
-                profile_config.get("model_name"),
+                None,
                 profile_config.get("is_active", True),
                 profile_config.get("is_test_profile", False),
             ),
@@ -841,15 +840,46 @@ def _sync_profiles_from_source(cursor, *, force: bool = False) -> int:
 
 
 def sync_profiles_from_source(force: bool = False) -> int:
-    """Sync profile/search config state from user_info or fallback env defaults."""
-    init_db()
+    """Explicitly import legacy profile config into the DB.
+
+    Runtime DAG reads are DB-authoritative. This importer is intentionally
+    opt-in so edits made through the web UI are not overwritten by
+    include/user_info/profiles.json during normal task execution.
+    """
+    init_db(bootstrap_profiles=False)
 
     with _connect() as conn:
         with conn.cursor() as cursor:
             return _sync_profiles_from_source(cursor, force=force)
 
 
-def init_db():
+def _bootstrap_profiles_from_source_if_empty(cursor) -> int:
+    """Seed an empty DB once from legacy profile config or fallback env defaults."""
+    cursor.execute("SELECT COUNT(*) FROM profiles")
+    row = cursor.fetchone()
+    existing_profiles = int(row[0] if row else 0)
+    if existing_profiles > 0:
+        return 0
+
+    config_path = _resolve_profiles_config_path()
+    if config_path.exists():
+        profile_configs = _load_profile_configs_from_file(config_path)
+        normalized_profiles = _coerce_profile_configs(profile_configs)
+        synced_profiles = _sync_profile_configs(
+            cursor,
+            normalized_profiles,
+            already_normalized=True,
+        )
+        _bootstrap_flagged_profiles(cursor, normalized_profiles)
+        return synced_profiles
+
+    default_profile_config = _default_profile_config()
+    synced_profiles = _sync_profile_configs(cursor, [default_profile_config])
+    _backfill_default_profile_jobs(cursor, default_profile_config["profile_key"])
+    return synced_profiles
+
+
+def init_db(*, bootstrap_profiles: bool = True):
     """Ensure required tables/indexes exist without mutating hot business rows."""
     global _SCHEMA_INITIALIZED
     if _SCHEMA_INITIALIZED:
@@ -1257,7 +1287,8 @@ def init_db():
                 """
             )
 
-            _sync_profiles_from_source(cursor)
+            if bootstrap_profiles:
+                _bootstrap_profiles_from_source_if_empty(cursor)
     _SCHEMA_INITIALIZED = True
 
 
@@ -1338,7 +1369,7 @@ def upsert_profile_configs(profile_configs) -> int:
 
 def get_active_search_configs() -> list[dict[str, Any]]:
     """Return active search configs with their owning profile and terms."""
-    sync_profiles_from_source()
+    init_db()
     profile_mode_clause = _profile_mode_clause("p")
 
     query = f"""
@@ -1387,8 +1418,7 @@ def get_active_search_configs() -> list[dict[str, Any]]:
                 "resume_text": row["resume_text"],
                 "discord_channel_id": row["discord_channel_id"],
                 "discord_webhook_url": row["discord_webhook_url"],
-                "model_name": row["model_name"]
-                or os.getenv("FITTING_MODEL_NAME", "gpt-5.4"),
+                "model_name": row["model_name"],
                 "is_test_profile": bool(row.get("is_test_profile")),
                 "search_config_id": search_config_id,
                 "search_config_name": row["search_config_name"],
@@ -1552,7 +1582,7 @@ def enqueue_fitting_requests(jobs_df: pd.DataFrame):
 
 def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     """Atomically claim pending fitting tasks for processing."""
-    sync_profiles_from_source()
+    init_db()
     stale_minutes = _get_positive_int_env("FITTING_CLAIM_STALE_MINUTES", 30)
     profile_mode_clause = _profile_mode_clause("p")
 
@@ -1822,7 +1852,7 @@ def get_jobs_needing_jd(max_attempts: int = 3) -> pd.DataFrame:
 
 def get_profile_jobs_ready_for_fitting() -> pd.DataFrame:
     """Fetch profile jobs that already have JD and still need to enter fitting."""
-    sync_profiles_from_source()
+    init_db()
     profile_mode_clause = _profile_mode_clause("p")
 
     query = f"""
@@ -1859,7 +1889,7 @@ def get_profiles_by_ids(profile_ids: List[int]) -> pd.DataFrame:
     """Fetch profiles by id list."""
     if not profile_ids:
         return pd.DataFrame()
-    sync_profiles_from_source()
+    init_db()
 
     normalized_ids = [int(profile_id) for profile_id in profile_ids]
     query = "SELECT * FROM profiles WHERE id = ANY(%s)"
@@ -2058,7 +2088,7 @@ def get_profile_scan_filters() -> dict[int, dict[str, list[str]]]:
 
 def get_active_notification_profiles() -> pd.DataFrame:
     """Return active profiles that should receive fitting notification summaries."""
-    sync_profiles_from_source()
+    init_db()
     profile_mode_clause = _profile_mode_clause("p")
     pref_join = ""
     pref_column = "TRUE AS discord_enabled"
@@ -2092,7 +2122,7 @@ def get_active_notification_profiles() -> pd.DataFrame:
 
 def get_jobs_to_notify() -> pd.DataFrame:
     """Get unnotified fit results that are ready to notify per profile."""
-    sync_profiles_from_source()
+    init_db()
     profile_mode_clause = _profile_mode_clause("p")
     if is_test_mode_enabled():
         decision_filter = """
