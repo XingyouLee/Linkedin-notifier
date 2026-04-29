@@ -839,18 +839,18 @@ def linkedin_notifier():
 
         total = len(job_ids)
         min_loops_needed = math.ceil(total / worker_batch_size) + idle_loop_limit
-        max_loops = int(
-            os.getenv("JD_WORKER_MAX_LOOPS", str(max(max_loops, min_loops_needed)))
-        )
-        if max_loops <= 0:
-            max_loops = min_loops_needed
+        configured_max_loops = int(os.getenv("JD_WORKER_MAX_LOOPS", str(max_loops)))
+        if configured_max_loops <= 0:
+            configured_max_loops = min_loops_needed
+        max_loops = max(configured_max_loops, min_loops_needed)
 
         total_processed = 0
         idle_loops = 0
 
         print(
             f"JD worker config: batch_size={worker_batch_size}, "
-            f"max_loops={max_loops}, idle_loop_limit={idle_loop_limit}, "
+            f"max_loops={max_loops}, configured_max_loops={configured_max_loops}, "
+            f"idle_loop_limit={idle_loop_limit}, "
             f"min_loops_needed={min_loops_needed}, total={total}"
         )
 
