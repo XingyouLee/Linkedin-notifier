@@ -176,24 +176,14 @@ def _extract_fit_fields(
         return None, None
 
 
-def _default_resume_path_candidates() -> list[str]:
-    dags_dir = Path(__file__).resolve().parent
-    return [
-        str((dags_dir / "resume.md").resolve()),
-        str((dags_dir.parent / "resume.md").resolve()),
-    ]
-
-
 def _resolve_default_resume_path() -> Optional[str]:
     configured_path = os.getenv("RESUME_PATH")
-    candidates = [configured_path] if configured_path else []
-    candidates.extend(_default_resume_path_candidates())
-    for candidate in candidates:
-        if not candidate:
-            continue
-        resolved = Path(candidate).expanduser().resolve()
-        if resolved.exists():
-            return str(resolved)
+    if not configured_path:
+        return None
+
+    resolved = Path(configured_path).expanduser().resolve()
+    if resolved.exists():
+        return str(resolved)
     return configured_path
 
 
@@ -353,9 +343,6 @@ def _collect_matcher_cutover_validation_errors(
         resume_text = str(profile_config.get("resume_text") or "").strip()
 
         if not resume_path:
-            errors.append(
-                f"{profile_key} ({display_name}): resume_path is required for {MATCHER_CUTOVER_LABEL}"
-            )
             continue
 
         suffix = Path(resume_path).suffix.lower()
@@ -381,7 +368,8 @@ def _validate_matcher_cutover_profiles(profile_configs: list[dict[str, Any]]) ->
     bullet_list = "\n".join(f"- {error}" for error in errors)
     raise ValueError(
         f"{MATCHER_CUTOVER_LABEL} validation failed.\n"
-        "Active notifier-owned profiles must use markdown/txt resumes and produce canonical resume_text.\n"
+        "Profiles may provide canonical resume_text directly, or hydrate it from a markdown/txt resume_path. "
+        "When both are omitted, the existing database resume is preserved.\n"
         "Fix the following profiles before running sync_profiles_from_source(force=True):\n"
         f"{bullet_list}"
     )
@@ -566,7 +554,7 @@ def _sync_profile_configs(
             ON CONFLICT(profile_key) DO UPDATE SET
                 display_name = EXCLUDED.display_name,
                 resume_path = EXCLUDED.resume_path,
-                resume_text = EXCLUDED.resume_text,
+                resume_text = COALESCE(EXCLUDED.resume_text, profiles.resume_text),
                 candidate_summary_config = EXCLUDED.candidate_summary_config,
                 fit_prompt_config = EXCLUDED.fit_prompt_config,
                 discord_channel_id = EXCLUDED.discord_channel_id,

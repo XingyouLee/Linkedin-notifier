@@ -55,6 +55,14 @@ def test_collect_matcher_cutover_validation_errors_flags_non_text_and_empty_prof
     assert any("missing-text (Missing Text)" in error and "resume_text is empty" in error for error in errors)
 
 
+def test_collect_matcher_cutover_validation_errors_allows_db_only_resume():
+    profile = _profile(resume_path=None, resume_text=None)
+
+    errors = database._collect_matcher_cutover_validation_errors([profile])
+
+    assert errors == []
+
+
 def test_collect_matcher_cutover_validation_errors_ignores_inactive_profiles():
     errors = database._collect_matcher_cutover_validation_errors(
         [

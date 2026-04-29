@@ -390,24 +390,15 @@ def _load_resume_text(
     if resume_text:
         return str(resume_text), None
 
-    resume_candidates = []
     if resume_path:
-        resume_candidates.append(os.path.abspath(os.path.expanduser(resume_path)))
-    resume_candidates.extend(
-        [
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "resume.md")),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "resume.md")),
-        ]
-    )
-    resume_error = None
-    for resume_path in resume_candidates:
         try:
-            with open(resume_path, "r", encoding="utf-8") as file_handle:
+            resolved_resume_path = os.path.abspath(os.path.expanduser(resume_path))
+            with open(resolved_resume_path, "r", encoding="utf-8") as file_handle:
                 return file_handle.read(), None
         except Exception as error:
-            resume_error = error
+            return None, f"resume_read_error: {error}"
 
-    return None, f"resume_read_error: {resume_error}"
+    return None, "resume_text_missing"
 
 
 def _normalize_text(value) -> str | None:

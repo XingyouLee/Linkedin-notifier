@@ -4,7 +4,6 @@
     "display_name": "Xingyou Li",
     "active": true,
     "bootstrap_existing_jobs": true,
-    "resume_path": "resume/xingyouli.md",
     "discord_channel_id": "1476129860450779147",
     "candidate_summary": {
       "summary": "Early-career data engineer in the Netherlands with one internship plus strong graduate-level and project-based data engineering work. Strongest on Python, SQL, Spark, Databricks, Airflow, Azure, ETL/ELT, and warehouse-oriented analytics engineering. Good fit for junior data engineering, analytics engineering, ETL/ELT, and Python-heavy backend/data workflow roles where pipelines or transformations are central. Adjacent BI/analyst roles are only credible when SQL/Python transformation work is substantial rather than dashboard/reporting-led. Not a strong fit for senior ownership, deep architecture leadership, pure reporting/BI ownership, or jobs that require fluent Dutch.",
@@ -120,7 +119,6 @@
     "display_name": "George Gu",
     "active": true,
     "bootstrap_existing_jobs": false,
-    "resume_path": "resume/georgegu.md",
     "discord_channel_id": "1486781670505054268",
     "candidate_summary": {
       "summary": "Early-career software engineer with roughly two years of meaningful professional engineering experience across backend APIs, product-facing web features, authentication workflows, automation tooling, and large-scale data pipelines. Strongest on Java, Python, SQL, Django REST, React/TypeScript, PostgreSQL, and building reliable systems that support product workflows. Good fit for junior-to-mid backend, backend-leaning software engineering, Java/Python API, and implementation-heavy integration roles. Generic software or full-stack roles are only credible when backend/API ownership is clearly central. Not a strong fit for senior architecture ownership, people management, frontend-only specialization, research-heavy machine learning, or Dutch-required roles.",

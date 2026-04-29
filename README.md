@@ -141,9 +141,9 @@ This submits the actual `linkedin_notifier` DAG. It is intentionally separate fr
 - Canonical job data stays shared in `jobs`; JD scraping stays shared in `jd_queue`; fit results and notifications are tracked per profile in `profile_jobs`.
 - Treat Postgres as the source of truth. Edit profile names, resumes, prompts, search terms, scan filters, and Discord destinations through DB/WebUI surfaces.
 - `include/user_info/profiles.json` is legacy/bootstrap input only. Airflow imports it automatically only when the `profiles` table is empty; otherwise DAG runtime never syncs it and will not overwrite WebUI/DB edits.
-- To intentionally re-import legacy profile JSON, run `database.sync_profiles_from_source(force=True)` from a controlled maintenance shell and understand that it overwrites profile/search fields from the file.
-- `resume_path` values in the legacy profile config are resolved relative to that file, so `resume/xingyouli.md` maps to `include/user_info/resume/xingyouli.md` during bootstrap/import.
-- Each profile can have its own `active` flag, optional `bootstrap_existing_jobs` one-time migration flag, `resume_path`/`resume_text`, Discord destination, full `fit_prompt` template, and one or more search configs with distinct terms.
+- To intentionally re-import legacy profile JSON, run `database.sync_profiles_from_source(force=True)` from a controlled maintenance shell. Omitted `resume_text` preserves the existing DB resume so WebUI resume edits are not clobbered.
+- Resume markdown files are no longer the runtime source of truth. Store and edit real CV content in `profiles.resume_text` through Django WebUI/DB maintenance.
+- Each profile can have its own `active` flag, optional `bootstrap_existing_jobs` one-time migration flag, DB-backed `resume_text`, Discord destination, full `fit_prompt` template, and one or more search configs with distinct terms.
 - Calibration notes for the 2026-04-16 experience-filtering pass live in `include/user_info/fit-calibration-2026-04-16.md`; use that document when tightening `Moderate Fit` prompt behavior without harming junior/plausible-mid recall.
 - Set `bootstrap_existing_jobs: true` only for the legacy profile that should inherit pre-multi-user `jobs` history; leave it `false` for newly added users.
 - Search config supports both `location` and optional `geo_id`; the scan flow now sends `keywords`, `location`, `geoId`, `distance`, `start`, and `f_TPR`.
