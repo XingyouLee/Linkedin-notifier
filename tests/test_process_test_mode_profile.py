@@ -25,6 +25,11 @@ FILTER_JOBS_SOURCE = _slice(
     "def filter_jobs():",
     "def normalize_job_records(job_records):",
 )
+NORMALIZE_JD_JOB_RECORDS_SOURCE = _slice(
+    PROCESS_SOURCE,
+    "def _normalize_jd_job_records(",
+    "def _normalize_source_job_id(",
+)
 BACKFILL_SOURCE = _slice(
     DATABASE_SOURCE,
     "def _backfill_profile_jobs_from_existing_jobs(",
@@ -120,6 +125,26 @@ def test_process_source_has_per_profile_filter_helpers():
     assert "def _apply_company_blacklist_filter" in PROCESS_SOURCE
     assert "database.get_profile_scan_filters()" in FILTER_JOBS_SOURCE
     assert "profile_id" in FILTER_JOBS_SOURCE
+
+
+def test_jd_work_items_are_deduplicated_by_job_id():
+    namespace = {}
+    exec(NORMALIZE_JD_JOB_RECORDS_SOURCE, namespace)
+
+    records = [
+        {"id": "job-1", "job_url": "https://example.com/1", "profile_id": 1},
+        {"id": "job-2", "job_url": "https://example.com/2", "profile_id": 1},
+        {"id": "job-1", "job_url": "https://example.com/1b", "profile_id": 2},
+        {"id": "", "job_url": "https://example.com/blank", "profile_id": 2},
+        {"id": None, "job_url": "https://example.com/none", "profile_id": 2},
+    ]
+
+    normalized = namespace["_normalize_jd_job_records"](records)
+
+    assert normalized == [
+        {"id": "job-1", "job_url": "https://example.com/1"},
+        {"id": "job-2", "job_url": "https://example.com/2"},
+    ]
 
 
 

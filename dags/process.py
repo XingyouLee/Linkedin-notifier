@@ -129,6 +129,24 @@ def _apply_company_blacklist_filter(jobs_df: pd.DataFrame, profile_filters: dict
     return filtered[keep_mask]
 
 
+def _normalize_jd_job_records(job_records) -> list[dict]:
+    """Collapse profile-level JD candidates into unique job-level work items."""
+    normalized_records: list[dict] = []
+    seen_job_ids: set[str] = set()
+    for record in job_records or []:
+        job_id = str(record.get("id") or "").strip()
+        if not job_id or job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job_id)
+        normalized_records.append(
+            {
+                "id": job_id,
+                "job_url": record.get("job_url"),
+            }
+        )
+    return normalized_records
+
+
 def _normalize_source_job_id(source_job_id) -> str | None:
     if source_job_id is None:
         return None
@@ -790,16 +808,14 @@ def linkedin_notifier():
 
     @task
     def normalize_job_records(job_records):
-        if not job_records:
-            return []
-        return [
-            {
-                "id": record.get("id"),
-                "job_url": record.get("job_url"),
-            }
-            for record in job_records
-            if record.get("id")
-        ]
+        normalized_records = _normalize_jd_job_records(job_records)
+        raw_count = len(job_records or [])
+        if raw_count != len(normalized_records):
+            print(
+                "Deduplicated JD backlog candidates: "
+                f"{len(normalized_records)} unique jobs from {raw_count} profile-job rows"
+            )
+        return normalized_records
 
     @task.branch
     def branch_after_filter(job_records):
@@ -812,10 +828,11 @@ def linkedin_notifier():
 
     @task
     def enqueue_jd_requests(job_records):
-        jobs_df = pd.DataFrame(job_records or [])
+        unique_job_records = _normalize_jd_job_records(job_records)
+        jobs_df = pd.DataFrame(unique_job_records)
         queued = database.enqueue_jd_requests(jobs_df)
         print(f"Queued {queued} JD requests for in-DAG worker")
-        return [j.get("id") for j in (job_records or []) if j.get("id")]
+        return [j.get("id") for j in unique_job_records]
 
     @task(task_id="run_jd_worker")
     def run_jd_worker(job_ids, worker_batch_size=5, max_loops=20, idle_loop_limit=2):
