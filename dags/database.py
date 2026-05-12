@@ -691,7 +691,7 @@ def _backfill_profile_jobs_from_existing_jobs(cursor, profile_id: int):
             j.notify_status,
             j.notify_error
         FROM jobs j
-        WHERE j.id NOT LIKE 'test-%'
+        WHERE j.id NOT LIKE 'test-%%'
           AND j.source_job_id IS NULL
         ON CONFLICT(profile_id, job_id) DO NOTHING
         """,

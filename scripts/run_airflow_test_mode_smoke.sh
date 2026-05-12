@@ -101,7 +101,7 @@ _wait_for_run() {
         ;;
       running|queued|scheduled)
         if (( elapsed % 30 == 0 )) || (( elapsed < 30 )); then
-          echo "  [${elapsed}s] ${dag_id} run ${run_id} state=${state}, waiting..."
+          echo "  [${elapsed}s] ${dag_id} run ${run_id} state=${state}, waiting..." >&2
         fi
         sleep "${POLL_INTERVAL}"
         ;;
@@ -110,7 +110,7 @@ _wait_for_run() {
         sleep "${POLL_INTERVAL}"
         ;;
       *)
-        echo "  [${elapsed}s] ${dag_id} run ${run_id} state=${state}, waiting..."
+        echo "  [${elapsed}s] ${dag_id} run ${run_id} state=${state}, waiting..." >&2
         sleep "${POLL_INTERVAL}"
         ;;
     esac
@@ -123,19 +123,7 @@ echo "Waiting for linkedin_notifier run ${SCAN_RUN_ID} (timeout: ${MAX_WAIT_SECO
 SCAN_RESULT=$(_wait_for_run "linkedin_notifier" "${SCAN_RUN_ID}")
 
 # Find the triggered fitting run
-FITTING_RUN_ID=$("${AIRFLOW_CMD[@]}" dags list-runs linkedin_fitting_notifier --no-backfill -o json 2>/dev/null | python3 -c "
-import json, sys
-raw = sys.stdin.read()
-start = raw.find('[{')
-if start == -1:
-    start = raw.find('[')
-data = json.loads(raw[start:]) if start != -1 else []
-for run in data:
-    conf = run.get('conf', {}) or {}
-    if conf.get('source_dag_run_id') == '${SCAN_RUN_ID}':
-        print(run.get('run_id', ''))
-        break
-" 2>/dev/null || echo "")
+FITTING_RUN_ID="fitting__${SCAN_RUN_ID}"
 
 FITTING_RESULT="NO_TRIGGERED_RUN"
 if [[ -n "${FITTING_RUN_ID}" ]]; then

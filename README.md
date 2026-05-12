@@ -34,6 +34,25 @@ Profile configuration is now DB-authoritative. `include/user_info/profiles.json`
 
 ## Run locally
 
+The normal local/VPS runtime is Docker Compose. It starts the Airflow app plus
+two Postgres databases so local deployment matches production topology:
+
+- `postgres-airflow`: Airflow metadata only
+- `postgres-jobs`: business data used by the DAGs through `JOBS_DB_URL`
+
+```bash
+docker compose up -d
+```
+
+Then open Airflow at <http://127.0.0.1:8080>.
+
+If you intentionally want compose to use external databases, set
+`COMPOSE_AIRFLOW_DB_URL` and/or `COMPOSE_JOBS_DB_URL`. Plain `JOBS_DB_URL` is
+still used by host CLI tooling, but compose defaults to its own local
+`postgres-jobs` service unless `COMPOSE_JOBS_DB_URL` is set.
+
+### Astro local development
+
 1. Start local Airflow:
    - `astro dev start`
 2. Trigger scan DAG:
@@ -50,11 +69,13 @@ For Astro local runs, keep runtime vars in:
 
 Ensure both files are covered by version-control and Docker ignores so secrets never leak.
 
-`JOBS_DB_URL` is the only source of truth for the business database connection. Local Astro/Airflow runs and cloud deployments should normally point to the same shared business database. If you need to fall back to a local or emergency database, change `JOBS_DB_URL` explicitly.
+`JOBS_DB_URL` is the only source of truth for the business database connection in host tooling and Airflow runtime. Docker Compose supplies a local default through `COMPOSE_JOBS_DB_URL`; Zeabur should point `JOBS_DB_URL` to the remote jobs Postgres service.
 
 Common vars:
 
 - `JOBS_DB_URL`: business DB DSN (for DAG tasks), e.g. `postgresql://jobs_app:jobs_pass@db.example.com:5432/jobsdb`
+- `COMPOSE_JOBS_DB_URL`: optional compose-only override; defaults to `postgresql://jobs_app:jobs_pass@postgres-jobs:5432/jobsdb`
+- `COMPOSE_AIRFLOW_DB_URL`: optional compose-only Airflow metadata DB override; defaults to `postgresql+psycopg2://airflow:airflow@postgres-airflow:5432/airflow`
 - `PROFILE_CONFIG_PATH`: optional legacy import/bootstrap file; defaults to `include/user_info/profiles.json` and is not auto-synced during normal DAG runtime once profiles exist in DB
 - `RESUME_MATCHER_BASE_URL`: public Resume Matcher base URL used for Discord deep links (`/launch?token=...`)
 - `MATERIALS_LINK_SECRET`: shared HMAC secret used to sign launch tokens that Resume Matcher verifies
@@ -151,7 +172,8 @@ This submits the actual `linkedin_notifier` DAG. It is intentionally separate fr
 
 ## Data storage
 
-- Business data is stored in Postgres (`jobsdb`)
+- Airflow metadata is stored in a dedicated Postgres database (`airflow`)
+- Business data is stored in a separate Postgres database (`jobsdb`)
 - Main tables:
   - `batches`
   - `jobs`
@@ -177,11 +199,12 @@ This submits the actual `linkedin_notifier` DAG. It is intentionally separate fr
 
 ## Zeabur deployment
 
-Deploy this repo to Zeabur as **one Docker app service plus two Postgres databases**:
+Deploy this repo to Zeabur as **one Docker app service plus two Postgres databases**. Zeabur does not use the root Docker Compose file directly; create the equivalent services in Zeabur and set the app env vars to the two Zeabur Postgres URLs.
 
 1. `linkedin-notifier`
    - Build from the root-level `Dockerfile`
    - Uses the image default command, which runs:
+     - `airflow db check`
      - `airflow db migrate`
      - `airflow scheduler`
      - `airflow dag-processor`
@@ -196,14 +219,17 @@ Deploy this repo to Zeabur as **one Docker app service plus two Postgres databas
 Important notes:
 
 - Do **not** split Airflow into multiple Zeabur app services for this setup.
+- Do **not** bake either database into the Docker image. The databases are persistent external services.
 - Set `CLOUD_DEPLOYMENT=1` on the Docker app service.
+- Set `PORT=8080`.
 - Set `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` to the Airflow metadata Postgres.
 - Set `JOBS_DB_URL` to the separate business Postgres.
 - Set `AIRFLOW__CORE__AUTH_MANAGER=airflow.api_fastapi.auth.managers.simple.simple_auth_manager.SimpleAuthManager`.
 - Set `AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS` to one or more `<username>:<role>` pairs such as `admin:admin`.
 - Set `AIRFLOW_ADMIN_PASSWORD` if you want a fixed Airflow login password from env.
-- Set `AIRFLOW__API__BASE_URL=http://127.0.0.1:8080`.
+- Set `AIRFLOW__API__BASE_URL` to the public Airflow app URL, for example `https://your-airflow-zeabur-domain`.
 - Set `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`.
+- Set Zeabur's custom HTTP health check path to `/api/v2/version` after a local smoke test confirms that endpoint returns 2xx without login for the pinned Airflow runtime.
 - Set `AIRFLOW__API_AUTH__JWT_SECRET` to the same long random secret for the whole app service.
 - `PROFILE_CONFIG_PATH` is optional in cloud runtime; set it only if you need legacy empty-DB bootstrap/import from a non-default file.
 - `DISCORD_BOT_TOKEN` should be configured globally if Discord delivery is enabled.

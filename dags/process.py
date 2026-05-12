@@ -972,6 +972,7 @@ def linkedin_notifier():
     trigger_fitting_notifier = TriggerDagRunOperator(
         task_id="trigger_fitting_notifier",
         trigger_dag_id="linkedin_fitting_notifier",
+        trigger_run_id="fitting__{{ dag_run.run_id }}",
         conf={
             "source_dag_run_id": "{{ dag_run.run_id }}",
             "LINKEDIN_TEST_MODE": "{{ dag_run.conf.get('LINKEDIN_TEST_MODE', false) }}",
