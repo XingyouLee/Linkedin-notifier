@@ -801,3 +801,36 @@ def test_fitting_notifier_source_caps_test_mode_claims():
     assert "LINKEDIN_TEST_MAX_FIT_JOBS" in source
     assert "claim_pending_fitting_tasks(limit=limit)" in source
     assert "Test mode fitting claim cap" in source
+
+
+def test_fitting_claim_limit_defaults_to_bounded_production(monkeypatch):
+    monkeypatch.delenv("LINKEDIN_TEST_MODE", raising=False)
+    monkeypatch.delenv("FITTING_CLAIM_LIMIT", raising=False)
+
+    assert fitting_notifier._fitting_claim_limit() == 50
+
+
+def test_fitting_claim_limit_allows_explicit_unlimited_production(monkeypatch):
+    monkeypatch.delenv("LINKEDIN_TEST_MODE", raising=False)
+    monkeypatch.setenv("FITTING_CLAIM_LIMIT", "0")
+
+    assert fitting_notifier._fitting_claim_limit() is None
+
+
+def test_fitting_notifier_spends_attempts_on_api_error_requeue():
+    source = Path("dags/fitting_notifier.py").read_text(encoding="utf-8")
+    finalize_inline_section = source[
+        source.index("if requeue_error is not None:")
+        : source.index('error = "missing_llm_match"')
+    ]
+    finalize_queue_section = source[
+        source.index("elif item_key in requeue_item_keys:")
+        : source.index('else:\n                error = default_error')
+    ]
+
+    assert "database.mark_fitting_failed(" in finalize_inline_section
+    assert "retry = (attempts + 1) < max_attempts" in finalize_inline_section
+    assert "database.mark_fitting_failed(" in finalize_queue_section
+    assert "retry = (attempts + 1) < max_attempts" in finalize_queue_section
+    assert "database.requeue_fitting_task(" not in finalize_inline_section
+    assert "database.requeue_fitting_task(" not in finalize_queue_section

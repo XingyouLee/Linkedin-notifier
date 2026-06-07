@@ -449,6 +449,19 @@ def _test_mode_notification_limit() -> int:
     return runtime_int("LINKEDIN_TEST_MAX_NOTIFY_JOBS", 3, minimum=1)
 
 
+def _fitting_claim_limit() -> int | None:
+    if _is_test_mode_enabled():
+        return runtime_int(
+            "LINKEDIN_TEST_MAX_FIT_JOBS",
+            10,
+            fallback_key="LINKEDIN_TEST_MAX_JOBS",
+            minimum=1,
+        )
+
+    limit = runtime_int("FITTING_CLAIM_LIMIT", 50, minimum=0)
+    return limit if limit > 0 else None
+
+
 def _normalize_string_list(values) -> list[str]:
     if not values:
         return []
@@ -1311,17 +1324,14 @@ def _build_discord_job_match_message(job: dict) -> str | None:
 def linkedin_fitting_notifier():
     @task
     def claim_fitting_tasks():
-        limit = None
-        if _is_test_mode_enabled():
-            limit = runtime_int(
-                "LINKEDIN_TEST_MAX_FIT_JOBS",
-                10,
-                fallback_key="LINKEDIN_TEST_MAX_JOBS",
-                minimum=1,
-            )
+        limit = _fitting_claim_limit()
         claimed = database.claim_pending_fitting_tasks(limit=limit)
-        if limit is not None:
+        if limit is None:
+            print("Fitting claim cap: unlimited (FITTING_CLAIM_LIMIT=0)")
+        elif _is_test_mode_enabled():
             print(f"Test mode fitting claim cap: limit={limit}")
+        else:
+            print(f"Fitting claim cap: limit={limit}")
         print(f"Fitting claim summary: claimed={len(claimed or [])}")
         return claimed
 
@@ -1387,9 +1397,18 @@ def linkedin_fitting_notifier():
                 return
             attempts = int(item.get("attempts") or 0)
             if requeue_error is not None:
-                database.requeue_fitting_task(profile_id, job_id, error=requeue_error)
+                retry = (attempts + 1) < max_attempts
+                database.mark_fitting_failed(
+                    profile_id,
+                    job_id,
+                    error=requeue_error,
+                    retry=retry,
+                )
                 finalized_item_keys.add(item_key)
-                finalize_counts["requeued"] += 1
+                if retry:
+                    finalize_counts["requeued"] += 1
+                else:
+                    finalize_counts["failed"] += 1
                 return
 
             if (
@@ -2128,12 +2147,17 @@ def linkedin_fitting_notifier():
                 database.mark_fitting_done(profile_id, job_id)
                 done += 1
             elif item_key in requeue_item_keys:
-                database.requeue_fitting_task(
+                retry = (attempts + 1) < max_attempts
+                database.mark_fitting_failed(
                     profile_id,
                     job_id,
                     error=requeue_job_errors.get(item_key, default_error),
+                    retry=retry,
                 )
-                requeued += 1
+                if retry:
+                    requeued += 1
+                else:
+                    failed += 1
             else:
                 error = default_error if api_error else "missing_llm_match"
                 if result and result.get("llm_match_error"):
