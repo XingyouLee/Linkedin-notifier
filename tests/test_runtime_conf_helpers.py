@@ -116,13 +116,22 @@ def test_process_triggers_fitting_with_test_mode_conf():
 def test_process_conf_forwarding_uses_jinja_template_strings():
     """The trigger conf must use Jinja templates to resolve dag_run.conf at runtime."""
     trigger_section_start = PROCESS_SOURCE.index("trigger_fitting_notifier = TriggerDagRunOperator")
-    # Grab a generous slice after the trigger
-    trigger_section = PROCESS_SOURCE[trigger_section_start:trigger_section_start + 600]
+    trigger_section_end = PROCESS_SOURCE.index("wait_for_completion=False", trigger_section_start)
+    trigger_section = PROCESS_SOURCE[trigger_section_start:trigger_section_end]
     assert 'dag_run.conf.get' in trigger_section
     assert "LINKEDIN_TEST_MODE" in trigger_section
     assert "LINKEDIN_TEST_MAX_JOBS" in trigger_section
     assert "LINKEDIN_TEST_MAX_FIT_JOBS" in trigger_section
     assert "LINKEDIN_TEST_MAX_NOTIFY_JOBS" in trigger_section
+
+
+def test_process_uses_idempotent_fitting_trigger_run_id():
+    """Clearing the trigger task should not fail if the deterministic fitting run exists."""
+    trigger_section_start = PROCESS_SOURCE.index("trigger_fitting_notifier = TriggerDagRunOperator")
+    trigger_section_end = PROCESS_SOURCE.index("wait_for_completion=False", trigger_section_start)
+    trigger_section = PROCESS_SOURCE[trigger_section_start:trigger_section_end]
+    assert 'trigger_run_id="fitting__{{ dag_run.run_id }}"' in trigger_section
+    assert "skip_when_already_exists=True" in trigger_section
 
 
 def test_fitting_notifier_reads_test_mode_from_conf():

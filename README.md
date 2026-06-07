@@ -229,6 +229,8 @@ Important notes:
 - Set `AIRFLOW_ADMIN_PASSWORD` if you want a fixed Airflow login password from env.
 - Set `AIRFLOW__API__BASE_URL` to the public Airflow app URL, for example `https://your-airflow-zeabur-domain`.
 - Set `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`.
+- Set `AIRFLOW__LOGGING__BASE_LOG_FOLDER=/usr/local/airflow/logs`.
+- Add a Zeabur volume on the Docker app service mounted at `/usr/local/airflow/logs`. Without this volume, Airflow task logs live on the ephemeral container filesystem and disappear after restart/redeploy.
 - Set Zeabur's custom HTTP health check path to `/api/v2/version` after a local smoke test confirms that endpoint returns 2xx without login for the pinned Airflow runtime.
 - Set `AIRFLOW__API_AUTH__JWT_SECRET` to the same long random secret for the whole app service.
 - `PROFILE_CONFIG_PATH` is optional in cloud runtime; set it only if you need legacy empty-DB bootstrap/import from a non-default file.
@@ -236,3 +238,12 @@ Important notes:
 - `DISCORD_CHANNEL_ID` is only a fallback; profile-specific channel ids from config/database still take precedence.
 - `DISCORD_WEBHOOK_URL` can be left empty if you only use bot-token delivery.
 - If `AIRFLOW_ADMIN_PASSWORD` is unset, Airflow login uses a generated password file under `/usr/local/airflow/simple_auth_manager_passwords.json.generated`.
+
+### Zeabur operations checklist
+
+Use this checklist when Airflow becomes unreachable or after changing the deployment:
+
+1. Confirm the Docker app service has a persistent volume mounted at `/usr/local/airflow/logs`.
+2. Confirm the app env includes `AIRFLOW__LOGGING__BASE_LOG_FOLDER=/usr/local/airflow/logs`, `PORT=8080`, the public `AIRFLOW__API__BASE_URL`, the internal `AIRFLOW__CORE__EXECUTION_API_SERVER_URL`, and both Postgres URLs.
+3. Set the custom HTTP health check path to `/api/v2/version`. If Airflow is reachable but suspicious, also open `/api/v2/monitor/health` to inspect metadata database, scheduler, triggerer, and DAG processor status.
+4. Before redeploying to recover the UI, copy the current Zeabur runtime logs and check the persisted Airflow task logs under `/usr/local/airflow/logs`; redeploying replaces the running container.

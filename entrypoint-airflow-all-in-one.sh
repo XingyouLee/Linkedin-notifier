@@ -2,9 +2,14 @@
 set -eu
 
 export AIRFLOW_HOME="${AIRFLOW_HOME:-/usr/local/airflow}"
+export AIRFLOW__LOGGING__BASE_LOG_FOLDER="${AIRFLOW__LOGGING__BASE_LOG_FOLDER:-${AIRFLOW_HOME}/logs}"
 AIRFLOW_API_HOST="${AIRFLOW_API_HOST:-0.0.0.0}"
 AIRFLOW_API_PORT="${AIRFLOW_API_PORT:-${PORT:-8080}}"
 export AIRFLOW__CORE__EXECUTION_API_SERVER_URL="${AIRFLOW__CORE__EXECUTION_API_SERVER_URL:-http://127.0.0.1:${AIRFLOW_API_PORT}/execution/}"
+
+mkdir -p "$AIRFLOW__LOGGING__BASE_LOG_FOLDER"
+touch "$AIRFLOW__LOGGING__BASE_LOG_FOLDER/.write-test"
+rm -f "$AIRFLOW__LOGGING__BASE_LOG_FOLDER/.write-test"
 
 usernames="${AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_USERS:-admin:admin}"
 primary_username="$(printf '%s' "$usernames" | cut -d',' -f1 | cut -d':' -f1)"

@@ -37,7 +37,11 @@ async def generate_cover_letter(
 
     result = await complete(
         prompt=prompt,
-        system_prompt="You are a professional career coach and resume writer. Write compelling, personalized cover letters.",
+        system_prompt=(
+            "You are a recruiter-grade career coach and cover-letter writer. "
+            "Write specific, credible direct-apply letters grounded in the resume. "
+            "Emphasize proven overlap and never volunteer missing skills or experience."
+        ),
         max_tokens=2048,
     )
 

@@ -381,7 +381,10 @@ Requirements:
 - 100-150 words maximum
 - 3-4 short paragraphs
 - Opening: Reference ONE specific thing from the job description (product, tech stack, or problem they're solving) - not generic excitement about "the role"
-- Middle: Pick 1-2 qualifications from resume that DIRECTLY match stated requirements - prioritize relevance over impressiveness
+- Middle: Pick 1-2 qualifications from the resume that DIRECTLY match stated requirements - prioritize relevance over impressiveness
+- Highlight the strongest proven overlap. Do not enumerate every JD requirement or compare the candidate against a checklist
+- Do NOT explicitly mention missing skills, tools, certifications, or experience. Never write phrases like "I do not have", "I lack", "I have no experience with", or "I have not worked with"
+- If a JD item is unsupported by the resume, omit it. If a match is adjacent, frame the supported adjacent experience positively without naming the missing item
 - Include a concrete motivation sentence explaining why this role/company is a genuinely relevant next step for the candidate
 - Closing: Simple availability to discuss, no desperate enthusiasm
 - If resume shows career transition, frame the pivot as intentional and relevant

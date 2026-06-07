@@ -62,6 +62,7 @@ services:
       AIRFLOW__API__BASE_URL: ${AIRFLOW__API__BASE_URL:-http://127.0.0.1:8080}
       AIRFLOW__CORE__EXECUTION_API_SERVER_URL: ${AIRFLOW__CORE__EXECUTION_API_SERVER_URL:-http://127.0.0.1:8080/execution/}
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${COMPOSE_AIRFLOW_DB_URL:-postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres-airflow:5432/${AIRFLOW_DB_NAME:-airflow}}
+      AIRFLOW__LOGGING__BASE_LOG_FOLDER: ${AIRFLOW__LOGGING__BASE_LOG_FOLDER:-/usr/local/airflow/logs}
       JOBS_DB_URL: ${COMPOSE_JOBS_DB_URL:-postgresql://${JOBS_DB_USER:-jobs_app}:${JOBS_DB_PASSWORD:-jobs_pass}@postgres-jobs:5432/${JOBS_DB_NAME:-jobsdb}}
       PROFILE_CONFIG_PATH: ${PROFILE_CONFIG_PATH:-/usr/local/airflow/include/user_info/profiles.json}
       CLOUD_DEPLOYMENT: ${CLOUD_DEPLOYMENT:-0}
@@ -83,7 +84,10 @@ services:
       FITTING_CONCURRENCY: ${FITTING_CONCURRENCY:-8}
     ports:
       - "8080:8080"
+    volumes:
+      - airflow-logs:/usr/local/airflow/logs
 
 volumes:
   airflow-postgres-data:
   jobs-postgres-data:
+  airflow-logs:

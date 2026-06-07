@@ -41,3 +41,10 @@ def test_resume_prompt_surfaces_preserve_output_language_placeholder():
 def test_cover_letter_prompt_preserves_plain_text_output_contract():
     assert "{output_language}" in COVER_LETTER_PROMPT
     assert "Output plain text only." in COVER_LETTER_PROMPT
+
+
+def test_cover_letter_prompt_avoids_volunteering_skill_gaps():
+    assert "Highlight the strongest proven overlap" in COVER_LETTER_PROMPT
+    assert "Do NOT explicitly mention missing skills" in COVER_LETTER_PROMPT
+    assert 'Never write phrases like "I do not have"' in COVER_LETTER_PROMPT
+    assert "frame the supported adjacent experience positively" in COVER_LETTER_PROMPT

@@ -8,7 +8,9 @@ RUN test -f /usr/local/airflow/entrypoint-airflow-all-in-one.sh \
     && test -f /usr/local/airflow/requirements.txt \
     && test -f /usr/local/airflow/packages.txt
 
-RUN chmod +x /usr/local/airflow/entrypoint-airflow-all-in-one.sh
+RUN mkdir -p /usr/local/airflow/logs \
+    && chmod -R ug+rwX /usr/local/airflow/logs \
+    && chmod +x /usr/local/airflow/entrypoint-airflow-all-in-one.sh
 
 USER astro
 

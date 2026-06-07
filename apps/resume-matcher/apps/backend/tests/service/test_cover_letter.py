@@ -23,3 +23,8 @@ class TestGenerateCoverLetter:
         assert "dutch companies and dutch hr review" in prompt.lower()
         assert "output plain text only" in prompt.lower()
         assert "write in english" in prompt.lower()
+        assert "do not explicitly mention missing skills" in prompt.lower()
+        assert "i do not have" in prompt.lower()
+        assert "frame the supported adjacent experience positively" in prompt.lower()
+        system_prompt = mock_complete.call_args.kwargs["system_prompt"]
+        assert "never volunteer missing skills or experience" in system_prompt.lower()

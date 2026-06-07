@@ -10,6 +10,7 @@ airflow-webserver.pid
 webserver_config.py
 airflow.cfg
 airflow.db
+include/user_info/*.pdf
 .idea/
 test.ipynb
 .codex_tmp/

@@ -115,7 +115,7 @@ def test_database_mode_aware_selectors_guard_dormant_test_rows_after_mode_off():
 
 def test_database_bootstrap_source_excludes_test_rows_and_test_profiles():
     assert "INSERT INTO profile_jobs" in BACKFILL_SOURCE
-    assert "NOT LIKE 'test-%'" in BACKFILL_SOURCE
+    assert "NOT LIKE 'test-%%'" in BACKFILL_SOURCE
     assert "source_job_id IS NULL" in BACKFILL_SOURCE
     assert 'not profile_config.get("is_test_profile", False)' in BOOTSTRAP_FLAGGED_SOURCE
 

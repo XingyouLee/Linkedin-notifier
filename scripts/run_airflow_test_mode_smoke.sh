@@ -126,10 +126,12 @@ SCAN_RESULT=$(_wait_for_run "linkedin_notifier" "${SCAN_RUN_ID}")
 FITTING_RUN_ID="fitting__${SCAN_RUN_ID}"
 
 FITTING_RESULT="NO_TRIGGERED_RUN"
-if [[ -n "${FITTING_RUN_ID}" ]]; then
+if [[ "${SCAN_RESULT}" == "SUCCESS" ]]; then
   echo ""
   echo "Waiting for linkedin_fitting_notifier run ${FITTING_RUN_ID} (timeout: ${MAX_WAIT_SECONDS}s)..."
   FITTING_RESULT=$(_wait_for_run "linkedin_fitting_notifier" "${FITTING_RUN_ID}")
+else
+  FITTING_RESULT="SKIPPED_SCAN_NOT_SUCCESS"
 fi
 
 # ---------- Summary ----------
