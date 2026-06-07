@@ -1397,12 +1397,13 @@ def linkedin_fitting_notifier():
                 return
             attempts = int(item.get("attempts") or 0)
             if requeue_error is not None:
-                retry = (attempts + 1) < max_attempts
+                retry = attempts < max_attempts
                 database.mark_fitting_failed(
                     profile_id,
                     job_id,
                     error=requeue_error,
                     retry=retry,
+                    spend_attempt=False,
                 )
                 finalized_item_keys.add(item_key)
                 if retry:
@@ -1424,12 +1425,13 @@ def linkedin_fitting_notifier():
             error = "missing_llm_match"
             if job_result and job_result.get("llm_match_error"):
                 error = str(job_result["llm_match_error"])
-            retry = (attempts + 1) < max_attempts
+            retry = attempts < max_attempts
             database.mark_fitting_failed(
                 profile_id,
                 job_id,
                 error=error,
                 retry=retry,
+                spend_attempt=False,
             )
             finalized_item_keys.add(item_key)
             finalize_counts["failed"] += 1
@@ -2147,12 +2149,13 @@ def linkedin_fitting_notifier():
                 database.mark_fitting_done(profile_id, job_id)
                 done += 1
             elif item_key in requeue_item_keys:
-                retry = (attempts + 1) < max_attempts
+                retry = attempts < max_attempts
                 database.mark_fitting_failed(
                     profile_id,
                     job_id,
                     error=requeue_job_errors.get(item_key, default_error),
                     retry=retry,
+                    spend_attempt=False,
                 )
                 if retry:
                     requeued += 1
@@ -2162,12 +2165,13 @@ def linkedin_fitting_notifier():
                 error = default_error if api_error else "missing_llm_match"
                 if result and result.get("llm_match_error"):
                     error = result["llm_match_error"]
-                retry = (attempts + 1) < max_attempts
+                retry = attempts < max_attempts
                 database.mark_fitting_failed(
                     profile_id,
                     job_id,
                     error=error,
                     retry=retry,
+                    spend_attempt=False,
                 )
                 failed += 1
 

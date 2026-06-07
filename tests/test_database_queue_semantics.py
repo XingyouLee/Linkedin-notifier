@@ -368,21 +368,53 @@ def test_collect_scan_rows_requires_results_per_term_with_clear_profile_context(
     assert "search_config.results_per_term is required for " in source
 
 
-def test_claim_pending_fitting_tasks_only_reclaims_stale_fitting(monkeypatch):
+def test_claim_pending_fitting_tasks_reclaims_stale_and_spends_attempt(monkeypatch):
     cursor = DummyCursor()
     cursor._rows = [{"profile_id": 7, "job_id": "10", "attempts": 0}]
     _patch_connect(monkeypatch, cursor)
     monkeypatch.setenv("FITTING_CLAIM_STALE_MINUTES", "15")
+    monkeypatch.setenv("FITTING_MAX_ATTEMPTS", "3")
 
     result = database.claim_pending_fitting_tasks()
 
-    assert result == [{"profile_id": 7, "job_id": "10", "attempts": 0}]
-    select_sql = cursor.calls[0][1]
-    select_params = cursor.calls[0][2]
+    assert result == [{"profile_id": 7, "job_id": "10", "attempts": 1}]
+    sweep_sql = cursor.calls[0][1]
+    sweep_params = cursor.calls[0][2]
+    select_sql = cursor.calls[1][1]
+    select_params = cursor.calls[1][2]
+    update_sql = cursor.calls[2][1]
+    assert "SET fit_status = 'fit_failed'" in sweep_sql
+    assert "fitting_attempts_exhausted" in sweep_sql
+    assert "FROM profiles p" in sweep_sql
+    assert "p.id = profile_jobs.profile_id" in sweep_sql
+    assert "_profile_mode_clause" not in sweep_sql
+    assert "COALESCE(p.is_test_profile, FALSE)" in sweep_sql
+    assert sweep_params == (3, 15)
     assert "fit_status = 'pending_fit'" in select_sql
     assert "fit_status = 'fitting'" in select_sql
     assert "CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')" in select_sql
+    assert "COALESCE(pj.fit_attempts, 0) < %s" in select_sql
     assert select_params[0] == 15
+    assert select_params[1] == 3
+    assert "fit_attempts = COALESCE(fit_attempts, 0) + 1" in update_sql
+
+
+def test_mark_fitting_failed_can_skip_attempt_spend_after_claim(monkeypatch):
+    cursor = DummyCursor()
+    _patch_connect(monkeypatch, cursor)
+
+    database.mark_fitting_failed(
+        7,
+        "job-1",
+        error="invalid_json_response",
+        retry=False,
+        spend_attempt=False,
+    )
+
+    sql = cursor.calls[-1][1]
+    params = cursor.calls[-1][2]
+    assert "CASE WHEN %s THEN 1 ELSE 0 END" in sql
+    assert params == ("fit_failed", False, "invalid_json_response", 7, "job-1")
 
 
 def test_claim_pending_jd_requests_scopes_to_requested_job_ids(monkeypatch):

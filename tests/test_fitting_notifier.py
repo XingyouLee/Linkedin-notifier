@@ -817,7 +817,7 @@ def test_fitting_claim_limit_allows_explicit_unlimited_production(monkeypatch):
     assert fitting_notifier._fitting_claim_limit() is None
 
 
-def test_fitting_notifier_spends_attempts_on_api_error_requeue():
+def test_fitting_notifier_finalizes_without_double_spending_claim_attempt():
     source = Path("dags/fitting_notifier.py").read_text(encoding="utf-8")
     finalize_inline_section = source[
         source.index("if requeue_error is not None:")
@@ -829,8 +829,10 @@ def test_fitting_notifier_spends_attempts_on_api_error_requeue():
     ]
 
     assert "database.mark_fitting_failed(" in finalize_inline_section
-    assert "retry = (attempts + 1) < max_attempts" in finalize_inline_section
+    assert "retry = attempts < max_attempts" in finalize_inline_section
+    assert "spend_attempt=False" in finalize_inline_section
     assert "database.mark_fitting_failed(" in finalize_queue_section
-    assert "retry = (attempts + 1) < max_attempts" in finalize_queue_section
+    assert "retry = attempts < max_attempts" in finalize_queue_section
+    assert "spend_attempt=False" in finalize_queue_section
     assert "database.requeue_fitting_task(" not in finalize_inline_section
     assert "database.requeue_fitting_task(" not in finalize_queue_section

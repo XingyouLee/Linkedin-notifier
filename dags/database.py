@@ -1572,6 +1572,7 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     """Atomically claim pending fitting tasks for processing."""
     init_db()
     stale_minutes = _get_positive_int_env("FITTING_CLAIM_STALE_MINUTES", 30)
+    max_attempts = _get_positive_int_env("FITTING_MAX_ATTEMPTS", 3)
     profile_mode_clause = _profile_mode_clause("p")
 
     select_query = f"""
@@ -1592,10 +1593,11 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
           AND {profile_mode_clause}
           AND j.description IS NOT NULL
           AND pj.llm_match IS NULL
+          AND COALESCE(pj.fit_attempts, 0) < %s
         ORDER BY COALESCE(pj.fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC
         FOR UPDATE SKIP LOCKED
     """
-    params: List[Any] = [stale_minutes]
+    params: List[Any] = [stale_minutes, max_attempts]
     if limit is not None and int(limit) > 0:
         select_query += " LIMIT %s"
         params.append(int(limit))
@@ -1603,6 +1605,33 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     with _connect(row_factory=dict_row) as conn:
         with conn.transaction():
             with conn.cursor() as cursor:
+                cursor.execute(
+                    f"""
+                    UPDATE profile_jobs
+                    SET fit_status = 'fit_failed',
+                        fit_last_error = COALESCE(
+                            NULLIF(fit_last_error, ''),
+                            'fitting_attempts_exhausted'
+                        ),
+                        fit_updated_at = CURRENT_TIMESTAMP
+                    FROM profiles p
+                    WHERE llm_match IS NULL
+                      AND p.id = profile_jobs.profile_id
+                      AND {profile_mode_clause}
+                      AND COALESCE(fit_attempts, 0) >= %s
+                      AND (
+                            fit_status = 'pending_fit'
+                            OR (
+                                fit_status = 'fitting'
+                                AND COALESCE(
+                                    fit_updated_at,
+                                    TIMESTAMP '1970-01-01 00:00:00'
+                                ) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
+                            )
+                          )
+                    """,
+                    (max_attempts, stale_minutes),
+                )
                 cursor.execute(select_query, params)
                 rows = cursor.fetchall()
                 if not rows:
@@ -1612,6 +1641,7 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
                     """
                     UPDATE profile_jobs
                     SET fit_status = 'fitting',
+                        fit_attempts = COALESCE(fit_attempts, 0) + 1,
                         fit_updated_at = CURRENT_TIMESTAMP
                     WHERE profile_id = %s
                       AND job_id = %s
@@ -1623,7 +1653,7 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
         {
             "profile_id": row["profile_id"],
             "job_id": row["job_id"],
-            "attempts": row["attempts"],
+            "attempts": int(row["attempts"] or 0) + 1,
         }
         for row in rows
     ]
@@ -1653,6 +1683,7 @@ def mark_fitting_failed(
     job_id: str,
     error: str = "",
     retry: bool = True,
+    spend_attempt: bool = True,
 ):
     """Mark fitting task as failed and optionally requeue."""
     init_db()
@@ -1664,13 +1695,13 @@ def mark_fitting_failed(
                 """
                 UPDATE profile_jobs
                 SET fit_status = %s,
-                    fit_attempts = COALESCE(fit_attempts, 0) + 1,
+                    fit_attempts = COALESCE(fit_attempts, 0) + CASE WHEN %s THEN 1 ELSE 0 END,
                     fit_last_error = %s,
                     fit_updated_at = CURRENT_TIMESTAMP
                 WHERE profile_id = %s
                   AND job_id = %s
                 """,
-                (status, error, profile_id, job_id),
+                (status, spend_attempt, error, profile_id, job_id),
             )
 
 
