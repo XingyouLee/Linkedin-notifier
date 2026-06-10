@@ -1411,15 +1411,36 @@ def _is_discord_enabled(job_or_profile: dict) -> bool:
     return _coerce_bool_value((job_or_profile or {}).get("discord_enabled"), True)
 
 
+def _is_present_config_value(value) -> bool:
+    if value is None:
+        return False
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+    return bool(value)
+
+
+def _first_present_config_value(*values):
+    for value in values:
+        if _is_present_config_value(value):
+            return value
+    return None
+
+
 def _has_discord_destination(job_or_profile: dict) -> bool:
-    return bool(
-        (job_or_profile or {}).get("discord_webhook_url")
-        or os.getenv("DISCORD_WEBHOOK_URL")
-        or (
-            ((job_or_profile or {}).get("discord_channel_id") or os.getenv("DISCORD_CHANNEL_ID"))
-            and os.getenv("DISCORD_BOT_TOKEN")
-        )
+    record = job_or_profile or {}
+    webhook_url = _first_present_config_value(
+        record.get("discord_webhook_url"),
+        os.getenv("DISCORD_WEBHOOK_URL"),
     )
+    channel_id = _first_present_config_value(
+        record.get("discord_channel_id"),
+        os.getenv("DISCORD_CHANNEL_ID"),
+    )
+    bot_token = _first_present_config_value(os.getenv("DISCORD_BOT_TOKEN"))
+    return bool(webhook_url or (channel_id and bot_token))
 
 
 def _discord_skip_reason(job_or_profile: dict) -> str | None:

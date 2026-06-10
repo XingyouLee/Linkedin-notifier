@@ -621,6 +621,7 @@ def test_build_discord_notification_summary_message_reports_zero_results():
 def test_send_zero_result_notification_summaries_sends_per_active_profile(monkeypatch):
     import pandas as pd
 
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
     monkeypatch.setattr(
         fitting_notifier.database,
         "get_active_notification_profiles",
@@ -670,6 +671,7 @@ def test_discord_skip_reason_distinguishes_disabled_and_missing(monkeypatch):
 
     assert fitting_notifier._discord_skip_reason({"discord_enabled": False, "discord_webhook_url": "https://discord.example/webhook"}) == "discord_disabled"
     assert fitting_notifier._discord_skip_reason({"discord_enabled": True}) == "discord_missing_destination"
+    assert fitting_notifier._discord_skip_reason({"discord_enabled": True, "discord_webhook_url": float("nan")}) == "discord_missing_destination"
     assert fitting_notifier._discord_skip_reason({"discord_enabled": True, "discord_webhook_url": "https://discord.example/webhook"}) is None
 
 
