@@ -16,6 +16,31 @@ PROCESS_SOURCE = (REPO_ROOT / "dags" / "process.py").read_text(encoding="utf-8")
 FITTING_SOURCE = (REPO_ROOT / "dags" / "fitting_notifier.py").read_text(encoding="utf-8")
 
 
+
+def test_df_to_xcom_records_normalizes_missing_values_to_none():
+    import math
+
+    import pandas as pd
+
+    records = runtime_utils.df_to_xcom_records(
+        pd.DataFrame(
+            [
+                {"channel": "chan-1", "webhook": None},
+                {"channel": float("nan"), "webhook": "https://discord.example/webhook"},
+            ]
+        )
+    )
+
+    assert records == [
+        {"channel": "chan-1", "webhook": None},
+        {"channel": None, "webhook": "https://discord.example/webhook"},
+    ]
+    assert not any(
+        isinstance(value, float) and math.isnan(value)
+        for record in records
+        for value in record.values()
+    )
+
 # ---------------------------------------------------------------------------
 # runtime_bool
 # ---------------------------------------------------------------------------

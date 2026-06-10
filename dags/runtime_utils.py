@@ -60,10 +60,11 @@ def df_to_xcom_records(df: pd.DataFrame) -> list[dict]:
     if df is None or df.empty:
         return []
 
-    safe_df = df.astype(object).where(pd.notna(df), None).copy()
-    for col in safe_df.columns:
-        safe_df[col] = safe_df[col].map(to_xcom_safe_value)
-    return safe_df.to_dict(orient="records")
+    records = df.to_dict(orient="records")
+    return [
+        {key: to_xcom_safe_value(value) for key, value in record.items()}
+        for record in records
+    ]
 
 
 def runtime_conf_value(key: str, default=None):
