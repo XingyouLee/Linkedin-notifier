@@ -2,7 +2,12 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    # Only run on pushes to main branches directly; feature branches are
+    # covered by pull_request events to avoid double-triggering CI on every
+    # push while a PR is open.
+    branches:
+      - main
+      - zeabur-airflow-deploy
   pull_request:
   workflow_dispatch:
 
@@ -24,7 +29,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pytest requests
+          pip install pytest
 
       - name: Run unit tests
         run: pytest tests -q
@@ -43,26 +48,13 @@ jobs:
       - name: DAG parse check
         run: astro dev pytest .astro/test_dag_integrity_default.py --args "-q"
 
-  docker-build:
-    name: Docker build
+  publish-image:
+    name: Build and publish image to GHCR
     runs-on: ubuntu-latest
     needs:
       - python-unit-tests
       - dag-integrity
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Build deployment image
-        run: docker build -t linkedin-notifier:${{ github.sha }} .
-
-  publish-image:
-    name: Publish image to GHCR
-    runs-on: ubuntu-latest
-    needs:
-      - docker-build
-    if: >
-      github.event_name == 'push' &&
-      (github.ref_name == 'main' || github.ref_name == 'zeabur-airflow-deploy')
+    # Build on every qualifying run; only push on main-branch pushes.
     permissions:
       contents: read
       packages: write
@@ -89,10 +81,20 @@ jobs:
             echo "latest_tag=" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Build image
+        run: |
+          docker build -t linkedin-notifier:${{ github.sha }} .
+
       - name: Log in to GHCR
+        if: >
+          github.event_name == 'push' &&
+          (github.ref_name == 'main' || github.ref_name == 'zeabur-airflow-deploy')
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Build image
+      - name: Tag and push image
+        if: >
+          github.event_name == 'push' &&
+          (github.ref_name == 'main' || github.ref_name == 'zeabur-airflow-deploy')
         run: |
           tags=(
             "${{ steps.image.outputs.sha_tag }}"
@@ -101,16 +103,7 @@ jobs:
           if [[ -n "${{ steps.image.outputs.latest_tag }}" ]]; then
             tags+=("${{ steps.image.outputs.latest_tag }}")
           fi
-          args=()
           for tag in "${tags[@]}"; do
-            args+=("-t" "$tag")
+            docker tag linkedin-notifier:${{ github.sha }} "${tag}"
+            docker push "${tag}"
           done
-          docker build "${args[@]}" .
-
-      - name: Push image
-        run: |
-          docker push "${{ steps.image.outputs.sha_tag }}"
-          docker push "${{ steps.image.outputs.branch_tag }}"
-          if [[ -n "${{ steps.image.outputs.latest_tag }}" ]]; then
-            docker push "${{ steps.image.outputs.latest_tag }}"
-          fi
