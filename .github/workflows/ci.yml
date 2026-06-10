@@ -81,29 +81,36 @@ jobs:
             echo "latest_tag=" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build image
-        run: |
-          docker build -t linkedin-notifier:${{ github.sha }} .
-
       - name: Log in to GHCR
         if: >
           github.event_name == 'push' &&
           (github.ref_name == 'main' || github.ref_name == 'zeabur-airflow-deploy')
         run: echo "${{ github.token }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
-      - name: Tag and push image
+      - name: Build image
+        run: |
+          # Build with all final tags so layers are shared and each push
+          # references blobs already uploaded — avoids GHCR "unknown blob"
+          # errors that occur when docker-tagging after the fact across repos.
+          tags=("-t" "linkedin-notifier:${{ github.sha }}")
+          if [[ "${{ github.event_name }}" == "push" ]] && \
+             { [[ "${{ github.ref_name }}" == "main" ]] || \
+               [[ "${{ github.ref_name }}" == "zeabur-airflow-deploy" ]]; }; then
+            tags+=("-t" "${{ steps.image.outputs.sha_tag }}")
+            tags+=("-t" "${{ steps.image.outputs.branch_tag }}")
+            if [[ -n "${{ steps.image.outputs.latest_tag }}" ]]; then
+              tags+=("-t" "${{ steps.image.outputs.latest_tag }}")
+            fi
+          fi
+          docker build "${tags[@]}" .
+
+      - name: Push image
         if: >
           github.event_name == 'push' &&
           (github.ref_name == 'main' || github.ref_name == 'zeabur-airflow-deploy')
         run: |
-          tags=(
-            "${{ steps.image.outputs.sha_tag }}"
-            "${{ steps.image.outputs.branch_tag }}"
-          )
+          docker push "${{ steps.image.outputs.sha_tag }}"
+          docker push "${{ steps.image.outputs.branch_tag }}"
           if [[ -n "${{ steps.image.outputs.latest_tag }}" ]]; then
-            tags+=("${{ steps.image.outputs.latest_tag }}")
+            docker push "${{ steps.image.outputs.latest_tag }}"
           fi
-          for tag in "${tags[@]}"; do
-            docker tag linkedin-notifier:${{ github.sha }} "${tag}"
-            docker push "${tag}"
-          done
