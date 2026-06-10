@@ -46,6 +46,11 @@ def load_env(
 def to_xcom_safe_value(value):
     if value is None:
         return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
     if isinstance(value, (pd.Timestamp, datetime, date)):
         return value.isoformat()
     return value
