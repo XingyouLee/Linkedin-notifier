@@ -1,0 +1,109 @@
+name: Smoke test (manual only)
+
+# Real Airflow smoke runs are ONLY permitted here via workflow_dispatch.
+# Never run scripts/run_airflow_test_mode_smoke.sh locally against a live scheduler.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_jobs:
+        description: "LINKEDIN_TEST_MAX_JOBS – max jobs per scan (keep tiny)"
+        default: "3"
+        required: false
+      max_scan_rows:
+        description: "LINKEDIN_TEST_MAX_SCAN_ROWS"
+        default: "5"
+        required: false
+      max_jd_jobs:
+        description: "LINKEDIN_TEST_MAX_JD_JOBS"
+        default: "5"
+        required: false
+      max_fit_jobs:
+        description: "LINKEDIN_TEST_MAX_FIT_JOBS"
+        default: "3"
+        required: false
+      max_notify_jobs:
+        description: "LINKEDIN_TEST_MAX_NOTIFY_JOBS"
+        default: "3"
+        required: false
+      sample_count:
+        description: "FITTING_SAMPLE_COUNT – LLM samples per job (keep 1 for smoke)"
+        default: "1"
+        required: false
+      sample_mode:
+        description: "FITTING_SAMPLE_MODE (leave blank to use server default)"
+        default: ""
+        required: false
+      sample_temperature:
+        description: "FITTING_SAMPLE_TEMPERATURE (leave blank to use server default)"
+        default: ""
+        required: false
+
+jobs:
+  smoke:
+    name: Airflow end-to-end smoke
+    runs-on: ubuntu-latest
+    # Use a dedicated environment so secrets are scoped and require approval.
+    environment: smoke
+    concurrency:
+      group: linkedin-notifier-smoke
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Airflow CLI image
+        run: docker build -t linkedin-notifier-smoke .
+
+      - name: Run smoke script
+        env:
+          # Gate: the smoke script checks GITHUB_ACTIONS to refuse local runs.
+          GITHUB_ACTIONS: "true"
+          LINKEDIN_TEST_MODE: "true"
+          REQUIRE_DISCORD_VERIFICATION: "true"
+
+          # --- cap inputs ---
+          LINKEDIN_TEST_MAX_JOBS: ${{ github.event.inputs.max_jobs }}
+          LINKEDIN_TEST_MAX_SCAN_ROWS: ${{ github.event.inputs.max_scan_rows }}
+          LINKEDIN_TEST_MAX_JD_JOBS: ${{ github.event.inputs.max_jd_jobs }}
+          LINKEDIN_TEST_MAX_FIT_JOBS: ${{ github.event.inputs.max_fit_jobs }}
+          LINKEDIN_TEST_MAX_NOTIFY_JOBS: ${{ github.event.inputs.max_notify_jobs }}
+
+          # --- LLM sampling inputs (passed through to dag_run --conf) ---
+          FITTING_SAMPLE_COUNT: ${{ github.event.inputs.sample_count }}
+          FITTING_SAMPLE_MODE: ${{ github.event.inputs.sample_mode }}
+          FITTING_SAMPLE_TEMPERATURE: ${{ github.event.inputs.sample_temperature }}
+
+          # --- secrets (never echoed) ---
+          # Business DB: required for queue/profile access
+          JOBS_DB_URL: ${{ secrets.JOBS_DB_URL }}
+          # Airflow metadata DB: lets the `airflow` CLI trigger DAGs on the
+          # deployed instance without starting a local scheduler.
+          AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${{ secrets.AIRFLOW_METADATA_DB_URL }}
+          # LLM provider config
+          LLM_ENDPOINTS_JSON: ${{ secrets.LLM_ENDPOINTS_JSON }}
+          NC_API_KEY: ${{ secrets.NC_API_KEY }}
+          FITTING_MODEL_NAME: ${{ secrets.FITTING_MODEL_NAME }}
+          # Discord notifications
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+
+        run: |
+          docker run --rm \
+            -e GITHUB_ACTIONS \
+            -e LINKEDIN_TEST_MODE \
+            -e REQUIRE_DISCORD_VERIFICATION \
+            -e LINKEDIN_TEST_MAX_JOBS \
+            -e LINKEDIN_TEST_MAX_SCAN_ROWS \
+            -e LINKEDIN_TEST_MAX_JD_JOBS \
+            -e LINKEDIN_TEST_MAX_FIT_JOBS \
+            -e LINKEDIN_TEST_MAX_NOTIFY_JOBS \
+            -e FITTING_SAMPLE_COUNT \
+            -e FITTING_SAMPLE_MODE \
+            -e FITTING_SAMPLE_TEMPERATURE \
+            -e JOBS_DB_URL \
+            -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN \
+            -e LLM_ENDPOINTS_JSON \
+            -e NC_API_KEY \
+            -e FITTING_MODEL_NAME \
+            -e DISCORD_BOT_TOKEN \
+            linkedin-notifier-smoke \
+            bash -lc "./scripts/run_airflow_test_mode_smoke.sh"

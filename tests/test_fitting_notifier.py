@@ -253,7 +253,7 @@ def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
 ):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt, temperature=None):
         calls.append((request_url, model_name, prompt))
         if request_url == "https://empty.example/v1/responses":
             raise ValueError("response_missing_output_text")
@@ -377,7 +377,7 @@ def test_parse_llm_endpoints_from_env_ignores_legacy_single_endpoint_env(monkeyp
 def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt, temperature=None):
         calls.append((request_url, model_name, prompt))
         if request_url == "https://nowcoding.ai/v1/responses":
             raise requests.Timeout("nc timeout")
@@ -425,7 +425,7 @@ def test_fitting_notifier_does_not_read_profile_model_name_for_runtime_selection
 def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_all_endpoints_fail(
     monkeypatch,
 ):
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt, temperature=None):
         raise ValueError("response_missing_output_text")
 
     monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
@@ -451,7 +451,7 @@ def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_
 def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(monkeypatch):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt, temperature=None):
         calls.append(request_url)
         return {"fit_score": 77, "decision": "Moderate Fit"}
 

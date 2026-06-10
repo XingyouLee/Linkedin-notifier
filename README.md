@@ -53,12 +53,15 @@ still used by host CLI tooling, but compose defaults to its own local
 
 ### Astro local development
 
-1. Start local Airflow:
-   - `astro dev start`
-2. Trigger scan DAG:
-   - `astro dev run dags trigger linkedin_notifier`
-3. Or trigger fitting DAG directly:
-   - `astro dev run dags trigger linkedin_fitting_notifier`
+Do not use local Astro as a smoke-test runner. Starting the local scheduler can
+resume old scheduled DAG runs. For safe local DAG validation, use:
+
+```bash
+astro dev pytest .astro/test_dag_integrity_default.py --args "-q"
+```
+
+Real end-to-end smoke runs belong in the manual GitHub Actions workflow described
+in [Airflow test mode](#airflow-test-mode).
 
 ## Environment variables
 
@@ -94,68 +97,77 @@ Common vars:
 
 ## Airflow test mode
 
-`LINKEDIN_TEST_MODE=true` means running the real Airflow DAGs against the test-only profile rows. It is **not** the same as running `pytest`, and it is **not** the same as the helper script `scripts/verify_notification_runs_test_mode.py`. Use it when you want an end-to-end smoke run through the actual scheduler/tasks.
+> **Real smoke runs are GitHub Actions only. Running `scripts/run_airflow_test_mode_smoke.sh` locally is forbidden.** The script refuses to run unless `GITHUB_ACTIONS=true` is present (set automatically by the runner).
 
-Recommended smoke-test env:
+`LINKEDIN_TEST_MODE=true` means running the real Airflow DAGs against the test-only profile rows. It is **not** the same as running `pytest`, and it is **not** the same as the helper script `scripts/verify_notification_runs_test_mode.py`.
 
-```env
-LINKEDIN_TEST_MODE=true
-LINKEDIN_TEST_MAX_JOBS=5
-LINKEDIN_TEST_MAX_SCAN_ROWS=5
-LINKEDIN_TEST_MAX_JD_JOBS=5
-LINKEDIN_TEST_MAX_FIT_JOBS=5
-```
+### Local validation (permitted)
 
-Then trigger the real DAG:
+Use `pytest` and `astro dev pytest` only — no scheduler is started:
 
 ```bash
-airflow dags trigger linkedin_notifier
+# Unit tests (no Airflow runtime needed)
+pytest tests -q
+
+# DAG integrity / parse check via Astro Runtime container
+astro dev pytest .astro/test_dag_integrity_default.py --args "-q"
+
+# DB/Django contract check (no live DAGs)
+LINKEDIN_TEST_MODE=true python scripts/verify_notification_runs_test_mode.py
 ```
+
+### Real smoke runs (GitHub Actions only)
+
+Trigger the `Smoke test (manual only)` workflow via GitHub Actions → **Actions** → **Smoke test (manual only)** → **Run workflow**.
+
+The workflow builds this repository's Airflow Docker image, runs the smoke script
+inside that image, and uses the Airflow CLI only to insert/poll a manual DAG run
+through the configured deployed Airflow metadata database. It does **not** run a
+local Astro scheduler.
+
+Required GitHub repository secrets (set under Settings → Secrets → Actions):
+
+| Secret | Purpose |
+|---|---|
+| `JOBS_DB_URL` | Business DB connection string |
+| `AIRFLOW_METADATA_DB_URL` | Deployed Airflow metadata DB, exposed to the container as `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` |
+| `LLM_ENDPOINTS_JSON` | JSON array of LLM provider endpoints |
+| `NC_API_KEY` | Provider API key (or equivalent for your provider) |
+| `FITTING_MODEL_NAME` | Default LLM model name for fitting |
+| `DISCORD_BOT_TOKEN` | Discord bot token for notification delivery |
+
+Workflow dispatch inputs (all optional, defaults are intentionally tiny):
+
+| Input | Default | Description |
+|---|---|---|
+| `max_jobs` | `3` | `LINKEDIN_TEST_MAX_JOBS` |
+| `max_scan_rows` | `5` | `LINKEDIN_TEST_MAX_SCAN_ROWS` |
+| `max_jd_jobs` | `5` | `LINKEDIN_TEST_MAX_JD_JOBS` |
+| `max_fit_jobs` | `3` | `LINKEDIN_TEST_MAX_FIT_JOBS` |
+| `max_notify_jobs` | `3` | `LINKEDIN_TEST_MAX_NOTIFY_JOBS` |
+| `sample_count` | `1` | `FITTING_SAMPLE_COUNT` — LLM samples per job |
+| `sample_mode` | _(blank)_ | `FITTING_SAMPLE_MODE` |
+| `sample_temperature` | _(blank)_ | `FITTING_SAMPLE_TEMPERATURE` |
+
+Non-blank `FITTING_SAMPLE_*` inputs are forwarded into the `dag_run --conf` payload.
 
 Expected behavior:
 
 - `linkedin_notifier` only selects profiles marked `test_mode_only` / `is_test_profile`.
 - Scan/filter/JD/fitting paths still execute as real Airflow tasks.
 - Test-mode caps keep the smoke run small instead of processing the full test backlog.
-- `linkedin_notifier` should trigger `linkedin_fitting_notifier`.
+- `linkedin_notifier` triggers `linkedin_fitting_notifier` automatically; the smoke script does **not** trigger it separately (doing so risks DDL/queue deadlocks).
 - `linkedin_fitting_notifier` should complete and create a notification run, including a `completed_zero_results` run when no jobs qualify.
 
-Cap variables:
-
-- `LINKEDIN_TEST_MAX_JOBS`: fallback cap used by test-mode stages when a stage-specific cap is not set.
-- `LINKEDIN_TEST_MAX_SCAN_ROWS`: max scanned rows kept before saving jobs/profile links.
-- `LINKEDIN_TEST_MAX_JD_JOBS`: max JD backlog records passed into the in-DAG JD worker.
-- `LINKEDIN_TEST_MAX_FIT_JOBS`: max fitting tasks queued/claimed in test mode.
-- `LINKEDIN_TEST_MAX_NOTIFY_JOBS`: max jobs sent to Discord in test mode (default 3); all successful LLM payloads are eligible regardless of fit decision.
-
-The helper script remains useful for a deterministic DB/Django contract check:
-
-```bash
-LINKEDIN_TEST_MODE=true python scripts/verify_notification_runs_test_mode.py
-```
-
-For a real Airflow smoke run, use the bounded trigger helper from the project root or Airflow container:
-
-```bash
-LINKEDIN_TEST_MODE=true \
-LINKEDIN_TEST_MAX_JOBS=3 \
-LINKEDIN_TEST_MAX_SCAN_ROWS=5 \
-LINKEDIN_TEST_MAX_JD_JOBS=5 \
-LINKEDIN_TEST_MAX_FIT_JOBS=5 \
-LINKEDIN_TEST_MAX_NOTIFY_JOBS=3 \
-./scripts/run_airflow_test_mode_smoke.sh
-```
-
-The smoke script now:
-- Guards `LINKEDIN_TEST_MODE=true` (exits with code 2 if not set).
+The smoke script:
+- Refuses to run outside GitHub Actions (exit code 4).
+- Guards `LINKEDIN_TEST_MODE=true` (exit code 2).
+- Requires `JOBS_DB_URL` and `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` so it cannot fall back to a local metadata DB (exit code 5).
+- Refuses to trigger if `linkedin_notifier` or `linkedin_fitting_notifier` already has active queued/running/scheduled runs (exit code 6).
 - Diagnoses Discord config: warns if `DISCORD_BOT_TOKEN` is missing.
-- Fails fast on `REQUIRE_DISCORD_VERIFICATION=true` when Discord config is incomplete (exit code 3).
-- Triggers `linkedin_notifier` with full test-mode conf.
+- The GitHub workflow sets `REQUIRE_DISCORD_VERIFICATION=true`, so missing Discord config fails fast (exit code 3).
 - Polls Airflow for both the scan DAG and the auto-triggered fitting DAG (configurable via `SMOKE_MAX_WAIT_SECONDS` and `SMOKE_POLL_INTERVAL`).
 - Prints a pass/fail summary with exit code 0 (all stages succeeded) or 1 (any stage failed or timed out).
-- Does **not** manually trigger `linkedin_fitting_notifier`: the scan DAG triggers it automatically. Triggering both can cause database DDL/queue deadlocks in local Airflow.
-
-This submits the actual `linkedin_notifier` DAG. It is intentionally separate from `pytest`: use it when you need production-like pipeline evidence against the test-only profile rows.
 
 ## Multi-user config
 
@@ -200,7 +212,22 @@ This submits the actual `linkedin_notifier` DAG. It is intentionally separate fr
 
 ## Zeabur deployment
 
-Deploy this repo to Zeabur as **one Docker app service plus two Postgres databases**. Zeabur does not use the root Docker Compose file directly; create the equivalent services in Zeabur and set the app env vars to the two Zeabur Postgres URLs.
+Deploy this repo to Zeabur as **one Docker app service plus two Postgres databases**.
+
+The preferred deployment flow is:
+
+1. Push changes to GitHub.
+2. GitHub Actions `CI` runs unit tests, DAG integrity, Swift tests, and Docker build.
+3. On `main` or `zeabur-airflow-deploy`, CI publishes the Docker image to GHCR:
+   - immutable SHA tag: `ghcr.io/xingyoulee/linkedin-notifier:<commit-sha>` when the owner/repo are lowercased by GHCR
+   - branch tag: `ghcr.io/xingyoulee/linkedin-notifier:main` or `:zeabur-airflow-deploy`
+   - `:latest` only for `main`
+4. Zeabur should pull the published GHCR image instead of building/running local Astro.
+
+If the repository owner casing differs, use the lowercase GHCR package name shown in the `Publish image to GHCR` job output.
+If the GHCR package is private, configure Zeabur with GHCR registry credentials or make the package public before pointing Zeabur at the image.
+
+Zeabur should run **one Docker app service plus two Postgres databases**. Zeabur does not use the root Docker Compose file directly; create the equivalent services in Zeabur and set the app env vars to the two Zeabur Postgres URLs.
 
 1. `linkedin-notifier`
    - Build from the root-level `Dockerfile`

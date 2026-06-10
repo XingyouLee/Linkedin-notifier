@@ -77,7 +77,7 @@ def _patch_connect(monkeypatch, cursor):
 def test_extract_fit_fields_rejects_non_numeric_score():
     payload = json.dumps({"fit_score": "Not Recommended", "decision": "Not Recommended"})
 
-    assert database._extract_fit_fields(payload) == (None, "Not Recommended")
+    assert database._extract_fit_fields(payload) == (None, "Not Recommended", None, None)
 
 
 def test_save_llm_matches_does_not_write_decision_into_score(monkeypatch):
@@ -106,6 +106,8 @@ def test_save_llm_matches_does_not_write_decision_into_score(monkeypatch):
             None,
             None,
             "Not Recommended",
+            None,
+            None,
             2,
             "4406173144",
         )

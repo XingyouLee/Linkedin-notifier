@@ -6,6 +6,24 @@ if [[ "${LINKEDIN_TEST_MODE:-}" != "true" ]]; then
   exit 2
 fi
 
+# This script triggers real Airflow DAGs against the configured Airflow
+# metadata database. It must only run inside GitHub Actions.
+if [[ "${GITHUB_ACTIONS:-}" != "true" ]]; then
+  echo "ERROR: Real Airflow smoke runs are only permitted in GitHub Actions." >&2
+  echo "ERROR: Use the smoke-test workflow_dispatch workflow in GitHub Actions." >&2
+  exit 4
+fi
+
+if [[ -z "${JOBS_DB_URL:-}" ]]; then
+  echo "ERROR: JOBS_DB_URL must be configured for the smoke workflow." >&2
+  exit 5
+fi
+
+if [[ -z "${AIRFLOW__DATABASE__SQL_ALCHEMY_CONN:-}" ]]; then
+  echo "ERROR: AIRFLOW__DATABASE__SQL_ALCHEMY_CONN must point to the deployed Airflow metadata DB." >&2
+  exit 5
+fi
+
 RUN_SUFFIX="smoke_$(date -u +%Y%m%dT%H%M%SZ)"
 SCAN_RUN_ID="${RUN_SUFFIX}_scan"
 
@@ -16,12 +34,15 @@ echo "LINKEDIN_TEST_MAX_SCAN_ROWS=${LINKEDIN_TEST_MAX_SCAN_ROWS:-default}"
 echo "LINKEDIN_TEST_MAX_JD_JOBS=${LINKEDIN_TEST_MAX_JD_JOBS:-default}"
 echo "LINKEDIN_TEST_MAX_FIT_JOBS=${LINKEDIN_TEST_MAX_FIT_JOBS:-default}"
 echo "LINKEDIN_TEST_MAX_NOTIFY_JOBS=${LINKEDIN_TEST_MAX_NOTIFY_JOBS:-3}"
+echo "FITTING_SAMPLE_COUNT=${FITTING_SAMPLE_COUNT:-default}"
+echo "FITTING_SAMPLE_MODE=${FITTING_SAMPLE_MODE:-default}"
+echo "FITTING_SAMPLE_TEMPERATURE=${FITTING_SAMPLE_TEMPERATURE:-default}"
 
-if command -v astro >/dev/null 2>&1; then
-  AIRFLOW_CMD=(astro dev run)
-else
-  AIRFLOW_CMD=(airflow)
+if ! command -v airflow >/dev/null 2>&1; then
+  echo "ERROR: airflow CLI is required. Run this script inside the project Airflow Docker image." >&2
+  exit 5
 fi
+AIRFLOW_CMD=(airflow)
 
 # ---------- Discord config diagnosis ----------
 discord_warnings=()
@@ -47,9 +68,58 @@ if [[ ${#discord_warnings[@]} -gt 0 ]]; then
 fi
 echo ""
 
+_active_runs_for_dag() {
+  local dag_id="$1"
+  "${AIRFLOW_CMD[@]}" dags list-runs "${dag_id}" --no-backfill -o json 2>/dev/null | python3 -c "
+import json, sys
+raw = sys.stdin.read()
+start = raw.find('[{')
+if start == -1:
+    start = raw.find('[')
+data = json.loads(raw[start:]) if start != -1 else []
+active_states = {'queued', 'running', 'scheduled'}
+for run in data:
+    state = str(run.get('state') or '').lower()
+    if state in active_states:
+        print(f\"{run.get('dag_id') or '${dag_id}'} {run.get('run_id')} {state}\")
+"
+}
+
+_assert_no_active_runs() {
+  local active
+  active="$(_active_runs_for_dag "linkedin_notifier"; _active_runs_for_dag "linkedin_fitting_notifier")"
+  if [[ -n "${active}" ]]; then
+    echo "ERROR: Refusing to start smoke while Airflow already has active DAG runs:" >&2
+    echo "${active}" >&2
+    echo "ERROR: Resolve existing runs first; smoke must not queue behind or overlap production/scheduled work." >&2
+    exit 6
+  fi
+}
+
+_assert_no_active_runs
+
+# Build dag_run conf, injecting FITTING_SAMPLE_* only when set.
+TRIGGER_CONF=$(python3 - <<'PYEOF'
+import json, os
+conf = {
+    "LINKEDIN_TEST_MODE": True,
+    "LINKEDIN_TEST_MAX_JOBS":       int(os.environ.get("LINKEDIN_TEST_MAX_JOBS", 3)),
+    "LINKEDIN_TEST_MAX_SCAN_ROWS":  int(os.environ.get("LINKEDIN_TEST_MAX_SCAN_ROWS", 5)),
+    "LINKEDIN_TEST_MAX_JD_JOBS":    int(os.environ.get("LINKEDIN_TEST_MAX_JD_JOBS", 5)),
+    "LINKEDIN_TEST_MAX_FIT_JOBS":   int(os.environ.get("LINKEDIN_TEST_MAX_FIT_JOBS", 5)),
+    "LINKEDIN_TEST_MAX_NOTIFY_JOBS": int(os.environ.get("LINKEDIN_TEST_MAX_NOTIFY_JOBS", 3)),
+}
+for key in ("FITTING_SAMPLE_COUNT", "FITTING_SAMPLE_MODE", "FITTING_SAMPLE_TEMPERATURE"):
+    val = os.environ.get(key, "").strip()
+    if val:
+        conf[key] = val
+print(json.dumps(conf))
+PYEOF
+)
+
 # ---------- Trigger scan DAG ----------
 echo "Triggering linkedin_notifier ..."
-"${AIRFLOW_CMD[@]}" dags trigger linkedin_notifier --run-id "${SCAN_RUN_ID}" --conf "{\"LINKEDIN_TEST_MODE\": true, \"LINKEDIN_TEST_MAX_JOBS\": ${LINKEDIN_TEST_MAX_JOBS:-3}, \"LINKEDIN_TEST_MAX_SCAN_ROWS\": ${LINKEDIN_TEST_MAX_SCAN_ROWS:-5}, \"LINKEDIN_TEST_MAX_JD_JOBS\": ${LINKEDIN_TEST_MAX_JD_JOBS:-5}, \"LINKEDIN_TEST_MAX_FIT_JOBS\": ${LINKEDIN_TEST_MAX_FIT_JOBS:-5}, \"LINKEDIN_TEST_MAX_NOTIFY_JOBS\": ${LINKEDIN_TEST_MAX_NOTIFY_JOBS:-3}}"
+"${AIRFLOW_CMD[@]}" dags trigger linkedin_notifier --run-id "${SCAN_RUN_ID}" --conf "${TRIGGER_CONF}"
 
 # ---------- Wait helpers ----------
 MAX_WAIT_SECONDS="${SMOKE_MAX_WAIT_SECONDS:-600}"

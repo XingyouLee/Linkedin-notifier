@@ -159,21 +159,33 @@ def _coerce_fit_decision(value) -> Optional[str]:
     return decision or None
 
 
+def _coerce_optional_int(value) -> Optional[int]:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed
+
+
 def _extract_fit_fields(
     llm_match: Optional[str],
-) -> tuple[Optional[int], Optional[str]]:
+) -> tuple[Optional[int], Optional[str], Optional[int], Optional[int]]:
     if not llm_match:
-        return None, None
+        return None, None, None, None
     try:
         parsed = json.loads(llm_match)
         if not isinstance(parsed, dict):
-            return None, None
+            return None, None, None, None
         return (
             _coerce_fit_score(parsed.get("fit_score")),
             _coerce_fit_decision(parsed.get("decision")),
+            _coerce_optional_int(parsed.get("fit_score_spread")),
+            _coerce_optional_int(parsed.get("fit_sample_count")),
         )
     except Exception:
-        return None, None
+        return None, None, None, None
 
 
 def _resolve_default_resume_path() -> Optional[str]:
@@ -1059,6 +1071,8 @@ def init_db(*, bootstrap_profiles: bool = True):
                     fit_attempts INTEGER DEFAULT 0,
                     fit_last_error TEXT,
                     fit_updated_at TIMESTAMP,
+                    fit_score_spread INTEGER,
+                    fit_sample_count INTEGER,
                     user_status TEXT DEFAULT 'new',
                     user_note TEXT,
                     user_status_updated_at TIMESTAMP,
@@ -1085,6 +1099,20 @@ def init_db(*, bootstrap_profiles: bool = True):
                 """
                 ALTER TABLE profile_jobs
                 ADD COLUMN IF NOT EXISTS user_status_updated_at TIMESTAMP
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE profile_jobs
+                ADD COLUMN IF NOT EXISTS fit_score_spread INTEGER
+                """
+            )
+
+            cursor.execute(
+                """
+                ALTER TABLE profile_jobs
+                ADD COLUMN IF NOT EXISTS fit_sample_count INTEGER
                 """
             )
 
@@ -1936,13 +1964,15 @@ def save_llm_matches(jobs_df: pd.DataFrame):
     records = []
     for row in update_df[PROFILE_JOB_RESULT_COLUMNS].itertuples(index=False, name=None):
         profile_id, job_id, llm_match, llm_match_error = row
-        fit_score, fit_decision = _extract_fit_fields(llm_match)
+        fit_score, fit_decision, fit_score_spread, fit_sample_count = _extract_fit_fields(llm_match)
         records.append(
             (
                 llm_match,
                 llm_match_error,
                 fit_score,
                 fit_decision,
+                fit_score_spread,
+                fit_sample_count,
                 int(profile_id),
                 str(job_id),
             )
@@ -1956,7 +1986,9 @@ def save_llm_matches(jobs_df: pd.DataFrame):
                 SET llm_match = %s,
                     llm_match_error = %s,
                     fit_score = %s,
-                    fit_decision = %s
+                    fit_decision = %s,
+                    fit_score_spread = %s,
+                    fit_sample_count = %s
                 WHERE profile_id = %s
                   AND job_id = %s
                 """,

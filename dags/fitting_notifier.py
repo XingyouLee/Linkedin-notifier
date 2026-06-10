@@ -13,7 +13,13 @@ import requests
 import time
 from dags import database
 from dags import materials_launch
-from dags.runtime_utils import df_to_xcom_records, load_env, runtime_bool, runtime_int
+from dags.runtime_utils import (
+    df_to_xcom_records,
+    load_env,
+    runtime_bool,
+    runtime_conf_value,
+    runtime_int,
+)
 
 
 load_env(override_if_missing=True)
@@ -228,8 +234,60 @@ def _summarize_logged_model_names(
     return fallback_model_name or "unknown"
 
 
+def _is_sample_validation_runtime_error(error_message: str) -> bool:
+    text = str(error_message)
+    if not text.startswith("FATAL_API::"):
+        return False
+    validation_markers = (
+        "error=response_invalid_json",
+        "error=response_json_not_object",
+    )
+    segments = [
+        segment.strip()
+        for segment in _strip_prefix(text, "FATAL_API::").split(" | ")
+        if segment.strip()
+    ]
+    return bool(segments) and all(
+        any(marker in segment for marker in validation_markers)
+        for segment in segments
+    )
+
+
 def _default_fitting_model_name() -> str:
     return _normalize_text(os.getenv("FITTING_MODEL_NAME")) or "gpt-5.4"
+
+
+def _runtime_float(key: str, default: float) -> float:
+    value = runtime_conf_value(key, None)
+    if value is None:
+        value = os.getenv(key)
+    try:
+        return float(value) if value is not None else float(default)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _runtime_text(key: str, default: str = "") -> str:
+    value = runtime_conf_value(key, None)
+    if value is None:
+        value = os.getenv(key)
+    text = _normalize_text(value)
+    return text if text else default
+
+
+def _fitting_sample_mode() -> str:
+    mode = _runtime_text("FITTING_SAMPLE_MODE", "single_endpoint")
+    if mode != "single_endpoint":
+        raise ValueError(
+            f"unsupported_fitting_sample_mode: {mode} "
+            "is not implemented in the first P0.1 pass"
+        )
+    return mode
+
+
+def _fitting_sample_temperature() -> float:
+    temperature = _runtime_float("FITTING_SAMPLE_TEMPERATURE", 0.4)
+    return temperature if temperature > 0 else 0.4
 
 
 def _execute_prepared_fitting_items(
@@ -354,16 +412,22 @@ def _log_job_match_result(job_result):
 
     fit_score = None
     decision = None
+    sample_fields = ""
     try:
         parsed_match = json.loads(job_result.get("llm_match") or "{}")
         fit_score = parsed_match.get("fit_score")
         decision = parsed_match.get("decision")
+        if parsed_match.get("fit_sample_count") is not None:
+            sample_fields = (
+                f" fit_sample_count={parsed_match.get('fit_sample_count')}"
+                f" fit_score_spread={parsed_match.get('fit_score_spread')}"
+            )
     except Exception:
         pass
 
     print(
         f"llm_result profile_id={profile_id} job_id={job_id} model_name={model_name} status=ok "
-        f"fit_score={fit_score} decision={decision}"
+        f"fit_score={fit_score} decision={decision}{sample_fields}"
     )
 
 
@@ -670,11 +734,14 @@ def _request_llm_json(
     api_key: str,
     model_name: str,
     prompt: str,
+    temperature: float | None = None,
 ) -> dict:
     payload = {
         "model": model_name,
         "input": prompt,
     }
+    if temperature is not None and temperature > 0:
+        payload["temperature"] = temperature
     response = requests.post(
         request_url,
         headers={
@@ -691,7 +758,10 @@ def _request_llm_json(
     if not output_text:
         raise ValueError("response_missing_output_text")
 
-    parsed = json.loads(output_text)
+    try:
+        parsed = json.loads(output_text)
+    except Exception as error:
+        raise ValueError(f"response_invalid_json: {error}") from error
     if not isinstance(parsed, dict):
         raise ValueError("response_json_not_object")
     return parsed
@@ -749,6 +819,7 @@ def _request_llm_json_with_fallback(
     model_name: str,
     prompt: str,
     return_metadata: bool = False,
+    temperature: float | None = None,
 ) -> dict | tuple[dict, str]:
     transient_errors: list[str] = []
     fatal_errors: list[str] = []
@@ -767,6 +838,7 @@ def _request_llm_json_with_fallback(
                 api_key=endpoint["api_key"],
                 model_name=effective_model_name,
                 prompt=prompt,
+                temperature=temperature,
             )
             if return_metadata:
                 return parsed, effective_model_name
@@ -993,6 +1065,180 @@ def _apply_fit_caps(
         "severity": severity,
     }
     return normalized_match
+
+
+def _aggregate_fit_samples(
+    samples: list[dict],
+    *,
+    job_title: str,
+    jd_text: str,
+    candidate_summary: dict,
+) -> dict:
+    """Aggregate multiple capped fit samples using min-aggregation (conservative)."""
+    scores = [s["fit_score"] for s in samples]
+    decision_ranks = [MATCH_DECISION_RANK[s["decision"]] for s in samples]
+
+    best_idx = scores.index(min(scores))
+    worst_decision_idx = decision_ranks.index(min(decision_ranks))
+
+    base = dict(samples[best_idx])
+
+    # Use the worst decision
+    base["decision"] = MATCH_DECISION_ORDER[min(decision_ranks)]
+    # min score
+    base["fit_score"] = min(scores)
+
+    # OR semantics for blockers; merge reasons from the blocking sample
+    language_blocker = any(
+        s.get("language_check", {}).get("language_blocker") for s in samples
+    )
+    experience_blocker = any(
+        s.get("experience_check", {}).get("experience_blocker") for s in samples
+    )
+
+    # Pick reason/numeric fields from the blocking sample when present; otherwise
+    # keep the lowest-score sample as the conservative source.
+    exp_source = next(
+        (
+            sample
+            for sample in samples
+            if sample.get("experience_check", {}).get("experience_blocker")
+        ),
+        samples[best_idx],
+    )
+    ec = dict(exp_source.get("experience_check") or {})
+    ec["experience_blocker"] = experience_blocker
+    if experience_blocker and not ec.get("reason"):
+        blocking_reasons = [
+            s.get("experience_check", {}).get("reason", "")
+            for s in samples
+            if s.get("experience_check", {}).get("experience_blocker")
+        ]
+        ec["reason"] = "; ".join(r for r in blocking_reasons if r)
+    base["experience_check"] = ec
+
+    language_source = next(
+        (
+            sample
+            for sample in samples
+            if sample.get("language_check", {}).get("language_blocker")
+        ),
+        samples[worst_decision_idx],
+    )
+    lc = dict(language_source.get("language_check") or {})
+    lc["language_blocker"] = language_blocker
+    base["language_check"] = lc
+
+    # Re-run caps intentionally: OR-merged blockers can make the final
+    # conservative result stricter than the raw min sample.
+    base = _apply_fit_caps(
+        base,
+        job_title=job_title,
+        jd_text=jd_text,
+        candidate_summary=candidate_summary,
+    )
+
+    # Attach sampling metadata
+    base["fit_score_spread"] = max(scores) - min(scores)
+    base["fit_sample_count"] = len(samples)
+    base["fit_sample_scores"] = scores
+
+    return base
+
+
+def _sample_llm_matches(
+    *,
+    endpoints: list[dict],
+    model_name: str,
+    prompt: str,
+    sample_count: int,
+    temperature: float,
+    job_title: str,
+    jd_text: str,
+    candidate_summary: dict,
+) -> dict:
+    """Run single-endpoint repeated sampling and return min-aggregated result."""
+    successful_samples: list[dict] = []
+    sample_models: list[str] = []
+    sample_errors: list[str] = []
+    fatal_runtime_errors: list[RuntimeError] = []
+    transient_runtime_errors: list[RuntimeError] = []
+    validation_errors: list[Exception] = []
+
+    for _ in range(sample_count):
+        for attempt in range(3):
+            sample_prompt = prompt
+            if attempt > 0:
+                sample_prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
+            try:
+                parsed, used_model_name = _request_llm_json_with_fallback(
+                    endpoints=endpoints,
+                    model_name=model_name,
+                    prompt=sample_prompt,
+                    return_metadata=True,
+                    temperature=temperature,
+                )
+                parsed = _apply_fit_caps(
+                    parsed,
+                    job_title=job_title,
+                    jd_text=jd_text,
+                    candidate_summary=candidate_summary,
+                )
+                successful_samples.append(parsed)
+                sample_models.append(used_model_name)
+                break
+            except RuntimeError as error:
+                error_message = str(error)
+                if _is_sample_validation_runtime_error(error_message):
+                    sample_errors.append(error_message)
+                    validation_errors.append(
+                        ValueError(_strip_prefix(error_message, "FATAL_API::"))
+                    )
+                    break
+                if error_message.startswith("TRANSIENT_API::") and attempt < 2:
+                    time.sleep(min(2**attempt, 4))
+                    continue
+                if error_message.startswith("FATAL_API::"):
+                    fatal_runtime_errors.append(error)
+                else:
+                    transient_runtime_errors.append(error)
+                sample_errors.append(error_message)
+                break
+            except Exception as error:
+                validation_errors.append(error)
+                sample_errors.append(str(error) or type(error).__name__)
+                break
+
+    if fatal_runtime_errors:
+        raise fatal_runtime_errors[-1]
+
+    if not successful_samples:
+        if validation_errors:
+            raise ValueError(str(validation_errors[-1]) or "invalid_json_response")
+        if transient_runtime_errors:
+            raise transient_runtime_errors[-1]
+        raise ValueError("invalid_json_response")
+
+    if len(successful_samples) == 1:
+        single = dict(successful_samples[0])
+        single["fit_score_spread"] = 0
+        single["fit_sample_count"] = 1
+        single["fit_sample_scores"] = [single["fit_score"]]
+        single["fit_sample_models"] = sample_models
+        if sample_errors:
+            single["fit_sample_errors"] = sample_errors
+        return single
+
+    aggregated = _aggregate_fit_samples(
+        successful_samples,
+        job_title=job_title,
+        jd_text=jd_text,
+        candidate_summary=candidate_summary,
+    )
+    aggregated["fit_sample_models"] = sample_models
+    if sample_errors:
+        aggregated["fit_sample_errors"] = sample_errors
+    return aggregated
 
 
 def _build_fit_prompt(
@@ -1472,6 +1718,40 @@ def linkedin_fitting_notifier():
                 prompt_text=profile_record.get("fit_prompt_config"),
             )
             model_name = _default_fitting_model_name()
+
+            sample_count = runtime_int("FITTING_SAMPLE_COUNT", 1, minimum=1)
+            if sample_count > 1:
+                try:
+                    _fitting_sample_mode()
+                    sample_temperature = _fitting_sample_temperature()
+                    parsed = _sample_llm_matches(
+                        endpoints=llm_endpoints,
+                        model_name=model_name,
+                        prompt=base_prompt,
+                        sample_count=sample_count,
+                        temperature=sample_temperature,
+                        job_title=job_title,
+                        jd_text=jd_text,
+                        candidate_summary=candidate_summary,
+                    )
+                    used_model_name = ",".join(
+                        parsed.get("fit_sample_models") or [model_name]
+                    )
+                    return item, _build_job_match_result(
+                        profile_id,
+                        job_id,
+                        llm_match=json.dumps(parsed, ensure_ascii=False),
+                        model_name=used_model_name,
+                    )
+                except RuntimeError:
+                    raise
+                except Exception as error:
+                    return item, _build_job_match_result(
+                        profile_id,
+                        job_id,
+                        llm_match_error=str(error) or "invalid_json_response",
+                        model_name=model_name,
+                    )
 
             parsed = None
             last_error = None
