@@ -114,3 +114,52 @@ jobs:
           if [[ -n "${{ steps.image.outputs.latest_tag }}" ]]; then
             docker push "${{ steps.image.outputs.latest_tag }}"
           fi
+
+  deploy-zeabur:
+    name: Update Zeabur image tag
+    runs-on: ubuntu-latest
+    needs:
+      - publish-image
+    if: >
+      github.event_name == 'push' &&
+      github.ref_name == 'zeabur-airflow-deploy'
+    env:
+      ZEABUR_TOKEN: ${{ secrets.ZEABUR_TOKEN }}
+      ZEABUR_SERVICE_ID: ${{ secrets.ZEABUR_SERVICE_ID }}
+      ZEABUR_ENVIRONMENT_ID: ${{ secrets.ZEABUR_ENVIRONMENT_ID }}
+      ZEABUR_WORKSPACE: ${{ secrets.ZEABUR_WORKSPACE }}
+    steps:
+      - name: Check Zeabur deployment config
+        id: zeabur-config
+        shell: bash
+        run: |
+          missing=()
+          [[ -n "$ZEABUR_TOKEN" ]] || missing+=("ZEABUR_TOKEN")
+          [[ -n "$ZEABUR_SERVICE_ID" ]] || missing+=("ZEABUR_SERVICE_ID")
+          [[ -n "$ZEABUR_ENVIRONMENT_ID" ]] || missing+=("ZEABUR_ENVIRONMENT_ID")
+
+          if (( ${#missing[@]} > 0 )); then
+            printf -v joined '%s, ' "${missing[@]}"
+            echo "::notice::Skipping Zeabur deploy; missing GitHub secrets: ${joined%, }"
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "configured=true" >> "$GITHUB_OUTPUT"
+
+      - name: Update Zeabur Docker image tag
+        if: steps.zeabur-config.outputs.configured == 'true'
+        shell: bash
+        run: |
+          workspace_arg=()
+          if [[ -n "$ZEABUR_WORKSPACE" ]]; then
+            workspace_arg=("--workspace" "$ZEABUR_WORKSPACE")
+          fi
+
+          npx --yes zeabur@0.18.0 "${workspace_arg[@]}" auth login --token "$ZEABUR_TOKEN" -i=false
+          npx --yes zeabur@0.18.0 "${workspace_arg[@]}" service update tag \
+            --id "$ZEABUR_SERVICE_ID" \
+            --env-id "$ZEABUR_ENVIRONMENT_ID" \
+            --tag "${{ github.sha }}" \
+            --yes \
+            -i=false

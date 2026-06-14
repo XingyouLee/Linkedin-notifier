@@ -218,9 +218,23 @@ The preferred deployment flow is:
    - branch tag: `ghcr.io/xingyoulee/linkedin-notifier:main` or `:zeabur-airflow-deploy`
    - `:latest` only for `main`
 4. Zeabur should pull the published GHCR image instead of building/running local Astro.
+   Configure GitHub Actions to update the Zeabur Docker image tag to the
+   immutable commit SHA tag after each successful `zeabur-airflow-deploy` build.
 
 If the repository owner casing differs, use the lowercase GHCR package name shown in the `Publish image to GHCR` job output.
 If the GHCR package is private, configure Zeabur with GHCR registry credentials or make the package public before pointing Zeabur at the image.
+
+For automatic Zeabur deployment from CI, add these GitHub Actions secrets:
+
+- `ZEABUR_TOKEN`: Zeabur personal access token.
+- `ZEABUR_SERVICE_ID`: the Docker app service ID.
+- `ZEABUR_ENVIRONMENT_ID`: the Zeabur environment ID for that service.
+- `ZEABUR_WORKSPACE`: optional team/workspace name or ID when the service is not in the personal workspace.
+
+The app service image address stays `ghcr.io/xingyoulee/linkedin-notifier`. The
+initial image tag can be `zeabur-airflow-deploy`, but CI will update it to the
+current commit SHA tag after publishing the image. This avoids relying on
+Zeabur to notice that a fixed branch tag now points at a different GHCR digest.
 
 Zeabur should run **one Docker app service plus two Postgres databases**. Zeabur does not use the root Docker Compose file directly; create the equivalent services in Zeabur and set the app env vars to the two Zeabur Postgres URLs.
 
