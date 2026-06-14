@@ -448,6 +448,81 @@ def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_
     )
 
 
+def test_build_llm_call_budget_defaults_to_twenty_percent_success_headroom(monkeypatch):
+    monkeypatch.delenv("FITTING_BILLABLE_CALL_MULTIPLIER", raising=False)
+    monkeypatch.delenv("FITTING_TOTAL_CALL_MULTIPLIER", raising=False)
+
+    budget = fitting_notifier._build_llm_call_budget(10)
+
+    assert budget.snapshot()["billable_success_limit"] == 12
+    assert budget.snapshot()["total_attempt_limit"] == 40
+
+
+def test_llm_call_budget_does_not_count_http_error_as_billable(monkeypatch):
+    budget = fitting_notifier._LlmCallBudget(
+        billable_success_limit=1,
+        total_attempt_limit=1,
+    )
+
+    class FakeResponse:
+        def raise_for_status(self):
+            response = requests.Response()
+            response.status_code = 403
+            raise requests.HTTPError("403 Client Error", response=response)
+
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(requests.HTTPError):
+        fitting_notifier._request_llm_json(
+            request_url="https://forbidden.example/v1/responses",
+            api_key="bad-key",
+            model_name="gpt-5.4",
+            prompt="Return JSON only",
+            call_budget=budget,
+        )
+
+    snapshot = budget.snapshot()
+    assert snapshot["billable_successes"] == 0
+    assert snapshot["reserved_billable_slots"] == 0
+    assert snapshot["total_attempts"] == 1
+
+    with pytest.raises(RuntimeError, match="total_attempt_limit"):
+        budget.reserve_attempt()
+
+
+def test_llm_call_budget_counts_successful_empty_output_as_billable(monkeypatch):
+    budget = fitting_notifier._LlmCallBudget(
+        billable_success_limit=1,
+        total_attempt_limit=3,
+    )
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"output_text": ""}
+
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(ValueError, match="response_missing_output_text"):
+        fitting_notifier._request_llm_json(
+            request_url="https://empty.example/v1/responses",
+            api_key="test-key",
+            model_name="gpt-5.4",
+            prompt="Return JSON only",
+            call_budget=budget,
+        )
+
+    snapshot = budget.snapshot()
+    assert snapshot["billable_successes"] == 1
+    assert snapshot["reserved_billable_slots"] == 0
+    assert snapshot["total_attempts"] == 1
+
+    with pytest.raises(RuntimeError, match="billable_success_limit"):
+        budget.reserve_attempt()
+
+
 def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(monkeypatch):
     calls = []
 

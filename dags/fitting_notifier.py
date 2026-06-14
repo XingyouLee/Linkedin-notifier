@@ -6,10 +6,12 @@ import ast
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 from datetime import datetime
+import math
 import os
 import pandas as pd
 import re
 import requests
+from threading import Lock
 import time
 from dags import database
 from dags import materials_launch
@@ -58,6 +60,63 @@ YEARS_RANGE_RE = re.compile(
 )
 YEARS_SINGLE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)", re.I)
 LOGGED_MODEL_NAME_RE = re.compile(r"model_name=([^\s|]+)")
+
+
+class _LlmCallBudget:
+    def __init__(
+        self,
+        *,
+        billable_success_limit: int,
+        total_attempt_limit: int,
+    ):
+        self.billable_success_limit = max(0, int(billable_success_limit))
+        self.total_attempt_limit = max(0, int(total_attempt_limit))
+        self._billable_successes = 0
+        self._reserved_billable_slots = 0
+        self._total_attempts = 0
+        self._lock = Lock()
+
+    def reserve_attempt(self) -> None:
+        with self._lock:
+            if self._total_attempts >= self.total_attempt_limit:
+                raise RuntimeError(self._limit_error("total_attempt_limit"))
+            if (
+                self._billable_successes + self._reserved_billable_slots
+                >= self.billable_success_limit
+            ):
+                raise RuntimeError(self._limit_error("billable_success_limit"))
+            self._total_attempts += 1
+            self._reserved_billable_slots += 1
+
+    def record_billable_success(self) -> None:
+        with self._lock:
+            self._reserved_billable_slots = max(0, self._reserved_billable_slots - 1)
+            self._billable_successes += 1
+
+    def record_nonbillable_attempt(self) -> None:
+        with self._lock:
+            self._reserved_billable_slots = max(0, self._reserved_billable_slots - 1)
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "billable_successes": self._billable_successes,
+                "billable_success_limit": self.billable_success_limit,
+                "reserved_billable_slots": self._reserved_billable_slots,
+                "total_attempts": self._total_attempts,
+                "total_attempt_limit": self.total_attempt_limit,
+            }
+
+    def _limit_error(self, reason: str) -> str:
+        return (
+            "FATAL_API::llm_call_budget_exceeded "
+            f"reason={reason} "
+            f"billable_successes={self._billable_successes} "
+            f"billable_success_limit={self.billable_success_limit} "
+            f"reserved_billable_slots={self._reserved_billable_slots} "
+            f"total_attempts={self._total_attempts} "
+            f"total_attempt_limit={self.total_attempt_limit}"
+        )
 
 
 def _build_match_task_result(
@@ -462,6 +521,38 @@ def _fitting_claim_limit() -> int | None:
     return limit if limit > 0 else None
 
 
+def _runtime_float(var_name: str, default: float, *, minimum: float) -> float:
+    try:
+        value = float(os.getenv(var_name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+def _build_llm_call_budget(ready_job_count: int) -> _LlmCallBudget:
+    normalized_ready_job_count = max(0, int(ready_job_count or 0))
+    billable_multiplier = _runtime_float(
+        "FITTING_BILLABLE_CALL_MULTIPLIER",
+        1.2,
+        minimum=1.0,
+    )
+    total_multiplier = _runtime_float(
+        "FITTING_TOTAL_CALL_MULTIPLIER",
+        4.0,
+        minimum=1.0,
+    )
+    return _LlmCallBudget(
+        billable_success_limit=max(
+            1,
+            math.ceil(normalized_ready_job_count * billable_multiplier),
+        ),
+        total_attempt_limit=max(
+            1,
+            math.ceil(normalized_ready_job_count * total_multiplier),
+        ),
+    )
+
+
 def _normalize_string_list(values) -> list[str]:
     if not values:
         return []
@@ -670,31 +761,54 @@ def _request_llm_json(
     api_key: str,
     model_name: str,
     prompt: str,
+    call_budget: _LlmCallBudget | None = None,
 ) -> dict:
     payload = {
         "model": model_name,
         "input": prompt,
     }
-    response = requests.post(
-        request_url,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        json=payload,
-        timeout=120,
-    )
-    response.raise_for_status()
+    if call_budget is not None:
+        call_budget.reserve_attempt()
+    billable_recorded = False
+    try:
+        response = requests.post(
+            request_url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            json=payload,
+            timeout=120,
+        )
+    except Exception:
+        if call_budget is not None:
+            call_budget.record_nonbillable_attempt()
+        raise
+    try:
+        response.raise_for_status()
+    except Exception:
+        if call_budget is not None:
+            call_budget.record_nonbillable_attempt()
+        raise
 
-    response_json = response.json()
-    output_text = _extract_output_text(response_json)
-    if not output_text:
-        raise ValueError("response_missing_output_text")
+    if call_budget is not None:
+        call_budget.record_billable_success()
+        billable_recorded = True
 
-    parsed = json.loads(output_text)
-    if not isinstance(parsed, dict):
-        raise ValueError("response_json_not_object")
-    return parsed
+    try:
+        response_json = response.json()
+        output_text = _extract_output_text(response_json)
+        if not output_text:
+            raise ValueError("response_missing_output_text")
+
+        parsed = json.loads(output_text)
+        if not isinstance(parsed, dict):
+            raise ValueError("response_json_not_object")
+        return parsed
+    except Exception:
+        if call_budget is not None and not billable_recorded:
+            call_budget.record_nonbillable_attempt()
+        raise
 
 
 def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
@@ -748,6 +862,7 @@ def _request_llm_json_with_fallback(
     endpoints: list[dict[str, str]],
     model_name: str,
     prompt: str,
+    call_budget: _LlmCallBudget | None = None,
     return_metadata: bool = False,
 ) -> dict | tuple[dict, str]:
     transient_errors: list[str] = []
@@ -762,12 +877,15 @@ def _request_llm_json_with_fallback(
         )
         effective_model_name = endpoint.get("model") or model_name
         try:
-            parsed = _request_llm_json(
-                request_url=endpoint["request_url"],
-                api_key=endpoint["api_key"],
-                model_name=effective_model_name,
-                prompt=prompt,
-            )
+            request_kwargs = {
+                "request_url": endpoint["request_url"],
+                "api_key": endpoint["api_key"],
+                "model_name": effective_model_name,
+                "prompt": prompt,
+            }
+            if call_budget is not None:
+                request_kwargs["call_budget"] = call_budget
+            parsed = _request_llm_json(**request_kwargs)
             if return_metadata:
                 return parsed, effective_model_name
             return parsed
@@ -1482,6 +1600,7 @@ def linkedin_fitting_notifier():
                         endpoints=llm_endpoints,
                         model_name=model_name,
                         prompt=prompt,
+                        call_budget=llm_call_budget,
                         return_metadata=True,
                     )
                     parsed = _apply_fit_caps(
@@ -1808,9 +1927,13 @@ def linkedin_fitting_notifier():
             _log_job_match_result(job_result)
 
         ready_items = [prepared for prepared in prepared_items if prepared["ready"]]
+        llm_call_budget = _build_llm_call_budget(len(ready_items))
+        llm_budget_snapshot = llm_call_budget.snapshot()
 
         print(
-            f"Starting LLM fitting with concurrency={concurrency} jobs={len(ready_items)}"
+            f"Starting LLM fitting with concurrency={concurrency} jobs={len(ready_items)} "
+            f"billable_success_limit={llm_budget_snapshot['billable_success_limit']} "
+            f"total_attempt_limit={llm_budget_snapshot['total_attempt_limit']}"
         )
         def _handle_completed_event(event):
             item = event["prepared"]["item"]
@@ -1878,6 +2001,14 @@ def linkedin_fitting_notifier():
             f"done={finalize_counts['done'] + finalize_counts['failed'] + finalize_counts['requeued']} "
             f"total={len(claimed_items)} "
             f"successful={finalize_counts['done']} failed={finalize_counts['failed']} requeued={finalize_counts['requeued']}"
+        )
+        llm_budget_snapshot = llm_call_budget.snapshot()
+        print(
+            "LLM call budget summary: "
+            f"billable_successes={llm_budget_snapshot['billable_successes']} "
+            f"billable_success_limit={llm_budget_snapshot['billable_success_limit']} "
+            f"total_attempts={llm_budget_snapshot['total_attempts']} "
+            f"total_attempt_limit={llm_budget_snapshot['total_attempt_limit']}"
         )
         return _build_match_task_result(
             matched_jobs,
