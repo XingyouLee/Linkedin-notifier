@@ -621,6 +621,7 @@ def test_build_discord_notification_summary_message_reports_zero_results():
 def test_send_zero_result_notification_summaries_sends_per_active_profile(monkeypatch):
     import pandas as pd
 
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
     monkeypatch.setattr(
         fitting_notifier.database,
         "get_active_notification_profiles",
