@@ -1325,14 +1325,21 @@ def linkedin_fitting_notifier():
     @task
     def claim_fitting_tasks():
         limit = _fitting_claim_limit()
+        pending_before_claim = database.count_pending_fitting_tasks()
         claimed = database.claim_pending_fitting_tasks(limit=limit)
+        remaining_pending_after_claim = database.count_pending_fitting_tasks()
         if limit is None:
             print("Fitting claim cap: unlimited (FITTING_CLAIM_LIMIT=0)")
         elif _is_test_mode_enabled():
             print(f"Test mode fitting claim cap: limit={limit}")
         else:
             print(f"Fitting claim cap: limit={limit}")
-        print(f"Fitting claim summary: claimed={len(claimed or [])}")
+        print(
+            "Fitting claim summary: "
+            f"pending_before_claim={pending_before_claim} "
+            f"claimed={len(claimed or [])} "
+            f"remaining_pending_after_claim={remaining_pending_after_claim}"
+        )
         return claimed
 
     @task

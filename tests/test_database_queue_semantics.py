@@ -385,6 +385,22 @@ def test_claim_pending_fitting_tasks_only_reclaims_stale_fitting(monkeypatch):
     assert select_params[0] == 15
 
 
+def test_count_pending_fitting_tasks_matches_ready_pending_queue_scope(monkeypatch):
+    cursor = DummyCursor()
+    cursor._next_fetch = (12,)
+    _patch_connect(monkeypatch, cursor)
+
+    count = database.count_pending_fitting_tasks()
+
+    assert count == 12
+    count_sql = cursor.calls[0][1]
+    assert "pj.fit_status = 'pending_fit'" in count_sql
+    assert "p.is_active = TRUE" in count_sql
+    assert "is_test_profile" in count_sql
+    assert "j.description IS NOT NULL" in count_sql
+    assert "pj.llm_match IS NULL" in count_sql
+
+
 def test_claim_pending_jd_requests_scopes_to_requested_job_ids(monkeypatch):
     cursor = DummyCursor()
     cursor._rows = [{"job_id": "job-1", "job_url": "https://example.com/job-1"}]

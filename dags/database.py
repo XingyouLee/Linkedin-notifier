@@ -1568,6 +1568,30 @@ def enqueue_fitting_requests(jobs_df: pd.DataFrame):
     return queued
 
 
+def count_pending_fitting_tasks() -> int:
+    """Count pending fitting tasks that are ready for LLM matching."""
+    init_db()
+    profile_mode_clause = _profile_mode_clause("p")
+
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                f"""
+                SELECT COUNT(*)
+                FROM profile_jobs pj
+                JOIN jobs j ON j.id = pj.job_id
+                JOIN profiles p ON p.id = pj.profile_id
+                WHERE pj.fit_status = 'pending_fit'
+                  AND {profile_mode_clause}
+                  AND j.description IS NOT NULL
+                  AND pj.llm_match IS NULL
+                """
+            )
+            row = cursor.fetchone()
+
+    return int((row or [0])[0] or 0)
+
+
 def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     """Atomically claim pending fitting tasks for processing."""
     init_db()
