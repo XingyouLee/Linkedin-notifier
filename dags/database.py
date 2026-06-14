@@ -159,33 +159,21 @@ def _coerce_fit_decision(value) -> Optional[str]:
     return decision or None
 
 
-def _coerce_optional_int(value) -> Optional[int]:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return None
-    return parsed
-
-
 def _extract_fit_fields(
     llm_match: Optional[str],
-) -> tuple[Optional[int], Optional[str], Optional[int], Optional[int]]:
+) -> tuple[Optional[int], Optional[str]]:
     if not llm_match:
-        return None, None, None, None
+        return None, None
     try:
         parsed = json.loads(llm_match)
         if not isinstance(parsed, dict):
-            return None, None, None, None
+            return None, None
         return (
             _coerce_fit_score(parsed.get("fit_score")),
             _coerce_fit_decision(parsed.get("decision")),
-            _coerce_optional_int(parsed.get("fit_score_spread")),
-            _coerce_optional_int(parsed.get("fit_sample_count")),
         )
     except Exception:
-        return None, None, None, None
+        return None, None
 
 
 def _resolve_default_resume_path() -> Optional[str]:
@@ -422,7 +410,7 @@ def _default_profile_config() -> dict[str, Any]:
                     os.getenv("SCAN_LOCATION", "Netherlands")
                 ),
                 "distance": _get_positive_int_env("SCAN_DISTANCE", 25),
-                "hours_old": _get_positive_int_env("SCAN_HOURS_OLD", 168),
+                "hours_old": _get_positive_int_env("SCAN_HOURS_OLD", 100),
                 "results_per_term": results_default,
                 "is_active": True,
                 "terms": _parse_terms(os.getenv("SCAN_SEARCH_TERMS", ""))
@@ -492,7 +480,7 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
                     "location": location,
                     "geo_id": geo_id,
                     "distance": int(search_config.get("distance") or 25),
-                    "hours_old": int(search_config.get("hours_old") or 168),
+                    "hours_old": int(search_config.get("hours_old") or 100),
                     "results_per_term": _coerce_nonnegative_int(
                         search_config.get("results_per_term"),
                         10,
@@ -1071,8 +1059,6 @@ def init_db(*, bootstrap_profiles: bool = True):
                     fit_attempts INTEGER DEFAULT 0,
                     fit_last_error TEXT,
                     fit_updated_at TIMESTAMP,
-                    fit_score_spread INTEGER,
-                    fit_sample_count INTEGER,
                     user_status TEXT DEFAULT 'new',
                     user_note TEXT,
                     user_status_updated_at TIMESTAMP,
@@ -1099,20 +1085,6 @@ def init_db(*, bootstrap_profiles: bool = True):
                 """
                 ALTER TABLE profile_jobs
                 ADD COLUMN IF NOT EXISTS user_status_updated_at TIMESTAMP
-                """
-            )
-
-            cursor.execute(
-                """
-                ALTER TABLE profile_jobs
-                ADD COLUMN IF NOT EXISTS fit_score_spread INTEGER
-                """
-            )
-
-            cursor.execute(
-                """
-                ALTER TABLE profile_jobs
-                ADD COLUMN IF NOT EXISTS fit_sample_count INTEGER
                 """
             )
 
@@ -1449,7 +1421,7 @@ def get_active_search_configs() -> list[dict[str, Any]]:
                 else _get_positive_int_env("SCAN_DISTANCE", 25),
                 "hours_old": row["hours_old"]
                 if row["hours_old"] is not None
-                else _get_positive_int_env("SCAN_HOURS_OLD", 168),
+                else _get_positive_int_env("SCAN_HOURS_OLD", 100),
                 "results_per_term": row["results_per_term"]
                 if row["results_per_term"] is not None
                 else _get_positive_int_env("SCAN_RESULTS_PER_TERM", 10),
@@ -1600,7 +1572,6 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     """Atomically claim pending fitting tasks for processing."""
     init_db()
     stale_minutes = _get_positive_int_env("FITTING_CLAIM_STALE_MINUTES", 30)
-    max_attempts = _get_positive_int_env("FITTING_MAX_ATTEMPTS", 3)
     profile_mode_clause = _profile_mode_clause("p")
 
     select_query = f"""
@@ -1621,11 +1592,10 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
           AND {profile_mode_clause}
           AND j.description IS NOT NULL
           AND pj.llm_match IS NULL
-          AND COALESCE(pj.fit_attempts, 0) < %s
         ORDER BY COALESCE(pj.fit_updated_at, TIMESTAMP '1970-01-01 00:00:00') ASC
         FOR UPDATE SKIP LOCKED
     """
-    params: List[Any] = [stale_minutes, max_attempts]
+    params: List[Any] = [stale_minutes]
     if limit is not None and int(limit) > 0:
         select_query += " LIMIT %s"
         params.append(int(limit))
@@ -1633,33 +1603,6 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
     with _connect(row_factory=dict_row) as conn:
         with conn.transaction():
             with conn.cursor() as cursor:
-                cursor.execute(
-                    f"""
-                    UPDATE profile_jobs
-                    SET fit_status = 'fit_failed',
-                        fit_last_error = COALESCE(
-                            NULLIF(fit_last_error, ''),
-                            'fitting_attempts_exhausted'
-                        ),
-                        fit_updated_at = CURRENT_TIMESTAMP
-                    FROM profiles p
-                    WHERE llm_match IS NULL
-                      AND p.id = profile_jobs.profile_id
-                      AND {profile_mode_clause}
-                      AND COALESCE(fit_attempts, 0) >= %s
-                      AND (
-                            fit_status = 'pending_fit'
-                            OR (
-                                fit_status = 'fitting'
-                                AND COALESCE(
-                                    fit_updated_at,
-                                    TIMESTAMP '1970-01-01 00:00:00'
-                                ) <= CURRENT_TIMESTAMP - (%s * INTERVAL '1 minute')
-                            )
-                          )
-                    """,
-                    (max_attempts, stale_minutes),
-                )
                 cursor.execute(select_query, params)
                 rows = cursor.fetchall()
                 if not rows:
@@ -1669,7 +1612,6 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
                     """
                     UPDATE profile_jobs
                     SET fit_status = 'fitting',
-                        fit_attempts = COALESCE(fit_attempts, 0) + 1,
                         fit_updated_at = CURRENT_TIMESTAMP
                     WHERE profile_id = %s
                       AND job_id = %s
@@ -1681,7 +1623,7 @@ def claim_pending_fitting_tasks(limit: int = None) -> List[Dict[str, Any]]:
         {
             "profile_id": row["profile_id"],
             "job_id": row["job_id"],
-            "attempts": int(row["attempts"] or 0) + 1,
+            "attempts": row["attempts"],
         }
         for row in rows
     ]
@@ -1711,7 +1653,6 @@ def mark_fitting_failed(
     job_id: str,
     error: str = "",
     retry: bool = True,
-    spend_attempt: bool = True,
 ):
     """Mark fitting task as failed and optionally requeue."""
     init_db()
@@ -1723,13 +1664,13 @@ def mark_fitting_failed(
                 """
                 UPDATE profile_jobs
                 SET fit_status = %s,
-                    fit_attempts = COALESCE(fit_attempts, 0) + CASE WHEN %s THEN 1 ELSE 0 END,
+                    fit_attempts = COALESCE(fit_attempts, 0) + 1,
                     fit_last_error = %s,
                     fit_updated_at = CURRENT_TIMESTAMP
                 WHERE profile_id = %s
                   AND job_id = %s
                 """,
-                (status, spend_attempt, error, profile_id, job_id),
+                (status, error, profile_id, job_id),
             )
 
 
@@ -1964,15 +1905,13 @@ def save_llm_matches(jobs_df: pd.DataFrame):
     records = []
     for row in update_df[PROFILE_JOB_RESULT_COLUMNS].itertuples(index=False, name=None):
         profile_id, job_id, llm_match, llm_match_error = row
-        fit_score, fit_decision, fit_score_spread, fit_sample_count = _extract_fit_fields(llm_match)
+        fit_score, fit_decision = _extract_fit_fields(llm_match)
         records.append(
             (
                 llm_match,
                 llm_match_error,
                 fit_score,
                 fit_decision,
-                fit_score_spread,
-                fit_sample_count,
                 int(profile_id),
                 str(job_id),
             )
@@ -1986,9 +1925,7 @@ def save_llm_matches(jobs_df: pd.DataFrame):
                 SET llm_match = %s,
                     llm_match_error = %s,
                     fit_score = %s,
-                    fit_decision = %s,
-                    fit_score_spread = %s,
-                    fit_sample_count = %s
+                    fit_decision = %s
                 WHERE profile_id = %s
                   AND job_id = %s
                 """,

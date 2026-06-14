@@ -26,18 +26,6 @@ on:
         description: "LINKEDIN_TEST_MAX_NOTIFY_JOBS"
         default: "3"
         required: false
-      sample_count:
-        description: "FITTING_SAMPLE_COUNT – LLM samples per job (keep 1 for smoke)"
-        default: "1"
-        required: false
-      sample_mode:
-        description: "FITTING_SAMPLE_MODE (leave blank to use server default)"
-        default: ""
-        required: false
-      sample_temperature:
-        description: "FITTING_SAMPLE_TEMPERATURE (leave blank to use server default)"
-        default: ""
-        required: false
 
 jobs:
   smoke:
@@ -68,11 +56,6 @@ jobs:
           LINKEDIN_TEST_MAX_FIT_JOBS: ${{ github.event.inputs.max_fit_jobs }}
           LINKEDIN_TEST_MAX_NOTIFY_JOBS: ${{ github.event.inputs.max_notify_jobs }}
 
-          # --- LLM sampling inputs (passed through to dag_run --conf) ---
-          FITTING_SAMPLE_COUNT: ${{ github.event.inputs.sample_count }}
-          FITTING_SAMPLE_MODE: ${{ github.event.inputs.sample_mode }}
-          FITTING_SAMPLE_TEMPERATURE: ${{ github.event.inputs.sample_temperature }}
-
           # --- secrets (never echoed) ---
           # Business DB: required for queue/profile access
           JOBS_DB_URL: ${{ secrets.JOBS_DB_URL }}
@@ -96,9 +79,6 @@ jobs:
             -e LINKEDIN_TEST_MAX_JD_JOBS \
             -e LINKEDIN_TEST_MAX_FIT_JOBS \
             -e LINKEDIN_TEST_MAX_NOTIFY_JOBS \
-            -e FITTING_SAMPLE_COUNT \
-            -e FITTING_SAMPLE_MODE \
-            -e FITTING_SAMPLE_TEMPERATURE \
             -e JOBS_DB_URL \
             -e AIRFLOW__DATABASE__SQL_ALCHEMY_CONN \
             -e LLM_ENDPOINTS_JSON \

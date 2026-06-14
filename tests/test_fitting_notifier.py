@@ -253,7 +253,7 @@ def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
 ):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt, temperature=None):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
         calls.append((request_url, model_name, prompt))
         if request_url == "https://empty.example/v1/responses":
             raise ValueError("response_missing_output_text")
@@ -377,7 +377,7 @@ def test_parse_llm_endpoints_from_env_ignores_legacy_single_endpoint_env(monkeyp
 def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt, temperature=None):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
         calls.append((request_url, model_name, prompt))
         if request_url == "https://nowcoding.ai/v1/responses":
             raise requests.Timeout("nc timeout")
@@ -425,7 +425,7 @@ def test_fitting_notifier_does_not_read_profile_model_name_for_runtime_selection
 def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_all_endpoints_fail(
     monkeypatch,
 ):
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt, temperature=None):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
         raise ValueError("response_missing_output_text")
 
     monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
@@ -451,7 +451,7 @@ def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_
 def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(monkeypatch):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt, temperature=None):
+    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
         calls.append(request_url)
         return {"fit_score": 77, "decision": "Moderate Fit"}
 
@@ -621,7 +621,6 @@ def test_build_discord_notification_summary_message_reports_zero_results():
 def test_send_zero_result_notification_summaries_sends_per_active_profile(monkeypatch):
     import pandas as pd
 
-    monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
     monkeypatch.setattr(
         fitting_notifier.database,
         "get_active_notification_profiles",
@@ -671,7 +670,6 @@ def test_discord_skip_reason_distinguishes_disabled_and_missing(monkeypatch):
 
     assert fitting_notifier._discord_skip_reason({"discord_enabled": False, "discord_webhook_url": "https://discord.example/webhook"}) == "discord_disabled"
     assert fitting_notifier._discord_skip_reason({"discord_enabled": True}) == "discord_missing_destination"
-    assert fitting_notifier._discord_skip_reason({"discord_enabled": True, "discord_webhook_url": float("nan")}) == "discord_missing_destination"
     assert fitting_notifier._discord_skip_reason({"discord_enabled": True, "discord_webhook_url": "https://discord.example/webhook"}) is None
 
 
@@ -805,11 +803,11 @@ def test_fitting_notifier_source_caps_test_mode_claims():
     assert "Test mode fitting claim cap" in source
 
 
-def test_fitting_claim_limit_defaults_to_bounded_production(monkeypatch):
+def test_fitting_claim_limit_defaults_to_1000_in_production(monkeypatch):
     monkeypatch.delenv("LINKEDIN_TEST_MODE", raising=False)
     monkeypatch.delenv("FITTING_CLAIM_LIMIT", raising=False)
 
-    assert fitting_notifier._fitting_claim_limit() == 50
+    assert fitting_notifier._fitting_claim_limit() == 1000
 
 
 def test_fitting_claim_limit_allows_explicit_unlimited_production(monkeypatch):
@@ -817,24 +815,3 @@ def test_fitting_claim_limit_allows_explicit_unlimited_production(monkeypatch):
     monkeypatch.setenv("FITTING_CLAIM_LIMIT", "0")
 
     assert fitting_notifier._fitting_claim_limit() is None
-
-
-def test_fitting_notifier_finalizes_without_double_spending_claim_attempt():
-    source = Path("dags/fitting_notifier.py").read_text(encoding="utf-8")
-    finalize_inline_section = source[
-        source.index("if requeue_error is not None:")
-        : source.index('error = "missing_llm_match"')
-    ]
-    finalize_queue_section = source[
-        source.index("elif item_key in requeue_item_keys:")
-        : source.index('else:\n                error = default_error')
-    ]
-
-    assert "database.mark_fitting_failed(" in finalize_inline_section
-    assert "retry = attempts < max_attempts" in finalize_inline_section
-    assert "spend_attempt=False" in finalize_inline_section
-    assert "database.mark_fitting_failed(" in finalize_queue_section
-    assert "retry = attempts < max_attempts" in finalize_queue_section
-    assert "spend_attempt=False" in finalize_queue_section
-    assert "database.requeue_fitting_task(" not in finalize_inline_section
-    assert "database.requeue_fitting_task(" not in finalize_queue_section

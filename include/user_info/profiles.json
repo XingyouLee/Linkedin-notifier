@@ -53,7 +53,7 @@
         "location": "Netherlands",
         "geo_id": "102890719",
         "distance": 50,
-        "hours_old": 120,
+        "hours_old": 100,
         "results_per_term": 300,
         "terms": [
           "Data Engineer",
@@ -105,7 +105,7 @@
         "location": "Netherlands",
         "geo_id": "102890719",
         "distance": 50,
-        "hours_old": 120,
+        "hours_old": 100,
         "results_per_term": 20,
         "terms": [
           "Data Engineer",
@@ -168,7 +168,7 @@
         "location": "Netherlands",
         "geo_id": "102890719",
         "distance": 50,
-        "hours_old": 120,
+        "hours_old": 100,
         "results_per_term": 300,
         "terms": [
           "backend engineer",

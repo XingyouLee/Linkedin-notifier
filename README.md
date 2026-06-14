@@ -88,7 +88,7 @@ Common vars:
 - `JD_WORKER_BATCH_SIZE`, `JD_WORKER_MAX_LOOPS`, `JD_WORKER_IDLE_LOOP_LIMIT`
 - `JD_CLAIM_STALE_MINUTES`: reclaim stalled JD worker leases after this many minutes
 - `FITTING_MAX_ATTEMPTS`
-- `FITTING_CLAIM_LIMIT`: optional max profile-job fitting tasks claimed per fitting DAG run; leave unset on Zeabur to use the built-in default of `50`, set `0` only when intentionally processing the full backlog in one run
+- `FITTING_CLAIM_LIMIT`: optional max profile-job fitting tasks claimed per fitting DAG run; leave unset to use the built-in default of `1000`, set `0` only when intentionally processing the full backlog in one run
 - `FITTING_CLAIM_STALE_MINUTES`: reclaim stalled fitting leases after this many minutes
 - `FITTING_MODEL_NAME`: default LLM model for fitting; only a per-endpoint `model` in `LLM_ENDPOINTS_JSON` overrides it
 - `LLM_ENDPOINTS_JSON`: JSON array of LLM endpoints, including provider API keys, e.g. `[{"name":"nc","request_url":"https://nowcoding.ai/v1/responses","api_key_env":"NC_API_KEY"}]`
@@ -145,11 +145,6 @@ Workflow dispatch inputs (all optional, defaults are intentionally tiny):
 | `max_jd_jobs` | `5` | `LINKEDIN_TEST_MAX_JD_JOBS` |
 | `max_fit_jobs` | `3` | `LINKEDIN_TEST_MAX_FIT_JOBS` |
 | `max_notify_jobs` | `3` | `LINKEDIN_TEST_MAX_NOTIFY_JOBS` |
-| `sample_count` | `1` | `FITTING_SAMPLE_COUNT` — LLM samples per job |
-| `sample_mode` | _(blank)_ | `FITTING_SAMPLE_MODE` |
-| `sample_temperature` | _(blank)_ | `FITTING_SAMPLE_TEMPERATURE` |
-
-Non-blank `FITTING_SAMPLE_*` inputs are forwarded into the `dag_run --conf` payload.
 
 Expected behavior:
 
@@ -265,7 +260,7 @@ Important notes:
 - `DISCORD_BOT_TOKEN` should be configured globally if Discord delivery is enabled.
 - `DISCORD_CHANNEL_ID` is only a fallback; profile-specific channel ids from config/database still take precedence.
 - `DISCORD_WEBHOOK_URL` can be left empty if you only use bot-token delivery.
-- You do not need to set `FITTING_CLAIM_LIMIT` on Zeabur for normal operation. The Airflow code defaults to claiming at most 50 fitting tasks per run, which keeps LLM token usage bounded without another env var.
+- You do not need to set `FITTING_CLAIM_LIMIT` on Zeabur for normal operation. The Airflow code defaults to claiming at most 1000 fitting tasks per run.
 - If `AIRFLOW_ADMIN_PASSWORD` is unset, Airflow login uses a generated password file under `/usr/local/airflow/simple_auth_manager_passwords.json.generated`.
 
 ### Zeabur operations checklist

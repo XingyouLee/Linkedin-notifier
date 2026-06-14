@@ -459,7 +459,7 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                 )
             scan_config = _build_scan_config(
                 results_wanted=results_per_term,
-                hours_old=search_config.get("hours_old") or 168,
+                hours_old=search_config.get("hours_old") or 100,
                 distance=search_config.get("distance") or 25,
             )
             scan_config["location"] = search_config.get("location") or "Netherlands"

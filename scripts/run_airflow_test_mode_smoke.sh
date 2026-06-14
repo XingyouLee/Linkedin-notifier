@@ -34,9 +34,6 @@ echo "LINKEDIN_TEST_MAX_SCAN_ROWS=${LINKEDIN_TEST_MAX_SCAN_ROWS:-default}"
 echo "LINKEDIN_TEST_MAX_JD_JOBS=${LINKEDIN_TEST_MAX_JD_JOBS:-default}"
 echo "LINKEDIN_TEST_MAX_FIT_JOBS=${LINKEDIN_TEST_MAX_FIT_JOBS:-default}"
 echo "LINKEDIN_TEST_MAX_NOTIFY_JOBS=${LINKEDIN_TEST_MAX_NOTIFY_JOBS:-3}"
-echo "FITTING_SAMPLE_COUNT=${FITTING_SAMPLE_COUNT:-default}"
-echo "FITTING_SAMPLE_MODE=${FITTING_SAMPLE_MODE:-default}"
-echo "FITTING_SAMPLE_TEMPERATURE=${FITTING_SAMPLE_TEMPERATURE:-default}"
 
 if ! command -v airflow >/dev/null 2>&1; then
   echo "ERROR: airflow CLI is required. Run this script inside the project Airflow Docker image." >&2
@@ -98,7 +95,7 @@ _assert_no_active_runs() {
 
 _assert_no_active_runs
 
-# Build dag_run conf, injecting FITTING_SAMPLE_* only when set.
+# Build dag_run conf for the test-mode DAG run.
 TRIGGER_CONF=$(python3 - <<'PYEOF'
 import json, os
 conf = {
@@ -109,10 +106,6 @@ conf = {
     "LINKEDIN_TEST_MAX_FIT_JOBS":   int(os.environ.get("LINKEDIN_TEST_MAX_FIT_JOBS", 5)),
     "LINKEDIN_TEST_MAX_NOTIFY_JOBS": int(os.environ.get("LINKEDIN_TEST_MAX_NOTIFY_JOBS", 3)),
 }
-for key in ("FITTING_SAMPLE_COUNT", "FITTING_SAMPLE_MODE", "FITTING_SAMPLE_TEMPERATURE"):
-    val = os.environ.get(key, "").strip()
-    if val:
-        conf[key] = val
 print(json.dumps(conf))
 PYEOF
 )
