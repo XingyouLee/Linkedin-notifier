@@ -771,6 +771,8 @@ def _request_llm_json(
     model_name: str,
     prompt: str,
     api_type: str = "responses",
+    reasoning_effort: str | None = None,
+    extra_body: dict | None = None,
     call_budget: _LlmCallBudget | None = None,
 ) -> dict:
     if api_type == "chat_completions":
@@ -779,6 +781,12 @@ def _request_llm_json(
             "messages": [{"role": "user", "content": prompt}],
             "response_format": {"type": "json_object"},
         }
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        if extra_body is not None:
+            if not isinstance(extra_body, dict):
+                raise ValueError("extra_body_must_be_object")
+            payload.update(extra_body)
     else:
         payload = {
             "model": model_name,
@@ -831,9 +839,9 @@ def _request_llm_json(
         raise
 
 
-def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
+def _parse_llm_endpoints_from_env() -> list[dict]:
     endpoints_json = _normalize_text(os.getenv("LLM_ENDPOINTS_JSON"))
-    endpoints: list[dict[str, str]] = []
+    endpoints: list[dict] = []
     if endpoints_json:
         try:
             parsed = json.loads(endpoints_json)
@@ -869,7 +877,7 @@ def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
                 raise ValueError(
                     f"invalid_llm_endpoints_json: entry {index} api_type must be responses or chat_completions"
                 )
-            entry_dict: dict[str, str] = {
+            entry_dict: dict = {
                 "name": name,
                 "request_url": request_url,
                 "api_key": api_key,
@@ -878,6 +886,16 @@ def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
             model = _normalize_text(entry.get("model"))
             if model:
                 entry_dict["model"] = model
+            reasoning_effort = _normalize_text(entry.get("reasoning_effort"))
+            if reasoning_effort:
+                entry_dict["reasoning_effort"] = reasoning_effort
+            extra_body = entry.get("extra_body")
+            if extra_body is not None:
+                if not isinstance(extra_body, dict):
+                    raise ValueError(
+                        f"invalid_llm_endpoints_json: entry {index} extra_body must be an object"
+                    )
+                entry_dict["extra_body"] = extra_body
             endpoints.append(entry_dict)
 
     return endpoints
@@ -910,6 +928,10 @@ def _request_llm_json_with_fallback(
                 "prompt": prompt,
                 "api_type": endpoint.get("api_type", "responses"),
             }
+            if endpoint.get("reasoning_effort"):
+                request_kwargs["reasoning_effort"] = endpoint["reasoning_effort"]
+            if endpoint.get("extra_body") is not None:
+                request_kwargs["extra_body"] = endpoint["extra_body"]
             if call_budget is not None:
                 request_kwargs["call_budget"] = call_budget
             parsed = _request_llm_json(**request_kwargs)

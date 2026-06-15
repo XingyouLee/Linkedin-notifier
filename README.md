@@ -99,7 +99,13 @@ Common vars:
       "api_type": "chat_completions",
       "request_url": "https://api.deepseek.com/chat/completions",
       "api_key_env": "DEEPSEEK_API_KEY",
-      "model": "deepseek-v4-pro"
+      "model": "deepseek-v4-pro",
+      "reasoning_effort": "high",
+      "extra_body": {
+        "thinking": {
+          "type": "enabled"
+        }
+      }
     },
     {
       "name": "gpt",

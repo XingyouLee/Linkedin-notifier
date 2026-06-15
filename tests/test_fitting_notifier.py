@@ -355,6 +355,59 @@ def test_parse_llm_endpoints_from_env_preserves_api_type(monkeypatch):
     ]
 
 
+def test_parse_llm_endpoints_from_env_preserves_chat_completion_options(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "deepseek",
+                    "request_url": "https://api.deepseek.com/chat/completions",
+                    "api_key": "deepseek-key",
+                    "model": "deepseek-v4-pro",
+                    "api_type": "chat_completions",
+                    "reasoning_effort": "high",
+                    "extra_body": {"thinking": {"type": "enabled"}},
+                }
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._parse_llm_endpoints_from_env()
+
+    assert endpoints == [
+        {
+            "name": "deepseek",
+            "request_url": "https://api.deepseek.com/chat/completions",
+            "api_key": "deepseek-key",
+            "model": "deepseek-v4-pro",
+            "api_type": "chat_completions",
+            "reasoning_effort": "high",
+            "extra_body": {"thinking": {"type": "enabled"}},
+        }
+    ]
+
+
+def test_parse_llm_endpoints_from_env_rejects_non_object_extra_body(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "deepseek",
+                    "request_url": "https://api.deepseek.com/chat/completions",
+                    "api_key": "deepseek-key",
+                    "api_type": "chat_completions",
+                    "extra_body": "thinking",
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="extra_body must be an object"):
+        fitting_notifier._parse_llm_endpoints_from_env()
+
+
 def test_parse_llm_endpoints_from_env_rejects_unknown_api_type(monkeypatch):
     monkeypatch.setenv(
         "LLM_ENDPOINTS_JSON",
@@ -741,6 +794,37 @@ def test_request_llm_json_supports_chat_completions_payload(monkeypatch):
         ],
         "response_format": {"type": "json_object"},
     }
+
+
+def test_request_llm_json_supports_chat_completions_reasoning_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed = fitting_notifier._request_llm_json(
+        request_url="https://api.deepseek.com/chat/completions",
+        api_key="test-key",
+        model_name="deepseek-v4-pro",
+        prompt='Return only valid JSON: {"ok": true}',
+        api_type="chat_completions",
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+
+    assert parsed == {"ok": True}
+    assert captured["json"]["reasoning_effort"] == "high"
+    assert captured["json"]["thinking"] == {"type": "enabled"}
 
 
 def test_log_job_match_result_includes_model_name_for_success(capsys):
