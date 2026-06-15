@@ -253,7 +253,9 @@ def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
 ):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+    def fake_request_llm_json(
+        *, request_url, api_key, model_name, prompt, api_type="responses", **kwargs
+    ):
         calls.append((request_url, model_name, prompt))
         if request_url == "https://empty.example/v1/responses":
             raise ValueError("response_missing_output_text")
@@ -312,14 +314,64 @@ def test_parse_llm_endpoints_from_env_preserves_per_endpoint_model_override(monk
             "name": "nc",
             "request_url": "https://nowcoding.ai/v1/responses",
             "api_key": "nc-key",
+            "api_type": "responses",
         },
         {
             "name": "yuan",
             "request_url": "https://us.mcxhm.cn/v1/responses",
             "api_key": "yuan-key",
+            "api_type": "responses",
             "model": "glm-5.1",
         },
     ]
+
+
+def test_parse_llm_endpoints_from_env_preserves_api_type(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "deepseek",
+                    "request_url": "https://api.deepseek.com/chat/completions",
+                    "api_key": "deepseek-key",
+                    "model": "deepseek-v4-pro",
+                    "api_type": "chat_completions",
+                }
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._parse_llm_endpoints_from_env()
+
+    assert endpoints == [
+        {
+            "name": "deepseek",
+            "request_url": "https://api.deepseek.com/chat/completions",
+            "api_key": "deepseek-key",
+            "model": "deepseek-v4-pro",
+            "api_type": "chat_completions",
+        }
+    ]
+
+
+def test_parse_llm_endpoints_from_env_rejects_unknown_api_type(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "bad",
+                    "request_url": "https://example.com/v1",
+                    "api_key": "key",
+                    "api_type": "unknown",
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="api_type must be responses or chat_completions"):
+        fitting_notifier._parse_llm_endpoints_from_env()
 
 
 def test_parse_llm_endpoints_from_env_resolves_api_key_env(monkeypatch):
@@ -342,6 +394,7 @@ def test_parse_llm_endpoints_from_env_resolves_api_key_env(monkeypatch):
             "name": "nc",
             "request_url": "https://nowcoding.ai/v1/responses",
             "api_key": "nc-key",
+            "api_type": "responses",
         }
     ]
 
@@ -377,7 +430,9 @@ def test_parse_llm_endpoints_from_env_ignores_legacy_single_endpoint_env(monkeyp
 def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+    def fake_request_llm_json(
+        *, request_url, api_key, model_name, prompt, api_type="responses", **kwargs
+    ):
         calls.append((request_url, model_name, prompt))
         if request_url == "https://nowcoding.ai/v1/responses":
             raise requests.Timeout("nc timeout")
@@ -425,7 +480,9 @@ def test_fitting_notifier_does_not_read_profile_model_name_for_runtime_selection
 def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_all_endpoints_fail(
     monkeypatch,
 ):
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+    def fake_request_llm_json(
+        *, request_url, api_key, model_name, prompt, api_type="responses", **kwargs
+    ):
         raise ValueError("response_missing_output_text")
 
     monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
@@ -526,7 +583,9 @@ def test_llm_call_budget_counts_successful_empty_output_as_billable(monkeypatch)
 def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(monkeypatch):
     calls = []
 
-    def fake_request_llm_json(*, request_url, api_key, model_name, prompt):
+    def fake_request_llm_json(
+        *, request_url, api_key, model_name, prompt, api_type="responses", **kwargs
+    ):
         calls.append(request_url)
         return {"fit_score": 77, "decision": "Moderate Fit"}
 
@@ -633,6 +692,54 @@ def test_request_llm_json_uses_plain_string_input_payload(monkeypatch):
     assert captured["json"] == {
         "model": "gpt-5.4",
         "input": 'Return only valid JSON: {"ok": true}',
+    }
+
+
+def test_request_llm_json_supports_chat_completions_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"ok": true}',
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed = fitting_notifier._request_llm_json(
+        request_url="https://api.deepseek.com/chat/completions",
+        api_key="test-key",
+        model_name="deepseek-v4-pro",
+        prompt='Return only valid JSON: {"ok": true}',
+        api_type="chat_completions",
+    )
+
+    assert parsed == {"ok": True}
+    assert captured["json"] == {
+        "model": "deepseek-v4-pro",
+        "messages": [
+            {
+                "role": "user",
+                "content": 'Return only valid JSON: {"ok": true}',
+            }
+        ],
+        "response_format": {"type": "json_object"},
     }
 
 

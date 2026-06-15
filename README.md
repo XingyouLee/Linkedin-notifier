@@ -91,7 +91,25 @@ Common vars:
 - `FITTING_CLAIM_LIMIT`: optional max profile-job fitting tasks claimed per fitting DAG run; leave unset to use the built-in default of `1000`, set `0` only when intentionally processing the full backlog in one run
 - `FITTING_CLAIM_STALE_MINUTES`: reclaim stalled fitting leases after this many minutes
 - `FITTING_MODEL_NAME`: default LLM model for fitting; only a per-endpoint `model` in `LLM_ENDPOINTS_JSON` overrides it
-- `LLM_ENDPOINTS_JSON`: JSON array of LLM endpoints, including provider API keys, e.g. `[{"name":"nc","request_url":"https://nowcoding.ai/v1/responses","api_key_env":"NC_API_KEY"}]`
+- `LLM_ENDPOINTS_JSON`: JSON array of LLM endpoints, tried in order. Use `api_type:"chat_completions"` for OpenAI-compatible chat-completions providers such as DeepSeek, and `api_type:"responses"` for OpenAI Responses-compatible endpoints. Example with DeepSeek primary and GPT backup:
+  ```json
+  [
+    {
+      "name": "deepseek",
+      "api_type": "chat_completions",
+      "request_url": "https://api.deepseek.com/chat/completions",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "model": "deepseek-v4-pro"
+    },
+    {
+      "name": "gpt",
+      "api_type": "responses",
+      "request_url": "https://api.openai.com/v1/responses",
+      "api_key_env": "OPENAI_API_KEY",
+      "model": "gpt-5.4"
+    }
+  ]
+  ```
 - `DISCORD_BOT_TOKEN` (used with per-profile Discord channel ids)
 - `DEFAULT_PROFILE_KEY`, `DEFAULT_PROFILE_NAME`, `RESUME_PATH` (compatibility bootstrap only when the profiles table is empty and no legacy profile config file exists)
 
@@ -132,7 +150,8 @@ Required GitHub repository secrets (set under Settings → Secrets → Actions):
 | `JOBS_DB_URL` | Business DB connection string |
 | `AIRFLOW_METADATA_DB_URL` | Deployed Airflow metadata DB, exposed to the container as `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` |
 | `LLM_ENDPOINTS_JSON` | JSON array of LLM provider endpoints |
-| `NC_API_KEY` | Provider API key (or equivalent for your provider) |
+| `DEEPSEEK_API_KEY` | DeepSeek API key when `LLM_ENDPOINTS_JSON` references it |
+| `OPENAI_API_KEY` | OpenAI/GPT backup API key when `LLM_ENDPOINTS_JSON` references it |
 | `FITTING_MODEL_NAME` | Default LLM model name for fitting |
 | `DISCORD_BOT_TOKEN` | Discord bot token for notification delivery |
 

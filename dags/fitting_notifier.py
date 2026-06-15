@@ -441,6 +441,15 @@ def _extract_output_text(response_json):
     return None
 
 
+def _extract_chat_completion_output_text(response_json):
+    for choice in response_json.get("choices") or []:
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if content:
+            return content
+    return None
+
+
 def _load_resume_text(
     *,
     resume_path: str | None = None,
@@ -761,12 +770,20 @@ def _request_llm_json(
     api_key: str,
     model_name: str,
     prompt: str,
+    api_type: str = "responses",
     call_budget: _LlmCallBudget | None = None,
 ) -> dict:
-    payload = {
-        "model": model_name,
-        "input": prompt,
-    }
+    if api_type == "chat_completions":
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+        }
+    else:
+        payload = {
+            "model": model_name,
+            "input": prompt,
+        }
     if call_budget is not None:
         call_budget.reserve_attempt()
     billable_recorded = False
@@ -797,7 +814,10 @@ def _request_llm_json(
 
     try:
         response_json = response.json()
-        output_text = _extract_output_text(response_json)
+        if api_type == "chat_completions":
+            output_text = _extract_chat_completion_output_text(response_json)
+        else:
+            output_text = _extract_output_text(response_json)
         if not output_text:
             raise ValueError("response_missing_output_text")
 
@@ -844,10 +864,16 @@ def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
                 raise ValueError(
                     f"invalid_llm_endpoints_json: entry {index} requires api_key or api_key_env"
                 )
+            api_type = _normalize_text(entry.get("api_type")) or "responses"
+            if api_type not in {"responses", "chat_completions"}:
+                raise ValueError(
+                    f"invalid_llm_endpoints_json: entry {index} api_type must be responses or chat_completions"
+                )
             entry_dict: dict[str, str] = {
                 "name": name,
                 "request_url": request_url,
                 "api_key": api_key,
+                "api_type": api_type,
             }
             model = _normalize_text(entry.get("model"))
             if model:
@@ -882,6 +908,7 @@ def _request_llm_json_with_fallback(
                 "api_key": endpoint["api_key"],
                 "model_name": effective_model_name,
                 "prompt": prompt,
+                "api_type": endpoint.get("api_type", "responses"),
             }
             if call_budget is not None:
                 request_kwargs["call_budget"] = call_budget
