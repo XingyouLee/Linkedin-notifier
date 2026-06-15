@@ -140,6 +140,26 @@ def test_apply_fit_caps_keeps_reasonable_match_without_blocker():
     assert capped["candidate_summary"]["candidate_seniority"] == "senior"
 
 
+def test_validate_llm_match_response_rejects_swapped_score_and_decision():
+    with pytest.raises(ValueError, match="response_invalid_fit_score"):
+        fitting_notifier._validate_llm_match_response(
+            {
+                "fit_score": "Not Recommended",
+                "decision": "The candidate does not match the role.",
+            }
+        )
+
+
+def test_validate_llm_match_response_rejects_non_enum_decision():
+    with pytest.raises(ValueError, match="response_invalid_decision"):
+        fitting_notifier._validate_llm_match_response(
+            {
+                "fit_score": 0,
+                "decision": "The candidate does not match the role.",
+            }
+        )
+
+
 def test_filter_notification_jobs_suppresses_experience_blocker_only():
     allowed_job = {
         "id": "1",
@@ -846,6 +866,30 @@ def test_log_job_match_result_includes_model_name_for_success(capsys):
     captured = capsys.readouterr()
     assert "status=ok" in captured.out
     assert "model_name=gpt-5.4" in captured.out
+
+
+def test_log_job_match_result_rejects_invalid_success_payload(capsys):
+    fitting_notifier._log_job_match_result(
+        {
+            "profile_id": 12,
+            "job_id": "job-1",
+            "model_name": "deepseek-v4-pro",
+            "llm_match": json.dumps(
+                {
+                    "fit_score": "Not Recommended",
+                    "decision": "The candidate does not match the role.",
+                }
+            ),
+            "llm_match_error": None,
+        }
+    )
+
+    captured = capsys.readouterr()
+
+    assert "model_name=deepseek-v4-pro" in captured.out
+    assert "status=error" in captured.out
+    assert "invalid_success_payload" in captured.out
+    assert "status=ok" not in captured.out
 
 
 def test_log_job_match_result_includes_model_name_for_error(capsys):

@@ -413,12 +413,21 @@ def _log_job_match_result(job_result):
 
     fit_score = None
     decision = None
+    invalid_success_payload = False
     try:
         parsed_match = json.loads(job_result.get("llm_match") or "{}")
         fit_score = parsed_match.get("fit_score")
         decision = parsed_match.get("decision")
+        _validate_llm_match_response(parsed_match)
     except Exception:
-        pass
+        invalid_success_payload = True
+
+    if invalid_success_payload:
+        print(
+            f"llm_result profile_id={profile_id} job_id={job_id} "
+            f"model_name={model_name} status=error error=invalid_success_payload"
+        )
+        return
 
     print(
         f"llm_result profile_id={profile_id} job_id={job_id} model_name={model_name} status=ok "
@@ -762,6 +771,16 @@ def _normalize_match_decision(decision) -> str:
     if normalized not in alias_map:
         raise ValueError("response_invalid_decision")
     return alias_map[normalized]
+
+
+def _validate_llm_match_response(parsed_match: dict) -> None:
+    if not isinstance(parsed_match, dict):
+        raise ValueError("response_json_not_object")
+    if "fit_score" not in parsed_match or "decision" not in parsed_match:
+        raise ValueError("response_missing_fit_fields")
+    if _coerce_number(parsed_match.get("fit_score")) is None:
+        raise ValueError("response_invalid_fit_score")
+    _normalize_match_decision(parsed_match.get("decision"))
 
 
 def _request_llm_json(
@@ -1652,6 +1671,7 @@ def linkedin_fitting_notifier():
                         call_budget=llm_call_budget,
                         return_metadata=True,
                     )
+                    _validate_llm_match_response(parsed)
                     parsed = _apply_fit_caps(
                         parsed,
                         job_title=job_title,
@@ -1675,6 +1695,13 @@ def linkedin_fitting_notifier():
                     raise
                 except Exception as error:
                     last_error = str(error)
+                    if attempt < 2:
+                        print(
+                            f"llm_result profile_id={profile_id} job_id={job_id} "
+                            f"model_name={used_model_name} status=invalid_retry "
+                            f"attempt={attempt + 1}/3 error={last_error}"
+                        )
+                        continue
 
             if parsed is not None:
                 return item, _build_job_match_result(
