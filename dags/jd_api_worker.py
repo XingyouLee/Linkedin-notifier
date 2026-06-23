@@ -164,6 +164,11 @@ def run_once(limit: int = 5, job_ids=None) -> int:
             persisted_job_id = _normalize_optional_text(job_id)
             fetch_job_id = _normalize_optional_text(source_job_id) or persisted_job_id
             if not persisted_job_id or not fetch_job_id:
+                if persisted_job_id:
+                    database.save_jd_result(
+                        persisted_job_id, description_error="invalid_job_id_for_fetch"
+                    )
+                processed += 1
                 continue
             print(
                 f"Fetching JD via guest jobPosting for {persisted_job_id} "

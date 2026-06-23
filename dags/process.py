@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from airflow.sdk import dag, task
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
@@ -683,6 +685,40 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
     }
 
 
+def _resolve_unfinished_jd_jobs(job_ids) -> bool:
+    """Force unfinished JD queue rows into a terminal state at worker shutdown.
+
+    Leftover rows may be ``pending`` (never claimable — e.g. profile-mode mismatch or
+    missing profile_jobs) or ``processing`` (claimed by an earlier run but never
+    finalized and not yet stale enough to reclaim). Both block the worker from
+    completing, so they are force-failed with a state-specific error rather than
+    lumped together as "pending". Returns True if any row was resolved.
+    """
+    unfinished = database.get_unfinished_jd_jobs(job_ids)
+    pending_ids = [jid for jid, status in unfinished if status == "pending"]
+    processing_ids = [jid for jid, status in unfinished if status == "processing"]
+
+    if pending_ids:
+        print(
+            f"Resolving {len(pending_ids)} stuck pending JD jobs "
+            f"(unclaimable — likely profile-mode mismatch or missing profile_jobs): "
+            f"{pending_ids[:5]}{'...' if len(pending_ids) > 5 else ''}"
+        )
+        for jid in pending_ids:
+            database.save_jd_result(jid, description_error="unclaimable_pending_job")
+
+    if processing_ids:
+        print(
+            f"Resolving {len(processing_ids)} orphaned processing JD jobs "
+            f"(claimed but never finalized): "
+            f"{processing_ids[:5]}{'...' if len(processing_ids) > 5 else ''}"
+        )
+        for jid in processing_ids:
+            database.fail_jd_queue_row(jid, "stale_processing_job")
+
+    return bool(pending_ids or processing_ids)
+
+
 @dag(
     start_date=datetime(2023, 1, 1),
     schedule="0 0 * * *",
@@ -845,6 +881,13 @@ def linkedin_notifier():
         if not job_ids:
             return {"processed": 0, "done": 0, "failed": 0, "pending": 0, "total": 0}
 
+        pruned = database.prune_unclaimable_jd_queue_rows()
+        if pruned:
+            print(
+                f"Pruned {pruned} mode-mismatched jd_queue rows "
+                "(pending/processing rows from a different test/production mode run)"
+            )
+
         worker_batch_size = int(
             os.getenv("JD_WORKER_BATCH_SIZE", str(worker_batch_size))
         )
@@ -904,6 +947,13 @@ def linkedin_notifier():
         done_count = database.count_jd_queue_status(job_ids, "done")
         failed_count = database.count_jd_queue_status(job_ids, "failed")
         pending_count = total - done_count - failed_count
+
+        if pending_count > 0:
+            if _resolve_unfinished_jd_jobs(job_ids):
+                done_count = database.count_jd_queue_status(job_ids, "done")
+                failed_count = database.count_jd_queue_status(job_ids, "failed")
+                pending_count = total - done_count - failed_count
+
         result = {
             "processed": total_processed,
             "done": done_count,
@@ -918,10 +968,12 @@ def linkedin_notifier():
         )
 
         if pending_count > 0:
+            leftover = database.get_unfinished_jd_jobs(job_ids)
             raise RuntimeError(
-                "JD worker stopped with pending jobs: "
-                f"{result}. Increase JD_WORKER_MAX_LOOPS (suggested >= {min_loops_needed}) "
-                f"or JD_WORKER_BATCH_SIZE (current {worker_batch_size})."
+                "JD worker stopped with unfinished jobs: "
+                f"{result}. Leftover queue rows (job_id, status): "
+                f"{leftover[:10]}{'...' if len(leftover) > 10 else ''}. "
+                "Rows may be unclaimable due to profile-mode mismatch or missing data."
             )
 
         return result

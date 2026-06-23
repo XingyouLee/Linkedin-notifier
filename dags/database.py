@@ -2709,6 +2709,80 @@ def get_pending_jd_requests(limit: int = 10) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def get_unfinished_jd_jobs(job_ids):
+    """Return (job_id, status) for given job_ids still in a non-terminal queue state.
+
+    Non-terminal means ``pending`` or ``processing``. Used at JD worker shutdown to
+    distinguish unclaimable pending rows from orphaned processing rows instead of
+    treating every unfinished row as ``pending``.
+    """
+    if not job_ids:
+        return []
+    init_db()
+    query = (
+        "SELECT job_id, status FROM jd_queue "
+        "WHERE status IN ('pending', 'processing') AND job_id = ANY(%s)"
+    )
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query, (job_ids,))
+            return [(row[0], row[1]) for row in cursor.fetchall()]
+
+
+def prune_unclaimable_jd_queue_rows() -> int:
+    """Force-fail pending/processing jd_queue rows that no active profile (of any mode) can claim.
+
+    A row is pruned only when there is NO active profile at all linked to the job —
+    not just no profile in the current mode.  Using a mode-specific filter would cause
+    a test-mode run to permanently destroy pending rows from a prod-mode run, because
+    prod profiles don't match the test-mode clause.
+
+    Returns the number of rows pruned.
+    """
+    init_db()
+    query = """
+        UPDATE jd_queue
+        SET status = 'failed',
+            error = 'no_active_profile_unclaimable',
+            updated_at = CURRENT_TIMESTAMP
+        WHERE status IN ('pending', 'processing')
+          AND NOT EXISTS (
+            SELECT 1 FROM profile_jobs pj
+            JOIN profiles p ON p.id = pj.profile_id
+            WHERE pj.job_id = jd_queue.job_id
+              AND p.is_active
+          )
+        RETURNING job_id
+    """
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            return cursor.rowcount
+
+
+def fail_jd_queue_row(job_id: str, error: str) -> None:
+    """Mark a single jd_queue row as failed without touching the jobs table.
+
+    Unlike ``save_jd_result``, this does not zero ``jobs.description``.  Use this
+    when the row may have had its description already written to ``jobs`` but the
+    worker crashed before finalizing jd_queue status (e.g. stale processing rows).
+    """
+    init_db()
+    with _connect() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE jd_queue
+                SET status = 'failed',
+                    attempts = attempts + 1,
+                    error = %s,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE job_id = %s
+                """,
+                (error, job_id),
+            )
+
+
 def get_latest_batch_jobs() -> pd.DataFrame:
     """Retrieves only the jobs from the most recent batch."""
     query = """
