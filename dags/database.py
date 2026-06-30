@@ -81,6 +81,7 @@ DEFAULT_FIT_PROMPT_TEXT = (
     '"risk_factors": [], '
     '"summary": "3-5 concise lines"'
     "} "
+    "{{user_feedback_examples}}"
     "Candidate Summary: <<<{{candidate_summary}}>>> "
     "Job Title: <<<{{job_title}}>>> "
     "Job Description: <<<{{job_description}}>>> "
@@ -1088,35 +1089,36 @@ def init_db(*, bootstrap_profiles: bool = True):
                 """
             )
 
+            # Collapse any retired status (including the legacy 'saved') and any
+            # unexpected value back to 'new' before tightening the constraint.
             cursor.execute(
                 """
                 UPDATE profile_jobs
                 SET user_status = 'new'
                 WHERE user_status IS NOT NULL
                   AND user_status <> ''
-                  AND user_status NOT IN ('new', 'saved', 'dismissed', 'applied')
+                  AND user_status NOT IN ('new', 'dismissed', 'applied')
                 """
             )
 
+            # Recreate the constraint unconditionally so databases created under
+            # the old set ('new', 'saved', 'dismissed', 'applied') are upgraded
+            # to the tightened set. DROP IF EXISTS keeps this idempotent.
             cursor.execute(
                 """
-                DO $$
-                BEGIN
-                    IF NOT EXISTS (
-                        SELECT 1
-                        FROM pg_constraint
-                        WHERE conname = 'profile_jobs_user_status_check'
-                          AND conrelid = 'profile_jobs'::regclass
-                    ) THEN
-                        ALTER TABLE profile_jobs
-                        ADD CONSTRAINT profile_jobs_user_status_check
-                        CHECK (
-                            user_status IS NULL
-                            OR user_status = ''
-                            OR user_status IN ('new', 'saved', 'dismissed', 'applied')
-                        );
-                    END IF;
-                END $$;
+                ALTER TABLE profile_jobs
+                DROP CONSTRAINT IF EXISTS profile_jobs_user_status_check
+                """
+            )
+            cursor.execute(
+                """
+                ALTER TABLE profile_jobs
+                ADD CONSTRAINT profile_jobs_user_status_check
+                CHECK (
+                    user_status IS NULL
+                    OR user_status = ''
+                    OR user_status IN ('new', 'dismissed', 'applied')
+                )
                 """
             )
 
@@ -2132,6 +2134,40 @@ def get_active_notification_profiles() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+
+def get_user_feedback_examples(profile_id: int, limit: int = 10) -> list[dict]:
+    """Return recent dismissed (negative) and applied (positive) jobs for few-shot calibration."""
+    init_db()
+    with _get_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT pj.user_status, j.title, j.company,
+                       pj.fit_score, pj.fit_decision, pj.user_note
+                FROM profile_jobs pj
+                JOIN jobs j ON j.id = pj.job_id
+                WHERE pj.profile_id = %s
+                  AND pj.user_status IN ('dismissed', 'applied')
+                  AND pj.fit_score IS NOT NULL
+                ORDER BY pj.user_status_updated_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                [profile_id, limit],
+            )
+            rows = cursor.fetchall()
+    return [
+        {
+            "status": row[0],
+            "title": row[1],
+            "company": row[2],
+            "fit_score": row[3],
+            "fit_decision": row[4],
+            "user_note": row[5],
+        }
+        for row in rows
+    ]
+
+
 def get_jobs_to_notify() -> pd.DataFrame:
     """Get unnotified fit results that are ready to notify per profile."""
     init_db()
@@ -2183,8 +2219,18 @@ def get_jobs_to_notify() -> pd.DataFrame:
         {pref_join}
         WHERE {profile_mode_clause}
           AND pj.notified_at IS NULL
+          AND COALESCE(pj.user_status, 'new') <> 'dismissed'
           AND pj.fit_status IN ('fit_done', 'notify_failed')
           {decision_filter}
+          AND NOT EXISTS (
+            SELECT 1 FROM profile_jobs pj2
+            JOIN jobs j2 ON j2.id = pj2.job_id
+            WHERE pj2.profile_id = pj.profile_id
+              AND j2.company = j.company
+              AND j2.title = j.title
+              AND pj2.user_status = 'dismissed'
+              AND pj2.job_id <> pj.job_id
+          )
         ORDER BY pj.profile_id ASC, COALESCE(j.batch_id, 0) DESC, pj.fit_score DESC
     """
     with _connect(row_factory=dict_row) as conn:

@@ -890,4 +890,4 @@ def test_profile_job_user_workspace_schema_contract_is_declared():
     assert "user_note TEXT" in source
     assert "user_status_updated_at TIMESTAMP" in source
     assert "profile_jobs_user_status_check" in source
-    assert "user_status IN ('new', 'saved', 'dismissed', 'applied')" in source
+    assert "user_status IN ('new', 'dismissed', 'applied')" in source

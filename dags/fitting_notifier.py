@@ -1181,12 +1181,29 @@ def _apply_fit_caps(
     return normalized_match
 
 
+def _render_feedback_examples(examples: list[dict] | None) -> str:
+    if not examples:
+        return ""
+    lines = ["Past calibration signals (use only to calibrate scoring thresholds, not to override the current job evaluation):"]
+    for ex in examples:
+        label = "dismissed" if ex.get("status") == "dismissed" else "applied to"
+        title = ex.get("title") or "unknown"
+        company = ex.get("company") or "unknown"
+        score = ex.get("fit_score")
+        decision = ex.get("fit_decision") or ""
+        score_str = f"model score: {score}, {decision}" if score is not None else decision
+        note_str = f" User note: \"{ex['user_note']}\"" if ex.get("user_note") else ""
+        lines.append(f'- User {label} "{title} at {company}" ({score_str}).{note_str}')
+    return " ".join(lines) + " "
+
+
 def _build_fit_prompt(
     job_title: str,
     jd_text: str,
     resume_text: str,
     candidate_summary: dict,
     prompt_text: str | None = None,
+    feedback_examples: list[dict] | None = None,
 ) -> str:
     template = database._normalize_fit_prompt_text(prompt_text)
     replacements = {
@@ -1194,6 +1211,7 @@ def _build_fit_prompt(
         "{{job_description}}": str(jd_text or "").strip(),
         "{{candidate_resume}}": str(resume_text or "").strip(),
         "{{candidate_summary}}": json.dumps(candidate_summary, ensure_ascii=False),
+        "{{user_feedback_examples}}": _render_feedback_examples(feedback_examples),
     }
 
     prompt = template
@@ -1563,6 +1581,7 @@ def linkedin_fitting_notifier():
         api_error_messages = []
         resume_cache = {}
         candidate_summary_cache = {}
+        feedback_cache: dict[int, list[dict]] = {}
         profile_summary_errors = {}
         finalize_counts = {"done": 0, "failed": 0, "requeued": 0}
         finalized_item_keys = set()
@@ -1645,6 +1664,7 @@ def linkedin_fitting_notifier():
             jd_text = prepared["jd_text"]
             resume_text = prepared["resume_text"]
             candidate_summary = prepared["candidate_summary"]
+            feedback_examples = prepared.get("feedback_examples")
 
             base_prompt = _build_fit_prompt(
                 job_title,
@@ -1652,6 +1672,7 @@ def linkedin_fitting_notifier():
                 resume_text,
                 candidate_summary,
                 prompt_text=profile_record.get("fit_prompt_config"),
+                feedback_examples=feedback_examples,
             )
             model_name = _default_fitting_model_name()
 
@@ -1844,6 +1865,12 @@ def linkedin_fitting_notifier():
                 print(profile_summary_errors[profile_id])
                 continue
 
+            try:
+                feedback_cache[profile_id] = database.get_user_feedback_examples(profile_id)
+            except Exception as error:
+                print(f"feedback_examples_load_error profile_id={profile_id} error={error}")
+                feedback_cache[profile_id] = []
+
         job_ids = sorted({item["job_id"] for item in claimed_items})
         jobs_df = database.get_jobs_by_ids(job_ids)
         if jobs_df is None or jobs_df.empty:
@@ -1989,6 +2016,7 @@ def linkedin_fitting_notifier():
                     "jd_text": jd_text,
                     "resume_text": resume_text,
                     "candidate_summary": candidate_summary,
+                    "feedback_examples": feedback_cache.get(profile_id),
                 }
             )
 
