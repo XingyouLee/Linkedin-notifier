@@ -118,6 +118,7 @@ jobs:
   deploy-zeabur:
     name: Update Zeabur image tag
     runs-on: ubuntu-latest
+    environment: production
     needs:
       - publish-image
     if: >
