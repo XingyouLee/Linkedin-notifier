@@ -768,6 +768,66 @@ def test_request_llm_json_uses_plain_string_input_payload(monkeypatch):
     }
 
 
+def test_request_llm_json_returns_provider_response_model_when_requested(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"model": "gpt-5.4", "output_text": '{"ok": true}'}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed, response_model_name = fitting_notifier._request_llm_json(
+        request_url="https://proxy.example/v1/responses",
+        api_key="test-key",
+        model_name="gpt-5.6",
+        prompt="Return only valid JSON: {\"ok\": true}",
+        return_response_model=True,
+    )
+
+    assert parsed == {"ok": True}
+    assert captured["json"]["model"] == "gpt-5.6"
+    assert response_model_name == "gpt-5.4"
+
+
+def test_request_llm_json_with_fallback_returns_requested_and_response_models(
+    monkeypatch,
+):
+    def fake_request_llm_json(*, return_response_model=False, **kwargs):
+        parsed = {"fit_score": 77, "decision": "Moderate Fit"}
+        if return_response_model:
+            return parsed, "gpt-5.4"
+        return parsed
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    parsed, model_metadata = fitting_notifier._request_llm_json_with_fallback(
+        endpoints=[
+            {
+                "name": "proxy",
+                "request_url": "https://proxy.example/v1/responses",
+                "api_key": "test-key",
+            }
+        ],
+        model_name="gpt-5.6",
+        prompt="Return JSON only",
+        return_model_metadata=True,
+    )
+
+    assert parsed == {"fit_score": 77, "decision": "Moderate Fit"}
+    assert model_metadata == {
+        "requested_model_name": "gpt-5.6",
+        "response_model_name": "gpt-5.4",
+    }
+
+
 def test_request_llm_json_supports_chat_completions_payload(monkeypatch):
     captured = {}
 
@@ -847,12 +907,13 @@ def test_request_llm_json_supports_chat_completions_reasoning_payload(monkeypatc
     assert captured["json"]["thinking"] == {"type": "enabled"}
 
 
-def test_log_job_match_result_includes_model_name_for_success(capsys):
+def test_log_job_match_result_includes_requested_and_response_model_names_for_success(capsys):
     fitting_notifier._log_job_match_result(
         {
             "profile_id": 12,
             "job_id": "job-1",
-            "model_name": "gpt-5.4",
+            "requested_model_name": "gpt-5.6",
+            "response_model_name": "gpt-5.4",
             "llm_match": json.dumps(
                 {
                     "fit_score": 88,
@@ -865,7 +926,8 @@ def test_log_job_match_result_includes_model_name_for_success(capsys):
 
     captured = capsys.readouterr()
     assert "status=ok" in captured.out
-    assert "model_name=gpt-5.4" in captured.out
+    assert "requested_model_name=gpt-5.6" in captured.out
+    assert "response_model_name=gpt-5.4" in captured.out
 
 
 def test_log_job_match_result_rejects_invalid_success_payload(capsys):
@@ -886,7 +948,8 @@ def test_log_job_match_result_rejects_invalid_success_payload(capsys):
 
     captured = capsys.readouterr()
 
-    assert "model_name=deepseek-v4-pro" in captured.out
+    assert "requested_model_name=deepseek-v4-pro" in captured.out
+    assert "response_model_name=unknown" in captured.out
     assert "status=error" in captured.out
     assert "invalid_success_payload" in captured.out
     assert "status=ok" not in captured.out
@@ -905,7 +968,8 @@ def test_log_job_match_result_includes_model_name_for_error(capsys):
 
     captured = capsys.readouterr()
     assert "status=error" in captured.out
-    assert "model_name=gpt-5.4-mini" in captured.out
+    assert "requested_model_name=gpt-5.4-mini" in captured.out
+    assert "response_model_name=unknown" in captured.out
 
 
 

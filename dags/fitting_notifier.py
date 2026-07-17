@@ -198,6 +198,8 @@ def _build_job_match_result(
     llm_match: str | None = None,
     llm_match_error: str | None = None,
     model_name: str | None = None,
+    requested_model_name: str | None = None,
+    response_model_name: str | None = None,
 ):
     return {
         "profile_id": int(profile_id),
@@ -205,6 +207,8 @@ def _build_job_match_result(
         "llm_match": llm_match,
         "llm_match_error": llm_match_error,
         "model_name": model_name,
+        "requested_model_name": requested_model_name or model_name,
+        "response_model_name": response_model_name,
     }
 
 
@@ -399,7 +403,12 @@ def _execute_prepared_fitting_items(
 def _log_job_match_result(job_result):
     job_id = job_result.get("job_id")
     profile_id = job_result.get("profile_id")
-    model_name = job_result.get("model_name") or "unknown"
+    requested_model_name = (
+        job_result.get("requested_model_name")
+        or job_result.get("model_name")
+        or "unknown"
+    )
+    response_model_name = job_result.get("response_model_name") or "unknown"
     if not job_id or profile_id is None:
         return
 
@@ -407,7 +416,9 @@ def _log_job_match_result(job_result):
     if llm_error:
         print(
             f"llm_result profile_id={profile_id} job_id={job_id} "
-            f"model_name={model_name} status=error error={llm_error}"
+            f"requested_model_name={requested_model_name} "
+            f"response_model_name={response_model_name} "
+            f"status=error error={llm_error}"
         )
         return
 
@@ -425,12 +436,16 @@ def _log_job_match_result(job_result):
     if invalid_success_payload:
         print(
             f"llm_result profile_id={profile_id} job_id={job_id} "
-            f"model_name={model_name} status=error error=invalid_success_payload"
+            f"requested_model_name={requested_model_name} "
+            f"response_model_name={response_model_name} "
+            f"status=error error=invalid_success_payload"
         )
         return
 
     print(
-        f"llm_result profile_id={profile_id} job_id={job_id} model_name={model_name} status=ok "
+        f"llm_result profile_id={profile_id} job_id={job_id} "
+        f"requested_model_name={requested_model_name} "
+        f"response_model_name={response_model_name} status=ok "
         f"fit_score={fit_score} decision={decision}"
     )
 
@@ -793,7 +808,8 @@ def _request_llm_json(
     reasoning_effort: str | None = None,
     extra_body: dict | None = None,
     call_budget: _LlmCallBudget | None = None,
-) -> dict:
+    return_response_model: bool = False,
+) -> dict | tuple[dict, str | None]:
     if api_type == "chat_completions":
         payload = {
             "model": model_name,
@@ -851,6 +867,8 @@ def _request_llm_json(
         parsed = json.loads(output_text)
         if not isinstance(parsed, dict):
             raise ValueError("response_json_not_object")
+        if return_response_model:
+            return parsed, _normalize_text(response_json.get("model"))
         return parsed
     except Exception:
         if call_budget is not None and not billable_recorded:
@@ -927,12 +945,15 @@ def _request_llm_json_with_fallback(
     prompt: str,
     call_budget: _LlmCallBudget | None = None,
     return_metadata: bool = False,
-) -> dict | tuple[dict, str]:
+    return_model_metadata: bool = False,
+) -> dict | tuple[dict, str] | tuple[dict, dict[str, str]]:
     transient_errors: list[str] = []
     fatal_errors: list[str] = []
 
     if not endpoints:
         raise RuntimeError("FATAL_API::no_llm_endpoints_available")
+    if return_metadata and return_model_metadata:
+        raise ValueError("return_metadata_and_return_model_metadata_are_mutually_exclusive")
 
     for endpoint in endpoints:
         endpoint_name = (
@@ -953,6 +974,16 @@ def _request_llm_json_with_fallback(
                 request_kwargs["extra_body"] = endpoint["extra_body"]
             if call_budget is not None:
                 request_kwargs["call_budget"] = call_budget
+            if return_model_metadata:
+                parsed, response_model_name = _request_llm_json(
+                    **request_kwargs,
+                    return_response_model=True,
+                )
+                return parsed, {
+                    "requested_model_name": effective_model_name,
+                    "response_model_name": response_model_name or "unknown",
+                }
+
             parsed = _request_llm_json(**request_kwargs)
             if return_metadata:
                 return parsed, effective_model_name
@@ -1643,7 +1674,7 @@ def linkedin_fitting_notifier():
         def _record_transient_api_error(
             item,
             message: str,
-            model_name: str | None = None,
+            requested_model_name: str | None = None,
         ):
             claim_key = _job_ref_key(item["profile_id"], item["job_id"])
             error_message = str(message)
@@ -1652,7 +1683,8 @@ def linkedin_fitting_notifier():
             _finalize_job_result(item, requeue_error=error_message)
             print(
                 f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
-                f"model_name={model_name or 'unknown'} status=api_error_requeue error={error_message}"
+                f"requested_model_name={requested_model_name or 'unknown'} "
+                f"response_model_name=unknown status=api_error_requeue error={error_message}"
             )
 
         def _process_single_item(prepared: dict) -> tuple[dict | None, dict | None]:
@@ -1678,20 +1710,23 @@ def linkedin_fitting_notifier():
 
             parsed = None
             last_error = None
-            used_model_name = model_name
+            requested_model_name = model_name
+            response_model_name = "unknown"
             for attempt in range(3):
                 prompt = base_prompt
                 if attempt > 0:
                     prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
 
                 try:
-                    parsed, used_model_name = _request_llm_json_with_fallback(
+                    parsed, model_metadata = _request_llm_json_with_fallback(
                         endpoints=llm_endpoints,
                         model_name=model_name,
                         prompt=prompt,
                         call_budget=llm_call_budget,
-                        return_metadata=True,
+                        return_model_metadata=True,
                     )
+                    requested_model_name = model_metadata["requested_model_name"]
+                    response_model_name = model_metadata["response_model_name"]
                     _validate_llm_match_response(parsed)
                     parsed = _apply_fit_caps(
                         parsed,
@@ -1709,7 +1744,9 @@ def linkedin_fitting_notifier():
                         )
                         print(
                             f"llm_result profile_id={profile_id} job_id={job_id} "
-                            f"model_name={retry_model_name} status=api_retry attempt={attempt + 1}/3 error={_strip_prefix(error_message, 'TRANSIENT_API::')}"
+                            f"requested_model_name={retry_model_name} "
+                            f"response_model_name=unknown status=api_retry "
+                            f"attempt={attempt + 1}/3 error={_strip_prefix(error_message, 'TRANSIENT_API::')}"
                         )
                         time.sleep(min(2**attempt, 4))
                         continue
@@ -1719,7 +1756,8 @@ def linkedin_fitting_notifier():
                     if attempt < 2:
                         print(
                             f"llm_result profile_id={profile_id} job_id={job_id} "
-                            f"model_name={used_model_name} status=invalid_retry "
+                            f"requested_model_name={requested_model_name} "
+                            f"response_model_name={response_model_name} status=invalid_retry "
                             f"attempt={attempt + 1}/3 error={last_error}"
                         )
                         continue
@@ -1729,14 +1767,18 @@ def linkedin_fitting_notifier():
                     profile_id,
                     job_id,
                     llm_match=json.dumps(parsed, ensure_ascii=False),
-                    model_name=used_model_name,
+                    model_name=requested_model_name,
+                    requested_model_name=requested_model_name,
+                    response_model_name=response_model_name,
                 )
 
             return item, _build_job_match_result(
                 profile_id,
                 job_id,
                 llm_match_error=last_error or "invalid_json_response",
-                model_name=used_model_name,
+                model_name=requested_model_name,
+                requested_model_name=requested_model_name,
+                response_model_name=response_model_name,
             )
 
         def _return_api_error(
@@ -2077,7 +2119,8 @@ def linkedin_fitting_notifier():
                 ] = fatal_error
                 print(
                     f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
-                    f"model_name={fatal_event['model_name']} status=api_error error={fatal_error}"
+                    f"requested_model_name={fatal_event['model_name']} "
+                    f"response_model_name=unknown status=api_error error={fatal_error}"
                 )
 
             return _return_api_error(
