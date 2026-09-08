@@ -87,7 +87,7 @@ Common vars:
 - `SCAN_HTTP_MAX_DELAY_SEC`, `SCAN_HTTP_JITTER_SEC`, `SCAN_REQUEST_TIMEOUT_SEC`
 - `JD_WORKER_BATCH_SIZE`, `JD_WORKER_MAX_LOOPS`, `JD_WORKER_IDLE_LOOP_LIMIT`
 - `JD_CLAIM_STALE_MINUTES`: reclaim stalled JD worker leases after this many minutes
-- `FITTING_MAX_ATTEMPTS`
+- `FITTING_MAX_ATTEMPTS`: maximum number of fitting DAG attempts for a job. Each attempt tries every configured LLM endpoint up to three rounds in order; exhausted jobs are marked `fit_failed` instead of being requeued indefinitely.
 - `FITTING_CLAIM_LIMIT`: optional max profile-job fitting tasks claimed per fitting DAG run; leave unset to use the built-in default of `1000`, set `0` only when intentionally processing the full backlog in one run
 - `FITTING_CLAIM_STALE_MINUTES`: reclaim stalled fitting leases after this many minutes
 - `FITTING_MODEL_NAME`: default LLM model for fitting; only a per-endpoint `model` in `LLM_ENDPOINTS_JSON` overrides it

@@ -1691,6 +1691,7 @@ def linkedin_fitting_notifier():
             item = prepared["item"]
             profile_id = item["profile_id"]
             job_id = item["job_id"]
+            attempts = item["attempts"]
             profile_record = prepared["profile_record"]
             job_title = prepared["job_title"]
             jd_text = prepared["jd_text"]
@@ -1737,19 +1738,35 @@ def linkedin_fitting_notifier():
                     break
                 except RuntimeError as error:
                     error_message = str(error)
-                    if error_message.startswith("TRANSIENT_API::") and attempt < 2:
-                        retry_model_name = _summarize_logged_model_names(
-                            error_message,
-                            model_name,
+                    if error_message.startswith("TRANSIENT_API::"):
+                        if attempt < 2:
+                            retry_model_name = _summarize_logged_model_names(
+                                error_message,
+                                model_name,
+                            )
+                            print(
+                                f"llm_result profile_id={profile_id} job_id={job_id} "
+                                f"requested_model_name={retry_model_name} "
+                                f"response_model_name=unknown status=api_retry "
+                                f"attempt={attempt + 1}/3 error={_strip_prefix(error_message, 'TRANSIENT_API::')}"
+                            )
+                            time.sleep(min(2**attempt, 4))
+                            continue
+                        # Return the exhausted round as a normal failed result.
+                        # Queue finalization increments fit_attempts and either
+                        # requeues for another DAG run or marks fit_failed at
+                        # FITTING_MAX_ATTEMPTS.
+                        last_error = (
+                            "all_endpoints_exhausted_after_3_rounds: "
+                            + _strip_prefix(error_message, "TRANSIENT_API::")
                         )
                         print(
                             f"llm_result profile_id={profile_id} job_id={job_id} "
-                            f"requested_model_name={retry_model_name} "
-                            f"response_model_name=unknown status=api_retry "
-                            f"attempt={attempt + 1}/3 error={_strip_prefix(error_message, 'TRANSIENT_API::')}"
+                            f"requested_model_name={requested_model_name} "
+                            "response_model_name=unknown status=endpoint_exhausted "
+                            f"queue_attempt={attempts + 1}/{max_attempts} error={last_error}"
                         )
-                        time.sleep(min(2**attempt, 4))
-                        continue
+                        break
                     raise
                 except Exception as error:
                     last_error = str(error)

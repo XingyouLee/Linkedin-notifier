@@ -307,6 +307,37 @@ def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
     ]
 
 
+def test_request_llm_json_with_fallback_tries_three_endpoints_in_order(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_request_llm_json(*, request_url, **kwargs):
+        calls.append(request_url)
+        if request_url != "https://third.example/v1/responses":
+            raise requests.Timeout(f"{request_url} timeout")
+        return {"fit_score": 77, "decision": "Moderate Fit"}
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    parsed = fitting_notifier._request_llm_json_with_fallback(
+        endpoints=[
+            {"name": "first", "request_url": "https://first.example/v1/responses", "api_key": "key-1"},
+            {"name": "second", "request_url": "https://second.example/v1/responses", "api_key": "key-2"},
+            {"name": "third", "request_url": "https://third.example/v1/responses", "api_key": "key-3"},
+        ],
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+    )
+
+    assert parsed["decision"] == "Moderate Fit"
+    assert calls == [
+        "https://first.example/v1/responses",
+        "https://second.example/v1/responses",
+        "https://third.example/v1/responses",
+    ]
+
+
 def test_parse_llm_endpoints_from_env_preserves_per_endpoint_model_override(monkeypatch):
     monkeypatch.setenv(
         "LLM_ENDPOINTS_JSON",
