@@ -1,4 +1,6 @@
-FROM astrocrpublic.azurecr.io/runtime:3.1-13
+# Keep the Airflow 3.1 line while using the latest Astro patch runtime, which
+# includes the web UI auth/config initialization fixes.
+FROM astrocrpublic.azurecr.io/runtime:3.1-21
 
 USER root
 WORKDIR /usr/local/airflow
