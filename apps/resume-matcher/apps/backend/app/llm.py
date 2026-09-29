@@ -238,7 +238,73 @@ def _extract_responses_output_text(response_json: dict[str, Any]) -> str | None:
     return None
 
 
-def _parse_shared_llm_endpoints() -> list[dict[str, str]]:
+def _shared_endpoint_dict(row: dict, index: int) -> dict[str, str] | None:
+    request_url = str(row.get("request_url") or row.get("url") or "").strip()
+    api_key = str(row.get("api_key") or "").strip()
+    api_key_env = str(row.get("api_key_env") or "").strip()
+    name = str(row.get("name") or f"endpoint_{index + 1}").strip()
+    model = str(row.get("model") or "").strip()
+    if not api_key and api_key_env:
+        api_key = _shared_env_get(api_key_env).strip()
+    if not request_url or not api_key:
+        return None
+    endpoint = {
+        "name": name or f"endpoint_{index + 1}",
+        "request_url": request_url,
+        "api_key": api_key,
+    }
+    if model:
+        endpoint["model"] = model
+    return endpoint
+
+
+def _llm_endpoints_from_jobs_db() -> list[dict[str, str]] | None:
+    """Return Responses endpoints from llm_endpoints, or None to use env.
+
+    Chat-completions rows are ignored. None means the table is missing, empty,
+    failed to load, or has no Responses rows, so the caller keeps the env list.
+    """
+    jobs_db_url = (_shared_env_get("JOBS_DB_URL") or "").strip()
+    if not jobs_db_url:
+        return None
+    try:
+        from psycopg import connect
+        from psycopg.rows import dict_row
+
+        with connect(jobs_db_url, row_factory=dict_row) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT name, request_url, api_key, api_key_env, api_type, model
+                    FROM llm_endpoints
+                    WHERE is_active = TRUE
+                    ORDER BY sort_order ASC, id ASC
+                    """
+                )
+                rows = [dict(row) for row in cursor.fetchall()]
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "llm endpoint table unavailable: %s", type(exc).__name__
+        )
+        return None
+    if not rows:
+        return None
+    responses = [
+        row
+        for row in rows
+        if str(row.get("api_type") or "responses").strip() == "responses"
+    ]
+    if not responses:
+        return None
+    endpoints: list[dict[str, str]] = []
+    for index, row in enumerate(responses):
+        endpoint = _shared_endpoint_dict(row, index)
+        if endpoint:
+            endpoints.append(endpoint)
+    return endpoints
+
+
+def _parse_shared_llm_endpoints_from_env() -> list[dict[str, str]]:
     endpoints_json = (_shared_env_get("LLM_ENDPOINTS_JSON") or "").strip()
     endpoints: list[dict[str, str]] = []
     if endpoints_json:
@@ -279,6 +345,13 @@ def _parse_shared_llm_endpoints() -> list[dict[str, str]]:
         return [{"name": "primary", "request_url": request_url, "api_key": api_key}]
 
     return []
+
+
+def _parse_shared_llm_endpoints() -> list[dict[str, str]]:
+    db_endpoints = _llm_endpoints_from_jobs_db()
+    if db_endpoints is not None:
+        return db_endpoints
+    return _parse_shared_llm_endpoints_from_env()
 
 
 def _shared_env_model_name() -> str:

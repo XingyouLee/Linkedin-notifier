@@ -91,7 +91,7 @@ Common vars:
 - `FITTING_CLAIM_LIMIT`: optional max profile-job fitting tasks claimed per fitting DAG run; leave unset to use the built-in default of `1000`, set `0` only when intentionally processing the full backlog in one run
 - `FITTING_CLAIM_STALE_MINUTES`: reclaim stalled fitting leases after this many minutes
 - `FITTING_MODEL_NAME`: default LLM model for fitting; only a per-endpoint `model` in `LLM_ENDPOINTS_JSON` overrides it
-- `LLM_ENDPOINTS_JSON`: JSON array of LLM endpoints, tried in order. Use `api_type:"chat_completions"` for OpenAI-compatible chat-completions providers such as DeepSeek, and `api_type:"responses"` for OpenAI Responses-compatible endpoints. Example with DeepSeek primary and GPT backup:
+- `LLM_ENDPOINTS_JSON`: fallback JSON array of LLM endpoints, tried in order. Active rows in the Django `llm_endpoints` table override this list; drag order in `/admin/` is the retry order. Resume Matcher uses only `api_type=responses` rows from that table. Use `api_type:"chat_completions"` for OpenAI-compatible chat-completions providers such as DeepSeek, and `api_type:"responses"` for OpenAI Responses-compatible endpoints. Example with DeepSeek primary and GPT backup:
   ```json
   [
     {
@@ -155,7 +155,7 @@ Required GitHub repository secrets (set under Settings → Secrets → Actions):
 |---|---|
 | `JOBS_DB_URL` | Business DB connection string |
 | `AIRFLOW_METADATA_DB_URL` | Deployed Airflow metadata DB, exposed to the container as `AIRFLOW__DATABASE__SQL_ALCHEMY_CONN` |
-| `LLM_ENDPOINTS_JSON` | JSON array of LLM provider endpoints |
+| `LLM_ENDPOINTS_JSON` | Fallback JSON array of LLM provider endpoints when `llm_endpoints` has no active rows |
 | `DEEPSEEK_API_KEY` | DeepSeek API key when `LLM_ENDPOINTS_JSON` references it |
 | `OPENAI_API_KEY` | OpenAI/GPT backup API key when `LLM_ENDPOINTS_JSON` references it |
 | `FITTING_MODEL_NAME` | Default LLM model name for fitting |

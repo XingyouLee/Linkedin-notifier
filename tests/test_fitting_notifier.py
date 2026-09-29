@@ -531,6 +531,121 @@ def test_parse_llm_endpoints_from_env_ignores_legacy_single_endpoint_env(monkeyp
     assert fitting_notifier._parse_llm_endpoints_from_env() == []
 
 
+def test_load_llm_endpoints_prefers_database_order(monkeypatch):
+    monkeypatch.setattr(
+        fitting_notifier.database,
+        "list_active_llm_endpoints",
+        lambda: [
+            {
+                "name": "backup",
+                "request_url": "https://backup.example/v1/responses",
+                "api_key": "backup-key",
+            },
+            {
+                "name": "primary",
+                "request_url": "https://primary.example/chat/completions",
+                "api_key_env": "PRIMARY_API_KEY",
+                "api_type": "chat_completions",
+                "model": "deepseek-v4-pro",
+                "extra_body": '{"thinking": {"type": "enabled"}}',
+            },
+        ],
+    )
+    monkeypatch.setenv("PRIMARY_API_KEY", "primary-key")
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "env",
+                    "request_url": "https://env.example/v1/responses",
+                    "api_key": "env-key",
+                }
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._load_llm_endpoints()
+
+    assert endpoints == [
+        {
+            "name": "backup",
+            "request_url": "https://backup.example/v1/responses",
+            "api_key": "backup-key",
+            "api_type": "responses",
+        },
+        {
+            "name": "primary",
+            "request_url": "https://primary.example/chat/completions",
+            "api_key": "primary-key",
+            "api_type": "chat_completions",
+            "model": "deepseek-v4-pro",
+            "extra_body": {"thinking": {"type": "enabled"}},
+        },
+    ]
+
+
+def test_load_llm_endpoints_falls_back_to_env_when_table_empty(monkeypatch):
+    monkeypatch.setattr(fitting_notifier.database, "list_active_llm_endpoints", lambda: [])
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "env",
+                    "request_url": "https://env.example/v1/responses",
+                    "api_key": "env-key",
+                }
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._load_llm_endpoints()
+
+    assert endpoints[0]["name"] == "env"
+
+
+def test_load_llm_endpoints_falls_back_to_env_when_table_missing(monkeypatch):
+    def missing_table():
+        raise RuntimeError("undefined table")
+
+    monkeypatch.setattr(fitting_notifier.database, "list_active_llm_endpoints", missing_table)
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "env",
+                    "request_url": "https://env.example/v1/responses",
+                    "api_key": "env-key",
+                }
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._load_llm_endpoints()
+
+    assert endpoints[0]["name"] == "env"
+
+
+def test_load_llm_endpoints_rejects_invalid_database_row(monkeypatch):
+    monkeypatch.setattr(
+        fitting_notifier.database,
+        "list_active_llm_endpoints",
+        lambda: [
+            {
+                "name": "bad",
+                "request_url": "https://bad.example/v1/responses",
+                "api_key_env": "MISSING_LLM_KEY",
+            }
+        ],
+    )
+    monkeypatch.delenv("MISSING_LLM_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="api_key_env MISSING_LLM_KEY is unset"):
+        fitting_notifier._load_llm_endpoints()
+
+
 def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch):
     calls = []
 

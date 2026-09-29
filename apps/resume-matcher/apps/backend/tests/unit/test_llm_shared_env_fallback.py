@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from app.llm import (
     LLMConfig,
+    _parse_shared_llm_endpoints,
     _request_shared_responses_text,
     _request_shared_responses_text_with_fallback,
     _serialize_shared_responses_input,
@@ -13,6 +14,37 @@ from app.llm import (
     complete,
     complete_json,
 )
+
+
+class _Cursor:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def execute(self, query):
+        self.query = query
+
+    def fetchall(self):
+        return self.rows
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
+class _Connection:
+    def __init__(self, rows):
+        self.cursor_obj = _Cursor(rows)
+
+    def cursor(self):
+        return self.cursor_obj
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
 
 def _missing_key_config() -> LLMConfig:
@@ -203,3 +235,128 @@ class TestSharedEnvFallback:
         assert result["provider"] == "shared-env-responses"
         assert result["model"] == "gpt-5.4"
         mock_complete.assert_awaited_once()
+
+    def test_jobs_db_responses_override_env_in_returned_order(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.llm._shared_env_get",
+            lambda name: {
+                "JOBS_DB_URL": "postgresql://example.invalid/jobs",
+                "LLM_ENDPOINTS_JSON": json.dumps(
+                    [
+                        {
+                            "name": "env",
+                            "request_url": "https://env.example/v1/responses",
+                            "api_key": "env-key",
+                        }
+                    ]
+                ),
+                "BACKUP_API_KEY": "backup-key",
+            }.get(name, ""),
+        )
+        connection = _Connection(
+            [
+                {
+                    "name": "second",
+                    "request_url": "https://second.example/v1/responses",
+                    "api_key": "second-key",
+                    "api_key_env": "",
+                    "api_type": "responses",
+                    "model": "",
+                },
+                {
+                    "name": "chat",
+                    "request_url": "https://chat.example/chat/completions",
+                    "api_key": "chat-key",
+                    "api_key_env": "",
+                    "api_type": "chat_completions",
+                    "model": "deepseek-v4-pro",
+                },
+                {
+                    "name": "backup",
+                    "request_url": "https://backup.example/v1/responses",
+                    "api_key": "",
+                    "api_key_env": "BACKUP_API_KEY",
+                    "api_type": "responses",
+                    "model": "gpt-5.4",
+                },
+            ]
+        )
+        with patch("psycopg.connect", return_value=connection):
+            endpoints = _parse_shared_llm_endpoints()
+
+        assert "ORDER BY sort_order ASC, id ASC" in connection.cursor_obj.query
+        assert endpoints == [
+            {
+                "name": "second",
+                "request_url": "https://second.example/v1/responses",
+                "api_key": "second-key",
+            },
+            {
+                "name": "backup",
+                "request_url": "https://backup.example/v1/responses",
+                "api_key": "backup-key",
+                "model": "gpt-5.4",
+            },
+        ]
+
+    def test_jobs_db_chat_only_rows_fall_back_to_env(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.llm._shared_env_get",
+            lambda name: {
+                "JOBS_DB_URL": "postgresql://example.invalid/jobs",
+                "LLM_ENDPOINTS_JSON": json.dumps(
+                    [
+                        {
+                            "name": "env",
+                            "request_url": "https://env.example/v1/responses",
+                            "api_key": "env-key",
+                        }
+                    ]
+                ),
+            }.get(name, ""),
+        )
+        connection = _Connection(
+            [
+                {
+                    "name": "chat",
+                    "request_url": "https://chat.example/chat/completions",
+                    "api_key": "chat-key",
+                    "api_type": "chat_completions",
+                }
+            ]
+        )
+        with patch("psycopg.connect", return_value=connection):
+            endpoints = _parse_shared_llm_endpoints()
+
+        assert endpoints == [
+            {
+                "name": "env",
+                "request_url": "https://env.example/v1/responses",
+                "api_key": "env-key",
+            }
+        ]
+
+    def test_jobs_db_failure_falls_back_to_env(self, monkeypatch):
+        monkeypatch.setattr(
+            "app.llm._shared_env_get",
+            lambda name: {
+                "JOBS_DB_URL": "postgresql://example.invalid/jobs",
+                "LLM_ENDPOINTS_JSON": json.dumps(
+                    [
+                        {
+                            "name": "env",
+                            "request_url": "https://env.example/v1/responses",
+                            "api_key": "env-key",
+                        }
+                    ]
+                ),
+            }.get(name, ""),
+        )
+
+        def explode(*args, **kwargs):
+            raise OSError("database unavailable")
+
+        with patch("psycopg.connect", side_effect=explode):
+            endpoints = _parse_shared_llm_endpoints()
+
+        assert endpoints[0]["name"] == "env"

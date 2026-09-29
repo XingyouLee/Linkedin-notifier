@@ -876,66 +876,85 @@ def _request_llm_json(
         raise
 
 
+def _coerce_llm_endpoint(entry: dict, index: int) -> dict:
+    if not isinstance(entry, dict):
+        raise ValueError(f"invalid_llm_endpoints_json: entry {index} must be an object")
+    request_url = _normalize_text(entry.get("request_url") or entry.get("url"))
+    api_key = _normalize_text(entry.get("api_key"))
+    api_key_env = _normalize_text(entry.get("api_key_env"))
+    if not api_key and api_key_env:
+        api_key = _normalize_text(os.getenv(api_key_env))
+    name = _normalize_text(entry.get("name")) or f"endpoint_{index + 1}"
+    if not request_url:
+        raise ValueError(f"invalid_llm_endpoints_json: entry {index} requires request_url")
+    if not api_key:
+        if api_key_env:
+            raise ValueError(
+                f"invalid_llm_endpoints_json: entry {index} api_key_env {api_key_env} is unset"
+            )
+        raise ValueError(
+            f"invalid_llm_endpoints_json: entry {index} requires api_key or api_key_env"
+        )
+    api_type = _normalize_text(entry.get("api_type")) or "responses"
+    if api_type not in {"responses", "chat_completions"}:
+        raise ValueError(
+            f"invalid_llm_endpoints_json: entry {index} api_type must be responses or chat_completions"
+        )
+    endpoint: dict = {
+        "name": name,
+        "request_url": request_url,
+        "api_key": api_key,
+        "api_type": api_type,
+    }
+    model = _normalize_text(entry.get("model"))
+    if model:
+        endpoint["model"] = model
+    reasoning_effort = _normalize_text(entry.get("reasoning_effort"))
+    if reasoning_effort:
+        endpoint["reasoning_effort"] = reasoning_effort
+    extra_body = entry.get("extra_body")
+    if isinstance(extra_body, str):
+        extra_body = extra_body.strip()
+        if not extra_body:
+            extra_body = None
+        else:
+            try:
+                extra_body = json.loads(extra_body)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"invalid_llm_endpoints_json: entry {index} extra_body must be an object"
+                ) from error
+    if extra_body is not None:
+        if not isinstance(extra_body, dict):
+            raise ValueError(
+                f"invalid_llm_endpoints_json: entry {index} extra_body must be an object"
+            )
+        endpoint["extra_body"] = extra_body
+    return endpoint
+
+
 def _parse_llm_endpoints_from_env() -> list[dict]:
     endpoints_json = _normalize_text(os.getenv("LLM_ENDPOINTS_JSON"))
-    endpoints: list[dict] = []
-    if endpoints_json:
-        try:
-            parsed = json.loads(endpoints_json)
-        except Exception as error:
-            raise ValueError(f"invalid_llm_endpoints_json: {error}") from error
-        if not isinstance(parsed, list):
-            raise ValueError("invalid_llm_endpoints_json: root must be a list")
-        for index, entry in enumerate(parsed):
-            if not isinstance(entry, dict):
-                raise ValueError(
-                    f"invalid_llm_endpoints_json: entry {index} must be an object"
-                )
-            request_url = _normalize_text(entry.get("request_url") or entry.get("url"))
-            api_key = _normalize_text(entry.get("api_key"))
-            api_key_env = _normalize_text(entry.get("api_key_env"))
-            if not api_key and api_key_env:
-                api_key = _normalize_text(os.getenv(api_key_env))
-            name = _normalize_text(entry.get("name")) or f"endpoint_{index + 1}"
-            if not request_url:
-                raise ValueError(
-                    f"invalid_llm_endpoints_json: entry {index} requires request_url"
-                )
-            if not api_key:
-                if api_key_env:
-                    raise ValueError(
-                        f"invalid_llm_endpoints_json: entry {index} api_key_env {api_key_env} is unset"
-                    )
-                raise ValueError(
-                    f"invalid_llm_endpoints_json: entry {index} requires api_key or api_key_env"
-                )
-            api_type = _normalize_text(entry.get("api_type")) or "responses"
-            if api_type not in {"responses", "chat_completions"}:
-                raise ValueError(
-                    f"invalid_llm_endpoints_json: entry {index} api_type must be responses or chat_completions"
-                )
-            entry_dict: dict = {
-                "name": name,
-                "request_url": request_url,
-                "api_key": api_key,
-                "api_type": api_type,
-            }
-            model = _normalize_text(entry.get("model"))
-            if model:
-                entry_dict["model"] = model
-            reasoning_effort = _normalize_text(entry.get("reasoning_effort"))
-            if reasoning_effort:
-                entry_dict["reasoning_effort"] = reasoning_effort
-            extra_body = entry.get("extra_body")
-            if extra_body is not None:
-                if not isinstance(extra_body, dict):
-                    raise ValueError(
-                        f"invalid_llm_endpoints_json: entry {index} extra_body must be an object"
-                    )
-                entry_dict["extra_body"] = extra_body
-            endpoints.append(entry_dict)
+    if not endpoints_json:
+        return []
+    try:
+        parsed = json.loads(endpoints_json)
+    except Exception as error:
+        raise ValueError(f"invalid_llm_endpoints_json: {error}") from error
+    if not isinstance(parsed, list):
+        raise ValueError("invalid_llm_endpoints_json: root must be a list")
+    return [_coerce_llm_endpoint(entry, index) for index, entry in enumerate(parsed)]
 
-    return endpoints
+
+def _load_llm_endpoints() -> list[dict]:
+    try:
+        rows = database.list_active_llm_endpoints()
+    except Exception as error:
+        print(f"LLM endpoint table unavailable, using env: {type(error).__name__}")
+        return _parse_llm_endpoints_from_env()
+    if not rows:
+        return _parse_llm_endpoints_from_env()
+    return [_coerce_llm_endpoint(dict(row), index) for index, row in enumerate(rows)]
 
 
 def _request_llm_json_with_fallback(
@@ -1860,7 +1879,7 @@ def linkedin_fitting_notifier():
             )
 
         try:
-            llm_endpoints = _parse_llm_endpoints_from_env()
+            llm_endpoints = _load_llm_endpoints()
         except Exception as error:
             error_message = str(error)
             print(f"LLM API error detected before processing jobs: {error_message}")

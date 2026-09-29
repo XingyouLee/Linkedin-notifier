@@ -1899,6 +1899,30 @@ def get_jobs_ready_for_fitting() -> pd.DataFrame:
     return get_profile_jobs_ready_for_fitting()
 
 
+def list_active_llm_endpoints() -> list[dict]:
+    """Active LLM endpoints in retry order. Django owns the llm_endpoints table."""
+    query = """
+        SELECT
+            id,
+            name,
+            request_url,
+            api_key,
+            api_key_env,
+            api_type,
+            model,
+            reasoning_effort,
+            extra_body,
+            sort_order
+        FROM llm_endpoints
+        WHERE is_active = TRUE
+        ORDER BY sort_order ASC, id ASC
+    """
+    with _connect(row_factory=dict_row) as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            return [dict(row) for row in cursor.fetchall()]
+
+
 def get_profiles_by_ids(profile_ids: List[int]) -> pd.DataFrame:
     """Fetch profiles by id list."""
     if not profile_ids:
