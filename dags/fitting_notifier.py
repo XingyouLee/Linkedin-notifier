@@ -950,11 +950,22 @@ def _load_llm_endpoints() -> list[dict]:
     try:
         rows = database.list_active_llm_endpoints()
     except Exception as error:
-        print(f"LLM endpoint table unavailable, using env: {type(error).__name__}")
-        return _parse_llm_endpoints_from_env()
+        raise RuntimeError(
+            f"llm_endpoint_database_unavailable: {type(error).__name__}; "
+            "check JOBS_DB_URL and the Django llm_endpoints table"
+        ) from error
     if not rows:
-        return _parse_llm_endpoints_from_env()
-    return [_coerce_llm_endpoint(dict(row), index) for index, row in enumerate(rows)]
+        raise RuntimeError("no_active_llm_endpoints: enable an endpoint in Django admin")
+    endpoints = [_coerce_llm_endpoint(dict(row), index) for index, row in enumerate(rows)]
+    print("LLM endpoint source=database, retry_order=" + json.dumps([
+        {
+            "name": endpoint["name"],
+            "api_type": endpoint["api_type"],
+            "model": endpoint.get("model") or _default_fitting_model_name(),
+        }
+        for endpoint in endpoints
+    ]))
+    return endpoints
 
 
 def _request_llm_json_with_fallback(

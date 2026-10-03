@@ -531,7 +531,7 @@ def test_parse_llm_endpoints_from_env_ignores_legacy_single_endpoint_env(monkeyp
     assert fitting_notifier._parse_llm_endpoints_from_env() == []
 
 
-def test_load_llm_endpoints_prefers_database_order(monkeypatch):
+def test_load_llm_endpoints_prefers_database_order(monkeypatch, capsys):
     monkeypatch.setattr(
         fitting_notifier.database,
         "list_active_llm_endpoints",
@@ -583,9 +583,15 @@ def test_load_llm_endpoints_prefers_database_order(monkeypatch):
             "extra_body": {"thinking": {"type": "enabled"}},
         },
     ]
+    output = capsys.readouterr().out
+    assert "LLM endpoint source=database" in output
+    assert output.index('"backup"') < output.index('"primary"')
+    assert "deepseek-v4-pro" in output
+    assert "backup-key" not in output
+    assert "primary-key" not in output
 
 
-def test_load_llm_endpoints_falls_back_to_env_when_table_empty(monkeypatch):
+def test_load_llm_endpoints_rejects_empty_table_even_with_env(monkeypatch):
     monkeypatch.setattr(fitting_notifier.database, "list_active_llm_endpoints", lambda: [])
     monkeypatch.setenv(
         "LLM_ENDPOINTS_JSON",
@@ -600,12 +606,11 @@ def test_load_llm_endpoints_falls_back_to_env_when_table_empty(monkeypatch):
         ),
     )
 
-    endpoints = fitting_notifier._load_llm_endpoints()
+    with pytest.raises(RuntimeError, match="no_active_llm_endpoints"):
+        fitting_notifier._load_llm_endpoints()
 
-    assert endpoints[0]["name"] == "env"
 
-
-def test_load_llm_endpoints_falls_back_to_env_when_table_missing(monkeypatch):
+def test_load_llm_endpoints_rejects_database_failure_even_with_env(monkeypatch):
     def missing_table():
         raise RuntimeError("undefined table")
 
@@ -623,9 +628,9 @@ def test_load_llm_endpoints_falls_back_to_env_when_table_missing(monkeypatch):
         ),
     )
 
-    endpoints = fitting_notifier._load_llm_endpoints()
-
-    assert endpoints[0]["name"] == "env"
+    with pytest.raises(RuntimeError, match="llm_endpoint_database_unavailable") as error:
+        fitting_notifier._load_llm_endpoints()
+    assert str(error.value.__cause__) == "undefined table"
 
 
 def test_load_llm_endpoints_rejects_invalid_database_row(monkeypatch):
