@@ -3,16 +3,19 @@ from __future__ import annotations
 from airflow.sdk import dag, task
 
 import ast
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 from datetime import datetime
+import math
 import os
 import pandas as pd
 import re
 import requests
+from threading import Lock
 import time
 from dags import database
-from dags.runtime_utils import df_to_xcom_records, load_env
+from dags import materials_launch
+from dags.runtime_utils import df_to_xcom_records, load_env, runtime_bool, runtime_int
 
 
 load_env(override_if_missing=True)
@@ -56,6 +59,64 @@ YEARS_RANGE_RE = re.compile(
     re.I,
 )
 YEARS_SINGLE_RE = re.compile(r"(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)", re.I)
+LOGGED_MODEL_NAME_RE = re.compile(r"model_name=([^\s|]+)")
+
+
+class _LlmCallBudget:
+    def __init__(
+        self,
+        *,
+        billable_success_limit: int,
+        total_attempt_limit: int,
+    ):
+        self.billable_success_limit = max(0, int(billable_success_limit))
+        self.total_attempt_limit = max(0, int(total_attempt_limit))
+        self._billable_successes = 0
+        self._reserved_billable_slots = 0
+        self._total_attempts = 0
+        self._lock = Lock()
+
+    def reserve_attempt(self) -> None:
+        with self._lock:
+            if self._total_attempts >= self.total_attempt_limit:
+                raise RuntimeError(self._limit_error("total_attempt_limit"))
+            if (
+                self._billable_successes + self._reserved_billable_slots
+                >= self.billable_success_limit
+            ):
+                raise RuntimeError(self._limit_error("billable_success_limit"))
+            self._total_attempts += 1
+            self._reserved_billable_slots += 1
+
+    def record_billable_success(self) -> None:
+        with self._lock:
+            self._reserved_billable_slots = max(0, self._reserved_billable_slots - 1)
+            self._billable_successes += 1
+
+    def record_nonbillable_attempt(self) -> None:
+        with self._lock:
+            self._reserved_billable_slots = max(0, self._reserved_billable_slots - 1)
+
+    def snapshot(self) -> dict[str, int]:
+        with self._lock:
+            return {
+                "billable_successes": self._billable_successes,
+                "billable_success_limit": self.billable_success_limit,
+                "reserved_billable_slots": self._reserved_billable_slots,
+                "total_attempts": self._total_attempts,
+                "total_attempt_limit": self.total_attempt_limit,
+            }
+
+    def _limit_error(self, reason: str) -> str:
+        return (
+            "FATAL_API::llm_call_budget_exceeded "
+            f"reason={reason} "
+            f"billable_successes={self._billable_successes} "
+            f"billable_success_limit={self.billable_success_limit} "
+            f"reserved_billable_slots={self._reserved_billable_slots} "
+            f"total_attempts={self._total_attempts} "
+            f"total_attempt_limit={self.total_attempt_limit}"
+        )
 
 
 def _build_match_task_result(
@@ -136,12 +197,18 @@ def _build_job_match_result(
     *,
     llm_match: str | None = None,
     llm_match_error: str | None = None,
+    model_name: str | None = None,
+    requested_model_name: str | None = None,
+    response_model_name: str | None = None,
 ):
     return {
         "profile_id": int(profile_id),
         "job_id": job_id,
         "llm_match": llm_match,
         "llm_match_error": llm_match_error,
+        "model_name": model_name,
+        "requested_model_name": requested_model_name or model_name,
+        "response_model_name": response_model_name,
     }
 
 
@@ -176,6 +243,9 @@ def _build_uniform_error_results(job_records, error_message: str):
     return results
 
 
+LLM_ENDPOINT_EXHAUSTED_STOP_LIMIT = 3
+
+
 def _is_transient_llm_http_status(status_code) -> bool:
     try:
         parsed_status_code = int(status_code)
@@ -186,6 +256,47 @@ def _is_transient_llm_http_status(status_code) -> bool:
         or parsed_status_code == 429
         or parsed_status_code >= 500
     )
+
+
+def _llm_http_status_code(status_code):
+    try:
+        return int(status_code)
+    except (TypeError, ValueError):
+        return None
+
+
+def _llm_endpoint_name(endpoint: dict, index: int = 0) -> str:
+    return (
+        _normalize_text(endpoint.get("name"))
+        or _normalize_text(endpoint.get("request_url"))
+        or f"endpoint_{index + 1}"
+    )
+
+
+class _LlmEndpointHealth:
+    def __init__(self, endpoints):
+        self._lock = Lock()
+        self._names = [
+            _llm_endpoint_name(endpoint, index)
+            for index, endpoint in enumerate(endpoints or [])
+        ]
+        self._disabled = set()
+
+    def disable(self, name: str) -> None:
+        with self._lock:
+            self._disabled.add(name)
+
+    def is_disabled(self, name: str) -> bool:
+        with self._lock:
+            return name in self._disabled
+
+    def has_living(self) -> bool:
+        with self._lock:
+            return any(name not in self._disabled for name in self._names)
+
+
+def _strip_prefix(text: str, prefix: str) -> str:
+    return text[len(prefix) :] if text.startswith(prefix) else text
 
 
 def _summarize_api_errors(api_error_messages):
@@ -202,9 +313,183 @@ def _summarize_api_errors(api_error_messages):
     )
 
 
+def _extract_logged_model_names(text: str | None) -> list[str]:
+    model_names = []
+    for model_name in LOGGED_MODEL_NAME_RE.findall(str(text or "")):
+        if model_name not in model_names:
+            model_names.append(model_name)
+    return model_names
+
+
+def _summarize_logged_model_names(
+    text: str | None,
+    fallback_model_name: str | None = None,
+) -> str:
+    model_names = _extract_logged_model_names(text)
+    if model_names:
+        return ",".join(model_names)
+    return fallback_model_name or "unknown"
+
+
+def _default_fitting_model_name() -> str:
+    return _normalize_text(os.getenv("FITTING_MODEL_NAME")) or "gpt-5.4"
+
+
+def _execute_prepared_fitting_items(
+    prepared_items,
+    *,
+    concurrency: int,
+    process_single_item,
+    default_model_name_fn,
+    handle_completed_event,
+    endpoint_health: _LlmEndpointHealth | None = None,
+):
+    fatal_events = []
+    stop_submitting = False
+    consecutive_exhausted = 0
+    if not prepared_items:
+        return {
+            "fatal_events": fatal_events,
+            "stop_submitting": False,
+        }
+
+    def _note_exhausted(is_exhausted: bool) -> None:
+        nonlocal consecutive_exhausted, stop_submitting
+        if is_exhausted:
+            consecutive_exhausted += 1
+            if consecutive_exhausted >= LLM_ENDPOINT_EXHAUSTED_STOP_LIMIT:
+                stop_submitting = True
+            return
+        consecutive_exhausted = 0
+
+    max_workers = max(1, int(concurrency or 1))
+    prepared_iter = iter(prepared_items)
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        in_flight = {}
+
+        def _submit_next() -> bool:
+            try:
+                prepared = next(prepared_iter)
+            except StopIteration:
+                return False
+
+            future = executor.submit(process_single_item, prepared)
+            in_flight[future] = prepared
+            return True
+
+        for _ in range(min(max_workers, len(prepared_items))):
+            _submit_next()
+
+        while in_flight:
+            done, _ = wait(tuple(in_flight), return_when=FIRST_COMPLETED)
+            completed_count = len(done)
+
+            for future in done:
+                prepared = in_flight.pop(future)
+                try:
+                    _, job_result = future.result()
+                except Exception as error:
+                    error_text = str(error)
+                    error_model_name = _summarize_logged_model_names(
+                        error_text,
+                        default_model_name_fn(prepared),
+                    )
+                    if error_text.startswith("TRANSIENT_API::"):
+                        _note_exhausted(True)
+                        handle_completed_event(
+                            {
+                                "kind": "transient_api_error",
+                                "prepared": prepared,
+                                "error_message": _strip_prefix(
+                                    error_text,
+                                    "TRANSIENT_API::",
+                                ),
+                                "model_name": error_model_name,
+                            }
+                        )
+                        continue
+                    if error_text.startswith("FATAL_API::"):
+                        no_living_endpoints = (
+                            endpoint_health is not None
+                            and not endpoint_health.has_living()
+                        )
+                        if endpoint_health is None or no_living_endpoints:
+                            fatal_events.append(
+                                {
+                                    "prepared": prepared,
+                                    "error_message": _strip_prefix(
+                                        error_text,
+                                        "FATAL_API::",
+                                    ),
+                                    "model_name": error_model_name,
+                                }
+                            )
+                            stop_submitting = True
+                            continue
+                        _note_exhausted(False)
+                        handle_completed_event(
+                            {
+                                "kind": "job_result",
+                                "prepared": prepared,
+                                "job_result": _build_job_match_result(
+                                    prepared["item"]["profile_id"],
+                                    prepared["item"]["job_id"],
+                                    llm_match_error=_strip_prefix(
+                                        error_text,
+                                        "FATAL_API::",
+                                    ),
+                                    model_name=error_model_name,
+                                ),
+                            }
+                        )
+                        continue
+
+                    _note_exhausted(False)
+                    handle_completed_event(
+                        {
+                            "kind": "job_result",
+                            "prepared": prepared,
+                            "job_result": _build_job_match_result(
+                                prepared["item"]["profile_id"],
+                                prepared["item"]["job_id"],
+                                llm_match_error=f"unexpected_job_error: {error}",
+                                model_name=error_model_name,
+                            ),
+                        }
+                    )
+                    continue
+
+                match_error = str((job_result or {}).get("llm_match_error") or "")
+                _note_exhausted(match_error.startswith("all_endpoints_exhausted"))
+                handle_completed_event(
+                    {
+                        "kind": "job_result",
+                        "prepared": prepared,
+                        "job_result": job_result,
+                    }
+                )
+
+            if not stop_submitting:
+                for _ in range(completed_count):
+                    if not _submit_next():
+                        break
+
+    return {
+        "fatal_events": fatal_events,
+        "stop_submitting": stop_submitting,
+    }
+
+
 def _log_job_match_result(job_result):
     job_id = job_result.get("job_id")
     profile_id = job_result.get("profile_id")
+    requested_model_name = (
+        job_result.get("requested_model_name")
+        or job_result.get("model_name")
+        or "unknown"
+    )
+    response_model_name = job_result.get("response_model_name") or "unknown"
     if not job_id or profile_id is None:
         return
 
@@ -212,21 +497,36 @@ def _log_job_match_result(job_result):
     if llm_error:
         print(
             f"llm_result profile_id={profile_id} job_id={job_id} "
+            f"requested_model_name={requested_model_name} "
+            f"response_model_name={response_model_name} "
             f"status=error error={llm_error}"
         )
         return
 
     fit_score = None
     decision = None
+    invalid_success_payload = False
     try:
         parsed_match = json.loads(job_result.get("llm_match") or "{}")
         fit_score = parsed_match.get("fit_score")
         decision = parsed_match.get("decision")
+        _validate_llm_match_response(parsed_match)
     except Exception:
-        pass
+        invalid_success_payload = True
+
+    if invalid_success_payload:
+        print(
+            f"llm_result profile_id={profile_id} job_id={job_id} "
+            f"requested_model_name={requested_model_name} "
+            f"response_model_name={response_model_name} "
+            f"status=error error=invalid_success_payload"
+        )
+        return
 
     print(
-        f"llm_result profile_id={profile_id} job_id={job_id} status=ok "
+        f"llm_result profile_id={profile_id} job_id={job_id} "
+        f"requested_model_name={requested_model_name} "
+        f"response_model_name={response_model_name} status=ok "
         f"fit_score={fit_score} decision={decision}"
     )
 
@@ -246,6 +546,15 @@ def _extract_output_text(response_json):
     return None
 
 
+def _extract_chat_completion_output_text(response_json):
+    for choice in response_json.get("choices") or []:
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if content:
+            return content
+    return None
+
+
 def _load_resume_text(
     *,
     resume_path: str | None = None,
@@ -254,24 +563,15 @@ def _load_resume_text(
     if resume_text:
         return str(resume_text), None
 
-    resume_candidates = []
     if resume_path:
-        resume_candidates.append(os.path.abspath(os.path.expanduser(resume_path)))
-    resume_candidates.extend(
-        [
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "resume.md")),
-            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "resume.md")),
-        ]
-    )
-    resume_error = None
-    for resume_path in resume_candidates:
         try:
-            with open(resume_path, "r", encoding="utf-8") as file_handle:
+            resolved_resume_path = os.path.abspath(os.path.expanduser(resume_path))
+            with open(resolved_resume_path, "r", encoding="utf-8") as file_handle:
                 return file_handle.read(), None
         except Exception as error:
-            resume_error = error
+            return None, f"resume_read_error: {error}"
 
-    return None, f"resume_read_error: {resume_error}"
+    return None, "resume_text_missing"
 
 
 def _normalize_text(value) -> str | None:
@@ -312,6 +612,59 @@ def _coerce_bool(value) -> bool:
         return False
     normalized = str(value).strip().lower()
     return normalized in {"true", "1", "yes", "y", "on"}
+
+
+def _is_test_mode_enabled() -> bool:
+    return runtime_bool("LINKEDIN_TEST_MODE", False)
+
+
+def _test_mode_notification_limit() -> int:
+    return runtime_int("LINKEDIN_TEST_MAX_NOTIFY_JOBS", 3, minimum=1)
+
+
+def _fitting_claim_limit() -> int | None:
+    if _is_test_mode_enabled():
+        return runtime_int(
+            "LINKEDIN_TEST_MAX_FIT_JOBS",
+            10,
+            fallback_key="LINKEDIN_TEST_MAX_JOBS",
+            minimum=1,
+        )
+
+    limit = runtime_int("FITTING_CLAIM_LIMIT", 1000, minimum=0)
+    return limit if limit > 0 else None
+
+
+def _runtime_float(var_name: str, default: float, *, minimum: float) -> float:
+    try:
+        value = float(os.getenv(var_name, str(default)))
+    except (TypeError, ValueError):
+        return default
+    return max(minimum, value)
+
+
+def _build_llm_call_budget(ready_job_count: int) -> _LlmCallBudget:
+    normalized_ready_job_count = max(0, int(ready_job_count or 0))
+    billable_multiplier = _runtime_float(
+        "FITTING_BILLABLE_CALL_MULTIPLIER",
+        1.2,
+        minimum=1.0,
+    )
+    total_multiplier = _runtime_float(
+        "FITTING_TOTAL_CALL_MULTIPLIER",
+        4.0,
+        minimum=1.0,
+    )
+    return _LlmCallBudget(
+        billable_success_limit=max(
+            1,
+            math.ceil(normalized_ready_job_count * billable_multiplier),
+        ),
+        total_attempt_limit=max(
+            1,
+            math.ceil(normalized_ready_job_count * total_multiplier),
+        ),
+    )
 
 
 def _normalize_string_list(values) -> list[str]:
@@ -516,139 +869,317 @@ def _normalize_match_decision(decision) -> str:
     return alias_map[normalized]
 
 
+def _validate_llm_match_response(parsed_match: dict) -> None:
+    if not isinstance(parsed_match, dict):
+        raise ValueError("response_json_not_object")
+    if "fit_score" not in parsed_match or "decision" not in parsed_match:
+        raise ValueError("response_missing_fit_fields")
+    if _coerce_number(parsed_match.get("fit_score")) is None:
+        raise ValueError("response_invalid_fit_score")
+    _normalize_match_decision(parsed_match.get("decision"))
+
+
 def _request_llm_json(
     *,
     request_url: str,
     api_key: str,
     model_name: str,
     prompt: str,
-) -> dict:
-    payload = {
-        "model": model_name,
-        "input": [
-            {
-                "type": "message",
-                "role": "user",
-                "content": [{"type": "input_text", "text": prompt}],
-            }
-        ],
-    }
-    response = requests.post(
-        request_url,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {api_key}",
-        },
-        json=payload,
-        timeout=120,
-    )
-    response.raise_for_status()
+    api_type: str = "responses",
+    reasoning_effort: str | None = None,
+    extra_body: dict | None = None,
+    call_budget: _LlmCallBudget | None = None,
+    return_response_model: bool = False,
+) -> dict | tuple[dict, str | None]:
+    if api_type == "chat_completions":
+        payload = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+        }
+        if reasoning_effort:
+            payload["reasoning_effort"] = reasoning_effort
+        if extra_body is not None:
+            if not isinstance(extra_body, dict):
+                raise ValueError("extra_body_must_be_object")
+            payload.update(extra_body)
+    else:
+        payload = {
+            "model": model_name,
+            "input": prompt,
+        }
+    if call_budget is not None:
+        call_budget.reserve_attempt()
+    billable_recorded = False
+    try:
+        response = requests.post(
+            request_url,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_key}",
+            },
+            json=payload,
+            timeout=120,
+        )
+    except Exception:
+        if call_budget is not None:
+            call_budget.record_nonbillable_attempt()
+        raise
+    try:
+        response.raise_for_status()
+    except Exception:
+        if call_budget is not None:
+            call_budget.record_nonbillable_attempt()
+        raise
 
-    response_json = response.json()
-    output_text = _extract_output_text(response_json)
-    if not output_text:
-        raise ValueError("response_missing_output_text")
+    if call_budget is not None:
+        call_budget.record_billable_success()
+        billable_recorded = True
 
-    parsed = json.loads(output_text)
-    if not isinstance(parsed, dict):
-        raise ValueError("response_json_not_object")
-    return parsed
+    try:
+        response_json = response.json()
+        if api_type == "chat_completions":
+            output_text = _extract_chat_completion_output_text(response_json)
+        else:
+            output_text = _extract_output_text(response_json)
+        if not output_text:
+            raise ValueError("response_missing_output_text")
+
+        parsed = json.loads(output_text)
+        if not isinstance(parsed, dict):
+            raise ValueError("response_json_not_object")
+        if return_response_model:
+            return parsed, _normalize_text(response_json.get("model"))
+        return parsed
+    except Exception:
+        if call_budget is not None and not billable_recorded:
+            call_budget.record_nonbillable_attempt()
+        raise
 
 
-def _parse_llm_endpoints_from_env() -> list[dict[str, str]]:
-    endpoints_json = _normalize_text(os.getenv("LLM_ENDPOINTS_JSON"))
-    endpoints: list[dict[str, str]] = []
-    if endpoints_json:
-        try:
-            parsed = json.loads(endpoints_json)
-        except Exception as error:
-            raise ValueError(f"invalid_llm_endpoints_json: {error}") from error
-        if not isinstance(parsed, list):
-            raise ValueError("invalid_llm_endpoints_json: root must be a list")
-        for index, entry in enumerate(parsed):
-            if not isinstance(entry, dict):
-                raise ValueError(
-                    f"invalid_llm_endpoints_json: entry {index} must be an object"
-                )
-            request_url = _normalize_text(entry.get("request_url") or entry.get("url"))
-            api_key = _normalize_text(entry.get("api_key"))
-            api_key_env = _normalize_text(entry.get("api_key_env"))
-            name = _normalize_text(entry.get("name")) or f"endpoint_{index + 1}"
-            if api_key is None and api_key_env:
-                api_key = _normalize_text(os.getenv(api_key_env))
-            if not request_url or not api_key:
-                raise ValueError(
-                    f"invalid_llm_endpoints_json: entry {index} requires request_url and api_key/api_key_env"
-                )
-            endpoints.append(
-                {
-                    "name": name,
-                    "request_url": request_url,
-                    "api_key": api_key,
-                }
+def _coerce_llm_endpoint(entry: dict, index: int) -> dict:
+    if not isinstance(entry, dict):
+        raise ValueError(f"invalid_llm_endpoints_json: entry {index} must be an object")
+    request_url = _normalize_text(entry.get("request_url") or entry.get("url"))
+    api_key = _normalize_text(entry.get("api_key"))
+    api_key_env = _normalize_text(entry.get("api_key_env"))
+    if not api_key and api_key_env:
+        api_key = _normalize_text(os.getenv(api_key_env))
+    name = _normalize_text(entry.get("name")) or f"endpoint_{index + 1}"
+    if not request_url:
+        raise ValueError(f"invalid_llm_endpoints_json: entry {index} requires request_url")
+    if not api_key:
+        if api_key_env:
+            raise ValueError(
+                f"invalid_llm_endpoints_json: entry {index} api_key_env {api_key_env} is unset"
             )
+        raise ValueError(
+            f"invalid_llm_endpoints_json: entry {index} requires api_key or api_key_env"
+        )
+    api_type = _normalize_text(entry.get("api_type")) or "responses"
+    if api_type not in {"responses", "chat_completions"}:
+        raise ValueError(
+            f"invalid_llm_endpoints_json: entry {index} api_type must be responses or chat_completions"
+        )
+    endpoint: dict = {
+        "name": name,
+        "request_url": request_url,
+        "api_key": api_key,
+        "api_type": api_type,
+    }
+    model = _normalize_text(entry.get("model"))
+    if model:
+        endpoint["model"] = model
+    reasoning_effort = _normalize_text(entry.get("reasoning_effort"))
+    if reasoning_effort:
+        endpoint["reasoning_effort"] = reasoning_effort
+    extra_body = entry.get("extra_body")
+    if isinstance(extra_body, str):
+        extra_body = extra_body.strip()
+        if not extra_body:
+            extra_body = None
+        else:
+            try:
+                extra_body = json.loads(extra_body)
+            except json.JSONDecodeError as error:
+                raise ValueError(
+                    f"invalid_llm_endpoints_json: entry {index} extra_body must be an object"
+                ) from error
+    if extra_body is not None:
+        if not isinstance(extra_body, dict):
+            raise ValueError(
+                f"invalid_llm_endpoints_json: entry {index} extra_body must be an object"
+            )
+        endpoint["extra_body"] = extra_body
+    return endpoint
 
-    if endpoints:
-        return endpoints
 
-    request_url = _normalize_text(os.getenv("FITTING_REQUEST_URL"))
-    api_key = _normalize_text(os.getenv("LLM_API_KEY")) or _normalize_text(
-        os.getenv("GMN_API_KEY")
-    )
-    if request_url and api_key:
-        return [
+def _parse_llm_endpoints_from_env() -> list[dict]:
+    endpoints_json = _normalize_text(os.getenv("LLM_ENDPOINTS_JSON"))
+    if not endpoints_json:
+        return []
+    try:
+        parsed = json.loads(endpoints_json)
+    except Exception as error:
+        raise ValueError(f"invalid_llm_endpoints_json: {error}") from error
+    if not isinstance(parsed, list):
+        raise ValueError("invalid_llm_endpoints_json: root must be a list")
+    return [_coerce_llm_endpoint(entry, index) for index, entry in enumerate(parsed)]
+
+
+def _load_llm_endpoints() -> list[dict]:
+    try:
+        rows = database.list_active_llm_endpoints()
+    except Exception as error:
+        raise RuntimeError(
+            f"llm_endpoint_database_unavailable: {type(error).__name__}; "
+            "check JOBS_DB_URL and the Django llm_endpoints table"
+        ) from error
+    if not rows:
+        raise RuntimeError(
+            "no_active_llm_endpoints: enable an endpoint in Django admin"
+        )
+    endpoints = [_coerce_llm_endpoint(dict(row), index) for index, row in enumerate(rows)]
+    print(
+        "LLM endpoint source=database, retry_order="
+        + json.dumps([
             {
-                "name": "primary",
-                "request_url": request_url,
-                "api_key": api_key,
+                "name": endpoint["name"],
+                "api_type": endpoint["api_type"],
+                "model": endpoint.get("model") or _default_fitting_model_name(),
             }
-        ]
+            for endpoint in endpoints
+        ])
+    )
+    return endpoints
 
-    return []
+
+def _raise_llm_fallback_error(
+    *,
+    auth_errors: list[str],
+    fatal_errors: list[str],
+    transient_errors: list[str],
+    endpoint_health: _LlmEndpointHealth | None,
+) -> None:
+    all_errors = auth_errors + fatal_errors + transient_errors
+    if not all_errors:
+        raise RuntimeError("FATAL_API::no_llm_endpoints_available")
+
+    no_living_endpoints = (
+        endpoint_health is not None and not endpoint_health.has_living()
+    )
+    only_auth = bool(auth_errors) and not fatal_errors and not transient_errors
+    prefix = "FATAL_API::" if no_living_endpoints or only_auth else "TRANSIENT_API::"
+    raise RuntimeError(prefix + " | ".join(all_errors))
 
 
 def _request_llm_json_with_fallback(
-    *, endpoints: list[dict[str, str]], model_name: str, prompt: str
-) -> dict:
+    *,
+    endpoints: list[dict[str, str]],
+    model_name: str,
+    prompt: str,
+    call_budget: _LlmCallBudget | None = None,
+    return_metadata: bool = False,
+    return_model_metadata: bool = False,
+    endpoint_health: _LlmEndpointHealth | None = None,
+) -> dict | tuple[dict, str] | tuple[dict, dict[str, str]]:
     transient_errors: list[str] = []
     fatal_errors: list[str] = []
+    auth_errors: list[str] = []
 
-    for endpoint in endpoints:
-        endpoint_name = (
-            endpoint.get("name") or endpoint.get("request_url") or "endpoint"
-        )
+    if not endpoints:
+        raise RuntimeError("FATAL_API::no_llm_endpoints_available")
+    if return_metadata and return_model_metadata:
+        raise ValueError("return_metadata_and_return_model_metadata_are_mutually_exclusive")
+
+    for index, endpoint in enumerate(endpoints):
+        endpoint_name = _llm_endpoint_name(endpoint, index)
+        if endpoint_health is not None and endpoint_health.is_disabled(endpoint_name):
+            continue
+        effective_model_name = endpoint.get("model") or model_name
         try:
-            return _request_llm_json(
-                request_url=endpoint["request_url"],
-                api_key=endpoint["api_key"],
-                model_name=model_name,
-                prompt=prompt,
-            )
+            request_kwargs = {
+                "request_url": endpoint["request_url"],
+                "api_key": endpoint["api_key"],
+                "model_name": effective_model_name,
+                "prompt": prompt,
+                "api_type": endpoint.get("api_type", "responses"),
+            }
+            if endpoint.get("reasoning_effort"):
+                request_kwargs["reasoning_effort"] = endpoint["reasoning_effort"]
+            if endpoint.get("extra_body") is not None:
+                request_kwargs["extra_body"] = endpoint["extra_body"]
+            if call_budget is not None:
+                request_kwargs["call_budget"] = call_budget
+            if return_model_metadata:
+                parsed, response_model_name = _request_llm_json(
+                    **request_kwargs,
+                    return_response_model=True,
+                )
+                return parsed, {
+                    "requested_model_name": effective_model_name,
+                    "response_model_name": response_model_name or "unknown",
+                }
+
+            parsed = _request_llm_json(**request_kwargs)
+            if return_metadata:
+                return parsed, effective_model_name
+            return parsed
         except requests.HTTPError as error:
             status_code = (
                 error.response.status_code if error.response is not None else "unknown"
             )
-            message = f"endpoint={endpoint_name} status={status_code} error={error}"
+            message = (
+                f"endpoint={endpoint_name} model_name={effective_model_name} "
+                f"status={status_code} error={error}"
+            )
+            parsed_status_code = _llm_http_status_code(status_code)
+            if parsed_status_code in {401, 403}:
+                if endpoint_health is not None:
+                    endpoint_health.disable(endpoint_name)
+                auth_errors.append(message)
+                continue
+            if parsed_status_code == 404:
+                if endpoint_health is not None:
+                    endpoint_health.disable(endpoint_name)
+                transient_errors.append(message)
+                continue
             if _is_transient_llm_http_status(status_code):
                 transient_errors.append(message)
                 continue
             fatal_errors.append(message)
             continue
         except (requests.Timeout, requests.ConnectionError) as error:
-            transient_errors.append(f"endpoint={endpoint_name} error={error}")
+            transient_errors.append(
+                f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
+            )
+            continue
+        except json.JSONDecodeError as error:
+            transient_errors.append(
+                f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
+            )
             continue
         except requests.RequestException as error:
-            fatal_errors.append(f"endpoint={endpoint_name} error={error}")
+            fatal_errors.append(
+                f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
+            )
+            continue
+        except ValueError as error:
+            message = (
+                f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
+            )
+            if str(error) == "response_missing_output_text":
+                transient_errors.append(message)
+                continue
+            fatal_errors.append(message)
             continue
 
-    if transient_errors and not fatal_errors:
-        raise RuntimeError("TRANSIENT_API::" + " | ".join(transient_errors))
-
-    all_errors = fatal_errors + transient_errors
-    if all_errors:
-        raise RuntimeError("FATAL_API::" + " | ".join(all_errors))
-
-    raise RuntimeError("FATAL_API::no_llm_endpoints_available")
+    _raise_llm_fallback_error(
+        auth_errors=auth_errors,
+        fatal_errors=fatal_errors,
+        transient_errors=transient_errors,
+        endpoint_health=endpoint_health,
+    )
 
 
 def _cap_decision(decision: str, max_decision: str | None) -> str:
@@ -832,12 +1363,29 @@ def _apply_fit_caps(
     return normalized_match
 
 
+def _render_feedback_examples(examples: list[dict] | None) -> str:
+    if not examples:
+        return ""
+    lines = ["Past calibration signals (use only to calibrate scoring thresholds, not to override the current job evaluation):"]
+    for ex in examples:
+        label = "dismissed" if ex.get("status") == "dismissed" else "applied to"
+        title = ex.get("title") or "unknown"
+        company = ex.get("company") or "unknown"
+        score = ex.get("fit_score")
+        decision = ex.get("fit_decision") or ""
+        score_str = f"model score: {score}, {decision}" if score is not None else decision
+        note_str = f" User note: \"{ex['user_note']}\"" if ex.get("user_note") else ""
+        lines.append(f'- User {label} "{title} at {company}" ({score_str}).{note_str}')
+    return " ".join(lines) + " "
+
+
 def _build_fit_prompt(
     job_title: str,
     jd_text: str,
     resume_text: str,
     candidate_summary: dict,
     prompt_text: str | None = None,
+    feedback_examples: list[dict] | None = None,
 ) -> str:
     template = database._normalize_fit_prompt_text(prompt_text)
     replacements = {
@@ -845,6 +1393,7 @@ def _build_fit_prompt(
         "{{job_description}}": str(jd_text or "").strip(),
         "{{candidate_resume}}": str(resume_text or "").strip(),
         "{{candidate_summary}}": json.dumps(candidate_summary, ensure_ascii=False),
+        "{{user_feedback_examples}}": _render_feedback_examples(feedback_examples),
     }
 
     prompt = template
@@ -886,7 +1435,20 @@ def _has_experience_blocker(llm_match) -> bool:
     return _coerce_bool(experience_check.get("experience_blocker"))
 
 
+def _has_successful_match_payload(job: dict | None) -> bool:
+    if not isinstance(job, dict):
+        return False
+    if job.get("llm_match_error"):
+        return False
+    parsed_match = _parse_llm_match_payload(job.get("llm_match"))
+    return bool(parsed_match)
+
+
 def _filter_notification_jobs(job_records: list[dict]) -> list[dict]:
+    if _is_test_mode_enabled():
+        return [
+            job for job in (job_records or []) if _has_successful_match_payload(job)
+        ]
     return [
         job
         for job in (job_records or [])
@@ -972,6 +1534,171 @@ def _send_discord_message(
         return False, str(error)
 
 
+def _coerce_bool_value(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"1", "true", "yes", "y", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _is_discord_enabled(job_or_profile: dict) -> bool:
+    return _coerce_bool_value((job_or_profile or {}).get("discord_enabled"), True)
+
+
+def _has_discord_destination(job_or_profile: dict) -> bool:
+    return bool(
+        (job_or_profile or {}).get("discord_webhook_url")
+        or os.getenv("DISCORD_WEBHOOK_URL")
+        or (
+            ((job_or_profile or {}).get("discord_channel_id") or os.getenv("DISCORD_CHANNEL_ID"))
+            and os.getenv("DISCORD_BOT_TOKEN")
+        )
+    )
+
+
+def _discord_skip_reason(job_or_profile: dict) -> str | None:
+    if not _is_discord_enabled(job_or_profile):
+        return "discord_disabled"
+    if not _has_discord_destination(job_or_profile):
+        return "discord_missing_destination"
+    return None
+
+
+def _has_discord_delivery_config(job_or_profile: dict) -> bool:
+    return _discord_skip_reason(job_or_profile) is None
+
+
+def _profile_id_value(record: dict):
+    value = (record or {}).get("profile_id")
+    return int(value) if value is not None else None
+
+
+def _group_jobs_by_profile(job_records: list[dict]) -> dict[int, list[dict]]:
+    grouped: dict[int, list[dict]] = {}
+    for job in job_records or []:
+        profile_id = _profile_id_value(job)
+        if profile_id is None:
+            continue
+        grouped.setdefault(profile_id, []).append(job)
+    return grouped
+
+
+def _build_discord_notification_summary_message(profile_summary: dict) -> str:
+    summary_time = profile_summary.get("time") or datetime.now().strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    profile_label = (
+        profile_summary.get("display_name")
+        or profile_summary.get("profile_key")
+        or profile_summary.get("profile_id")
+        or "Unknown profile"
+    )
+    return (
+        "━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 Fitting Notification Summary\n"
+        f"Profile: {profile_label}\n"
+        f"Time: {summary_time}\n"
+        f"Eligible: {int(profile_summary.get('eligible') or 0)}\n"
+        f"Sent: {int(profile_summary.get('sent') or 0)}\n"
+        f"Failed: {int(profile_summary.get('failed') or 0)}\n"
+        "━━━━━━━━━━━━━━━━━━━━"
+    )
+
+
+def _send_zero_result_notification_summaries() -> int:
+    profiles_df = database.get_active_notification_profiles()
+    if profiles_df is None or profiles_df.empty:
+        print("No active profiles found for zero-result notification summary.")
+        return 0
+
+    summary_sent = 0
+    summary_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    profile_records = df_to_xcom_records(profiles_df)
+    for profile in profile_records:
+        profile_id = profile.get("profile_id")
+        summary_message = _build_discord_notification_summary_message(
+            {
+                "profile_id": profile_id,
+                "profile_key": profile.get("profile_key"),
+                "display_name": profile.get("display_name"),
+                "eligible": 0,
+                "sent": 0,
+                "failed": 0,
+                "time": summary_time,
+            }
+        )
+        skip_reason = _discord_skip_reason(profile)
+        if skip_reason:
+            print(f"Skipped zero-result summary profile_id={profile_id}: {skip_reason}")
+            continue
+        delivered, summary_error = _send_discord_message(
+            summary_message,
+            channel_id=profile.get("discord_channel_id"),
+            webhook_url=profile.get("discord_webhook_url"),
+        )
+        if delivered:
+            summary_sent += 1
+        else:
+            print(
+                f"Failed to send zero-result summary message profile_id={profile_id}: {summary_error}"
+            )
+    return summary_sent
+
+
+def _build_discord_job_match_message(job: dict) -> str | None:
+    profile_id = (
+        int(job.get("profile_id")) if job.get("profile_id") is not None else None
+    )
+    job_id = job.get("id")
+    if profile_id is None or not job_id:
+        return None
+
+    title = job.get("title") or "Unknown title"
+    company = job.get("company") or "Unknown company"
+    fit_score = job.get("fit_score")
+    fit_decision = job.get("fit_decision")
+    job_url = job.get("job_url") or ""
+    exp_requirement = "not specified"
+    profile_label = job.get("display_name") or job.get("profile_key") or profile_id
+
+    llm_match = job.get("llm_match")
+    if llm_match:
+        try:
+            parsed = llm_match if isinstance(llm_match, dict) else json.loads(llm_match)
+            exp_requirement = _format_exp_requirement_for_discord(
+                parsed.get("exp_requirement")
+            )
+        except Exception:
+            pass
+
+    materials_url = materials_launch.maybe_build_materials_launch_url(
+        profile_id=profile_id,
+        job_id=str(job_id),
+    )
+
+    header = "🧪 TEST Job Match" if _is_test_mode_enabled() else "🎯 Job Match"
+    lines = [
+        header,
+        f"Profile: {profile_label}",
+        f"ID: {job_id}",
+        f"Title: {title}",
+        f"Company: {company}",
+        f"Decision: {fit_decision}",
+        f"Fit Score: {fit_score}",
+        f"Exp Requirement: {exp_requirement}",
+        f"URL: {job_url}",
+    ]
+    if materials_url:
+        lines.append(f"Materials: {materials_url}")
+    return "\n".join(lines)
+
+
 @dag(
     start_date=datetime(2023, 1, 1),
     schedule=None,
@@ -983,8 +1710,22 @@ def _send_discord_message(
 def linkedin_fitting_notifier():
     @task
     def claim_fitting_tasks():
-        claimed = database.claim_pending_fitting_tasks()
-        print(f"Fitting claim summary: claimed={len(claimed or [])}")
+        limit = _fitting_claim_limit()
+        pending_before_claim = database.count_pending_fitting_tasks()
+        claimed = database.claim_pending_fitting_tasks(limit=limit)
+        remaining_pending_after_claim = database.count_pending_fitting_tasks()
+        if limit is None:
+            print("Fitting claim cap: unlimited (FITTING_CLAIM_LIMIT=0)")
+        elif _is_test_mode_enabled():
+            print(f"Test mode fitting claim cap: limit={limit}")
+        else:
+            print(f"Fitting claim cap: limit={limit}")
+        print(
+            "Fitting claim summary: "
+            f"pending_before_claim={pending_before_claim} "
+            f"claimed={len(claimed or [])} "
+            f"remaining_pending_after_claim={remaining_pending_after_claim}"
+        )
         return claimed
 
     @task
@@ -1022,6 +1763,7 @@ def linkedin_fitting_notifier():
         api_error_messages = []
         resume_cache = {}
         candidate_summary_cache = {}
+        feedback_cache: dict[int, list[dict]] = {}
         profile_summary_errors = {}
         finalize_counts = {"done": 0, "failed": 0, "requeued": 0}
         finalized_item_keys = set()
@@ -1077,7 +1819,14 @@ def linkedin_fitting_notifier():
             finalized_item_keys.add(item_key)
             finalize_counts["failed"] += 1
 
-        def _record_transient_api_error(item, message: str):
+        def _default_prepared_model_name(prepared: dict) -> str:
+            return _default_fitting_model_name()
+
+        def _record_transient_api_error(
+            item,
+            message: str,
+            requested_model_name: str | None = None,
+        ):
             claim_key = _job_ref_key(item["profile_id"], item["job_id"])
             error_message = str(message)
             requeue_job_errors[claim_key] = error_message
@@ -1085,18 +1834,21 @@ def linkedin_fitting_notifier():
             _finalize_job_result(item, requeue_error=error_message)
             print(
                 f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
-                f"status=api_error_requeue error={error_message}"
+                f"requested_model_name={requested_model_name or 'unknown'} "
+                f"response_model_name=unknown status=api_error_requeue error={error_message}"
             )
 
         def _process_single_item(prepared: dict) -> tuple[dict | None, dict | None]:
             item = prepared["item"]
             profile_id = item["profile_id"]
             job_id = item["job_id"]
+            attempts = item["attempts"]
             profile_record = prepared["profile_record"]
             job_title = prepared["job_title"]
             jd_text = prepared["jd_text"]
             resume_text = prepared["resume_text"]
             candidate_summary = prepared["candidate_summary"]
+            feedback_examples = prepared.get("feedback_examples")
 
             base_prompt = _build_fit_prompt(
                 job_title,
@@ -1104,24 +1856,31 @@ def linkedin_fitting_notifier():
                 resume_text,
                 candidate_summary,
                 prompt_text=profile_record.get("fit_prompt_config"),
+                feedback_examples=feedback_examples,
             )
-            model_name = profile_record.get("model_name") or os.getenv(
-                "FITTING_MODEL_NAME", "gpt-5.4"
-            )
+            model_name = _default_fitting_model_name()
 
             parsed = None
             last_error = None
+            requested_model_name = model_name
+            response_model_name = "unknown"
             for attempt in range(3):
                 prompt = base_prompt
                 if attempt > 0:
                     prompt += " Previous output was invalid JSON. Return strictly valid JSON only."
 
                 try:
-                    parsed = _request_llm_json_with_fallback(
+                    parsed, model_metadata = _request_llm_json_with_fallback(
                         endpoints=llm_endpoints,
                         model_name=model_name,
                         prompt=prompt,
+                        call_budget=llm_call_budget,
+                        return_model_metadata=True,
+                        endpoint_health=endpoint_health,
                     )
+                    requested_model_name = model_metadata["requested_model_name"]
+                    response_model_name = model_metadata["response_model_name"]
+                    _validate_llm_match_response(parsed)
                     parsed = _apply_fit_caps(
                         parsed,
                         job_title=job_title,
@@ -1131,28 +1890,64 @@ def linkedin_fitting_notifier():
                     break
                 except RuntimeError as error:
                     error_message = str(error)
-                    if error_message.startswith("TRANSIENT_API::") and attempt < 2:
+                    if error_message.startswith("TRANSIENT_API::"):
+                        if attempt < 2:
+                            retry_model_name = _summarize_logged_model_names(
+                                error_message,
+                                model_name,
+                            )
+                            print(
+                                f"llm_result profile_id={profile_id} job_id={job_id} "
+                                f"requested_model_name={retry_model_name} "
+                                f"response_model_name=unknown status=api_retry "
+                                f"attempt={attempt + 1}/3 error={_strip_prefix(error_message, 'TRANSIENT_API::')}"
+                            )
+                            time.sleep(min(2**attempt, 4))
+                            continue
+                        # Return the exhausted round as a normal failed result.
+                        # Queue finalization increments fit_attempts and either
+                        # requeues for another DAG run or marks fit_failed at
+                        # FITTING_MAX_ATTEMPTS.
+                        last_error = (
+                            "all_endpoints_exhausted_after_3_rounds: "
+                            + _strip_prefix(error_message, "TRANSIENT_API::")
+                        )
                         print(
                             f"llm_result profile_id={profile_id} job_id={job_id} "
-                            f"status=api_retry attempt={attempt + 1}/3 error={error_message.removeprefix('TRANSIENT_API::')}"
+                            f"requested_model_name={requested_model_name} "
+                            "response_model_name=unknown status=endpoint_exhausted "
+                            f"queue_attempt={attempts + 1}/{max_attempts} error={last_error}"
                         )
-                        time.sleep(min(2**attempt, 4))
-                        continue
+                        break
                     raise
                 except Exception as error:
                     last_error = str(error)
+                    if attempt < 2:
+                        print(
+                            f"llm_result profile_id={profile_id} job_id={job_id} "
+                            f"requested_model_name={requested_model_name} "
+                            f"response_model_name={response_model_name} status=invalid_retry "
+                            f"attempt={attempt + 1}/3 error={last_error}"
+                        )
+                        continue
 
             if parsed is not None:
                 return item, _build_job_match_result(
                     profile_id,
                     job_id,
                     llm_match=json.dumps(parsed, ensure_ascii=False),
+                    model_name=requested_model_name,
+                    requested_model_name=requested_model_name,
+                    response_model_name=response_model_name,
                 )
 
             return item, _build_job_match_result(
                 profile_id,
                 job_id,
                 llm_match_error=last_error or "invalid_json_response",
+                model_name=requested_model_name,
+                requested_model_name=requested_model_name,
+                response_model_name=response_model_name,
             )
 
         def _return_api_error(
@@ -1217,7 +2012,7 @@ def linkedin_fitting_notifier():
             )
 
         try:
-            llm_endpoints = _parse_llm_endpoints_from_env()
+            llm_endpoints = _load_llm_endpoints()
         except Exception as error:
             error_message = str(error)
             print(f"LLM API error detected before processing jobs: {error_message}")
@@ -1227,6 +2022,8 @@ def linkedin_fitting_notifier():
             error_message = "missing_llm_endpoints"
             print(f"LLM API error detected before processing jobs: {error_message}")
             return _return_api_error(error_message, retry_items=claimed_items)
+
+        endpoint_health = _LlmEndpointHealth(llm_endpoints)
 
         profile_ids = sorted({item["profile_id"] for item in claimed_items})
         profiles_df = database.get_profiles_by_ids(profile_ids)
@@ -1240,7 +2037,6 @@ def linkedin_fitting_notifier():
             "fit_prompt_config",
             "discord_channel_id",
             "discord_webhook_url",
-            "model_name",
         ]
         for col in required_profile_columns:
             if col not in profiles_df.columns:
@@ -1282,6 +2078,12 @@ def linkedin_fitting_notifier():
                 print(profile_summary_errors[profile_id])
                 continue
 
+            try:
+                feedback_cache[profile_id] = database.get_user_feedback_examples(profile_id)
+            except Exception as error:
+                print(f"feedback_examples_load_error profile_id={profile_id} error={error}")
+                feedback_cache[profile_id] = []
+
         job_ids = sorted({item["job_id"] for item in claimed_items})
         jobs_df = database.get_jobs_by_ids(job_ids)
         if jobs_df is None or jobs_df.empty:
@@ -1318,13 +2120,14 @@ def linkedin_fitting_notifier():
         }
 
         prepared_items = []
-        for item in claimed_items:
+        for sequence_index, item in enumerate(claimed_items):
             profile_id = item["profile_id"]
             job_id = item["job_id"]
             profile_record = profiles_by_id.get(profile_id)
             if not profile_record:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1340,6 +2143,7 @@ def linkedin_fitting_notifier():
             if not job_record:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1355,6 +2159,7 @@ def linkedin_fitting_notifier():
             if not resume_text:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1369,6 +2174,7 @@ def linkedin_fitting_notifier():
             if profile_id in profile_summary_errors:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1384,6 +2190,7 @@ def linkedin_fitting_notifier():
             if not candidate_summary:
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1400,6 +2207,7 @@ def linkedin_fitting_notifier():
             if not jd_text.strip():
                 prepared_items.append(
                     {
+                        "sequence_index": sequence_index,
                         "item": item,
                         "ready": False,
                         "job_result": _build_job_match_result(
@@ -1413,6 +2221,7 @@ def linkedin_fitting_notifier():
 
             prepared_items.append(
                 {
+                    "sequence_index": sequence_index,
                     "item": item,
                     "ready": True,
                     "profile_record": profile_record,
@@ -1420,6 +2229,7 @@ def linkedin_fitting_notifier():
                     "jd_text": jd_text,
                     "resume_text": resume_text,
                     "candidate_summary": candidate_summary,
+                    "feedback_examples": feedback_cache.get(profile_id),
                 }
             )
 
@@ -1434,50 +2244,71 @@ def linkedin_fitting_notifier():
             _log_job_match_result(job_result)
 
         ready_items = [prepared for prepared in prepared_items if prepared["ready"]]
+        llm_call_budget = _build_llm_call_budget(len(ready_items))
+        llm_budget_snapshot = llm_call_budget.snapshot()
 
         print(
-            f"Starting LLM fitting with concurrency={concurrency} jobs={len(ready_items)}"
+            f"Starting LLM fitting with concurrency={concurrency} jobs={len(ready_items)} "
+            f"billable_success_limit={llm_budget_snapshot['billable_success_limit']} "
+            f"total_attempt_limit={llm_budget_snapshot['total_attempt_limit']}"
         )
-        with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            future_to_item = {
-                executor.submit(_process_single_item, prepared): prepared["item"]
-                for prepared in ready_items
-            }
-            for future in as_completed(future_to_item):
-                item = future_to_item[future]
-                try:
-                    _, job_result = future.result()
-                except Exception as error:
-                    error_text = str(error)
-                    if error_text.startswith("TRANSIENT_API::"):
-                        _record_transient_api_error(
-                            item,
-                            error_text.removeprefix("TRANSIENT_API::"),
-                        )
-                        continue
-                    if error_text.startswith("FATAL_API::"):
-                        fatal_error = error_text.removeprefix("FATAL_API::")
-                        claim_key = _job_ref_key(item["profile_id"], item["job_id"])
-                        print(
-                            f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
-                            f"status=api_error error={fatal_error}"
-                        )
-                        return _return_api_error(
-                            fatal_error,
-                            matched_jobs,
-                            retry_items=[item],
-                            retry_job_errors={claim_key: fatal_error},
-                        )
-                    job_result = _build_job_match_result(
-                        item["profile_id"],
-                        item["job_id"],
-                        llm_match_error=f"unexpected_job_error: {error}",
-                    )
+        def _handle_completed_event(event):
+            item = event["prepared"]["item"]
+            if event["kind"] == "transient_api_error":
+                _record_transient_api_error(
+                    item,
+                    event["error_message"],
+                    event["model_name"],
+                )
+                return
 
-                matched_jobs.append(job_result)
-                _persist_job_result(job_result)
-                _finalize_job_result(item, job_result)
-                _log_job_match_result(job_result)
+            job_result = event["job_result"]
+            matched_jobs.append(job_result)
+            _persist_job_result(job_result)
+            _finalize_job_result(item, job_result)
+            _log_job_match_result(job_result)
+
+        execution = _execute_prepared_fitting_items(
+            ready_items,
+            concurrency=concurrency,
+            process_single_item=_process_single_item,
+            default_model_name_fn=_default_prepared_model_name,
+            handle_completed_event=_handle_completed_event,
+            endpoint_health=endpoint_health,
+        )
+        fatal_events = execution["fatal_events"]
+
+        if execution["stop_submitting"] and not fatal_events:
+            return _return_api_error(
+                "consecutive_endpoint_exhausted "
+                f"limit={LLM_ENDPOINT_EXHAUSTED_STOP_LIMIT}",
+                matched_jobs,
+            )
+
+        if fatal_events:
+            fatal_messages = []
+            fatal_retry_job_errors = dict(requeue_job_errors)
+            fatal_retry_items = []
+            for fatal_event in fatal_events:
+                item = fatal_event["prepared"]["item"]
+                fatal_error = fatal_event["error_message"]
+                fatal_messages.append(fatal_error)
+                fatal_retry_items.append(item)
+                fatal_retry_job_errors[
+                    _job_ref_key(item["profile_id"], item["job_id"])
+                ] = fatal_error
+                print(
+                    f"llm_result profile_id={item['profile_id']} job_id={item['job_id']} "
+                    f"requested_model_name={fatal_event['model_name']} "
+                    f"response_model_name=unknown status=api_error error={fatal_error}"
+                )
+
+            return _return_api_error(
+                _summarize_api_errors(fatal_messages) or fatal_messages[0],
+                matched_jobs,
+                retry_items=fatal_retry_items,
+                retry_job_errors=fatal_retry_job_errors,
+            )
 
         api_error_message = _summarize_api_errors(api_error_messages)
         requeue_items = [
@@ -1497,6 +2328,14 @@ def linkedin_fitting_notifier():
             f"done={finalize_counts['done'] + finalize_counts['failed'] + finalize_counts['requeued']} "
             f"total={len(claimed_items)} "
             f"successful={finalize_counts['done']} failed={finalize_counts['failed']} requeued={finalize_counts['requeued']}"
+        )
+        llm_budget_snapshot = llm_call_budget.snapshot()
+        print(
+            "LLM call budget summary: "
+            f"billable_successes={llm_budget_snapshot['billable_successes']} "
+            f"billable_success_limit={llm_budget_snapshot['billable_success_limit']} "
+            f"total_attempts={llm_budget_snapshot['total_attempts']} "
+            f"total_attempt_limit={llm_budget_snapshot['total_attempt_limit']}"
         )
         return _build_match_task_result(
             matched_jobs,
@@ -1798,6 +2637,7 @@ def linkedin_fitting_notifier():
             "display_name",
             "discord_channel_id",
             "discord_webhook_url",
+            "discord_enabled",
             "id",
             "title",
             "company",
@@ -1805,6 +2645,7 @@ def linkedin_fitting_notifier():
             "fit_decision",
             "job_url",
             "llm_match",
+            "llm_match_error",
         ]
         for col in notify_columns:
             if col not in jobs_df.columns:
@@ -1812,11 +2653,24 @@ def linkedin_fitting_notifier():
 
         eligible_records = df_to_xcom_records(jobs_df[notify_columns])
         filtered_records = _filter_notification_jobs(eligible_records)
-        blocked_count = len(eligible_records) - len(filtered_records)
-        if blocked_count > 0:
+        if _is_test_mode_enabled():
+            before_cap = len(filtered_records)
+            limit = _test_mode_notification_limit()
+            filtered_records = filtered_records[:limit]
             print(
-                f"Suppressed {blocked_count} notification candidates due to experience_blocker."
+                f"Test mode notification candidates: {len(filtered_records)} "
+                f"of {before_cap} successful fit payloads (limit={limit})"
             )
+        suppressed_count = len(eligible_records) - len(filtered_records)
+        if suppressed_count > 0:
+            if _is_test_mode_enabled():
+                print(
+                    f"Suppressed {suppressed_count} notification candidates in test mode due to missing payload or test notification cap."
+                )
+            else:
+                print(
+                    f"Suppressed {suppressed_count} notification candidates due to experience_blocker."
+                )
         return filtered_records
 
     @task
@@ -1827,121 +2681,140 @@ def linkedin_fitting_notifier():
         load_env()
 
         jobs_to_notify = _sort_notification_jobs(jobs_to_notify or [])
+        jobs_by_profile = _group_jobs_by_profile(jobs_to_notify)
+        profiles_df = database.get_active_notification_profiles()
+        profile_records = df_to_xcom_records(profiles_df) if profiles_df is not None else []
+        profiles_by_id = {
+            int(profile["profile_id"]): profile
+            for profile in profile_records
+            if profile.get("profile_id") is not None
+        }
+        for profile_id in jobs_by_profile:
+            profiles_by_id.setdefault(profile_id, {"profile_id": profile_id})
+
         eligible = len(jobs_to_notify)
         sent = 0
         failed = 0
+        skipped = 0
         summary_sent = 0
-        profile_summaries = {}
-
-        for job in jobs_to_notify:
-            profile_id = (
-                int(job.get("profile_id"))
-                if job.get("profile_id") is not None
-                else None
-            )
-            job_id = job.get("id")
-            title = job.get("title") or "Unknown title"
-            company = job.get("company") or "Unknown company"
-            fit_score = job.get("fit_score")
-            fit_decision = job.get("fit_decision")
-            job_url = job.get("job_url") or ""
-            exp_requirement = "not specified"
-            profile_label = (
-                job.get("display_name") or job.get("profile_key") or profile_id
-            )
-
-            if profile_id is None or not job_id:
-                continue
-
-            profile_summary = profile_summaries.setdefault(
-                profile_id,
-                {
-                    "eligible": 0,
-                    "sent": 0,
-                    "failed": 0,
-                    "display_name": profile_label,
-                    "channel_id": job.get("discord_channel_id"),
-                    "webhook_url": job.get("discord_webhook_url"),
-                },
-            )
-            profile_summary["eligible"] += 1
-
-            llm_match = job.get("llm_match")
-            if llm_match:
-                try:
-                    parsed = (
-                        llm_match
-                        if isinstance(llm_match, dict)
-                        else json.loads(llm_match)
-                    )
-                    exp_requirement = _format_exp_requirement_for_discord(
-                        parsed.get("exp_requirement")
-                    )
-                except Exception:
-                    pass
-
-            message = (
-                "🎯 Job Match\n"
-                f"Profile: {profile_label}\n"
-                f"ID: {job_id}\n"
-                f"Title: {title}\n"
-                f"Company: {company}\n"
-                f"Decision: {fit_decision}\n"
-                f"Fit Score: {fit_score}\n"
-                f"Exp Requirement: {exp_requirement}\n"
-                f"URL: {job_url}"
-            )
-
-            ok, error = _send_discord_message(
-                message,
-                channel_id=job.get("discord_channel_id"),
-                webhook_url=job.get("discord_webhook_url"),
-            )
-            if ok:
-                database.mark_job_notified(profile_id, job_id, status="sent")
-                sent += 1
-                profile_summary["sent"] += 1
-            else:
-                database.mark_job_notified(
-                    profile_id,
-                    job_id,
-                    status="failed",
-                    error=error,
-                )
-                failed += 1
-                profile_summary["failed"] += 1
-            time.sleep(1)
-
+        run_results = []
         summary_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        for profile_id, profile_summary in profile_summaries.items():
-            summary_message = (
-                "━━━━━━━━━━━━━━━━━━━━\n"
-                "📌 Fitting Notification Summary\n"
-                f"Profile: {profile_summary['display_name']}\n"
-                f"Time: {summary_time}\n"
-                f"Eligible: {profile_summary['eligible']}\n"
-                f"Sent: {profile_summary['sent']}\n"
-                f"Failed: {profile_summary['failed']}\n"
-                "━━━━━━━━━━━━━━━━━━━━"
-            )
 
-            delivered, summary_error = _send_discord_message(
-                summary_message,
-                channel_id=profile_summary.get("channel_id"),
-                webhook_url=profile_summary.get("webhook_url"),
+        for profile_id in sorted(profiles_by_id):
+            profile = profiles_by_id[profile_id]
+            profile_jobs = jobs_by_profile.get(profile_id, [])
+            run_id = database.create_notification_run(
+                profile_id,
+                dag_id="linkedin_fitting_notifier",
+                dag_run_id=os.getenv("AIRFLOW_CTX_DAG_RUN_ID"),
             )
-            if delivered:
-                summary_sent += 1
-            else:
-                print(
-                    f"Failed to send summary message profile_id={profile_id}: {summary_error}"
+            database.add_notification_run_jobs(run_id, profile_jobs)
+            profile_summary = {
+                "eligible": len(profile_jobs),
+                "sent": 0,
+                "failed": 0,
+                "display_name": (
+                    profile.get("display_name")
+                    or (profile_jobs[0].get("display_name") if profile_jobs else None)
+                    or profile.get("profile_key")
+                    or profile_id
+                ),
+                "profile_key": profile.get("profile_key"),
+                "channel_id": profile.get("discord_channel_id"),
+                "webhook_url": profile.get("discord_webhook_url"),
+                "discord_enabled": profile.get("discord_enabled"),
+                "time": summary_time,
+            }
+
+            for job in profile_jobs:
+                job_id = job.get("id")
+                if not job_id:
+                    continue
+                skip_reason = _discord_skip_reason(job)
+                if skip_reason:
+                    error = skip_reason
+                    database.mark_job_notification_skipped(profile_id, job_id, error=error)
+                    database.mark_notification_run_job(
+                        run_id, profile_id, job_id, status="skipped", error=error
+                    )
+                    skipped += 1
+                    continue
+                if not database.claim_job_for_notification(profile_id, job_id, run_id):
+                    skipped += 1
+                    continue
+
+                message = _build_discord_job_match_message(job)
+                if not message:
+                    error = "empty_discord_message"
+                    database.mark_job_notification_skipped(profile_id, job_id, error=error)
+                    database.mark_notification_run_job(
+                        run_id, profile_id, job_id, status="skipped", error=error
+                    )
+                    skipped += 1
+                    continue
+
+                ok, error = _send_discord_message(
+                    message,
+                    channel_id=job.get("discord_channel_id"),
+                    webhook_url=job.get("discord_webhook_url"),
                 )
+                if ok:
+                    database.mark_job_notified(profile_id, job_id, status="sent")
+                    database.mark_notification_run_job(
+                        run_id, profile_id, job_id, status="sent"
+                    )
+                    sent += 1
+                    profile_summary["sent"] += 1
+                else:
+                    database.mark_job_notified(
+                        profile_id,
+                        job_id,
+                        status="failed",
+                        error=error,
+                    )
+                    database.mark_notification_run_job(
+                        run_id, profile_id, job_id, status="failed", error=error
+                    )
+                    failed += 1
+                    profile_summary["failed"] += 1
+                time.sleep(1)
+
+            summary_status = "skipped"
+            summary_error = None
+            summary_message = _build_discord_notification_summary_message(profile_summary)
+            summary_skip_reason = _discord_skip_reason(profile)
+            if summary_skip_reason is None:
+                delivered, summary_error = _send_discord_message(
+                    summary_message,
+                    channel_id=profile_summary.get("channel_id"),
+                    webhook_url=profile_summary.get("webhook_url"),
+                )
+                if delivered:
+                    summary_sent += 1
+                    summary_status = "sent"
+                else:
+                    summary_status = "failed"
+                    print(
+                        f"Failed to send summary message profile_id={profile_id}: {summary_error}"
+                    )
+            else:
+                summary_error = summary_skip_reason
+
+            run_results.append(
+                database.finalize_notification_run(
+                    run_id,
+                    summary_status=summary_status,
+                    summary_error=summary_error,
+                )
+            )
 
         return {
             "eligible": eligible,
             "sent": sent,
             "failed": failed,
+            "skipped": skipped,
             "summary_sent": summary_sent,
+            "runs": run_results,
         }
 
     queue_items_task = claim_fitting_tasks()

@@ -10,12 +10,16 @@ airflow-webserver.pid
 webserver_config.py
 airflow.cfg
 airflow.db
+include/user_info/*.pdf
 .idea/
 test.ipynb
 .codex_tmp/
+.claude/
 .playwright-mcp/
 .pytest_cache/
 .ruff_cache/
+CLAUDE*.md
+*claude*.md
 apps/**/.build/
 apps/**/.swiftpm/
 apps/**/dist/
@@ -24,3 +28,7 @@ apps/**/xcuserdata/
 apps/**/*.app/
 apps/**/Products/
 apps/**/LinkedinNotifierApp */
+.omx/
+
+# Independent Django web UI repo (nested git repository)
+linkedin-notifier-web/

@@ -49,7 +49,28 @@ class _TaskStub:
 airflow_sdk_stub.dag = _dag_stub
 airflow_sdk_stub.task = _TaskStub()
 
+airflow_providers_stub = types.ModuleType("airflow.providers")
+airflow_providers_standard_stub = types.ModuleType("airflow.providers.standard")
+airflow_operators_stub = types.ModuleType("airflow.providers.standard.operators")
+empty_operator_stub = types.ModuleType(
+    "airflow.providers.standard.operators.empty"
+)
+empty_operator_stub.EmptyOperator = object
+trigger_operator_stub = types.ModuleType(
+    "airflow.providers.standard.operators.trigger_dagrun"
+)
+trigger_operator_stub.TriggerDagRunOperator = object
+
 sys.modules.setdefault("psycopg", psycopg_stub)
 sys.modules.setdefault("psycopg.rows", psycopg_rows_stub)
 sys.modules.setdefault("airflow", airflow_stub)
 sys.modules.setdefault("airflow.sdk", airflow_sdk_stub)
+sys.modules.setdefault("airflow.providers", airflow_providers_stub)
+sys.modules.setdefault("airflow.providers.standard", airflow_providers_standard_stub)
+sys.modules.setdefault("airflow.providers.standard.operators", airflow_operators_stub)
+sys.modules.setdefault(
+    "airflow.providers.standard.operators.empty", empty_operator_stub
+)
+sys.modules.setdefault(
+    "airflow.providers.standard.operators.trigger_dagrun", trigger_operator_stub
+)

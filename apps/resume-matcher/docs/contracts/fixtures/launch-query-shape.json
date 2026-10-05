@@ -1,0 +1,37 @@
+{
+  "binds": {
+    "profile_id": 7,
+    "job_id": "li-123"
+  },
+  "tables": [
+    "FROM profile_jobs pj",
+    "JOIN profiles p ON p.id = pj.profile_id",
+    "JOIN jobs j ON j.id = pj.job_id"
+  ],
+  "selected_columns": [
+    "pj.profile_id",
+    "pj.job_id",
+    "p.display_name",
+    "p.resume_path",
+    "p.resume_text",
+    "j.title",
+    "j.company",
+    "j.job_url",
+    "j.description"
+  ],
+  "where_clauses": [
+    "WHERE pj.profile_id = %s AND pj.job_id = %s",
+    "LIMIT 1"
+  ],
+  "required_result_fields": [
+    "profile_id",
+    "job_id",
+    "display_name",
+    "resume_path",
+    "resume_text",
+    "title",
+    "company",
+    "job_url",
+    "description"
+  ]
+}

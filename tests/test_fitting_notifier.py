@@ -1,6 +1,11 @@
 import json
+from pathlib import Path
+
+import pytest
+import requests
 
 from dags import fitting_notifier
+from dags import materials_launch
 
 
 def _candidate_summary(**overrides):
@@ -134,6 +139,26 @@ def test_apply_fit_caps_keeps_reasonable_match_without_blocker():
     assert capped["candidate_summary"]["candidate_seniority"] == "senior"
 
 
+def test_validate_llm_match_response_rejects_swapped_score_and_decision():
+    with pytest.raises(ValueError, match="response_invalid_fit_score"):
+        fitting_notifier._validate_llm_match_response(
+            {
+                "fit_score": "Not Recommended",
+                "decision": "The candidate does not match the role.",
+            }
+        )
+
+
+def test_validate_llm_match_response_rejects_non_enum_decision():
+    with pytest.raises(ValueError, match="response_invalid_decision"):
+        fitting_notifier._validate_llm_match_response(
+            {
+                "fit_score": 0,
+                "decision": "The candidate does not match the role.",
+            }
+        )
+
+
 def test_filter_notification_jobs_suppresses_experience_blocker_only():
     allowed_job = {
         "id": "1",
@@ -166,6 +191,45 @@ def test_filter_notification_jobs_suppresses_experience_blocker_only():
     )
 
     assert [job["id"] for job in filtered] == ["1", "3"]
+
+
+def test_filter_notification_jobs_in_test_mode_allows_successful_fit_even_with_experience_blocker(
+    monkeypatch,
+):
+    monkeypatch.setenv("LINKEDIN_TEST_MODE", "true")
+
+    allowed_job = {
+        "id": "1",
+        "llm_match": json.dumps(
+            {
+                "fit_score": 41,
+                "decision": "Weak Fit",
+                "experience_check": {"experience_blocker": True},
+            }
+        ),
+        "llm_match_error": None,
+    }
+    failed_job = {
+        "id": "2",
+        "llm_match": json.dumps(
+            {
+                "fit_score": 66,
+                "decision": "Moderate Fit",
+            }
+        ),
+        "llm_match_error": "llm_timeout",
+    }
+    invalid_payload_job = {
+        "id": "3",
+        "llm_match": "not-json",
+        "llm_match_error": None,
+    }
+
+    filtered = fitting_notifier._filter_notification_jobs(
+        [allowed_job, failed_job, invalid_payload_job]
+    )
+
+    assert [job["id"] for job in filtered] == ["1"]
 
 
 def test_sort_notification_jobs_orders_by_fit_score_desc():
@@ -201,3 +265,1254 @@ def test_normalize_exp_requirement_text_flattens_dict_like_payload_to_plain_text
         "jd years specified: 8-10 years; "
         "jd seniority specified: not applicable"
     )
+
+
+def test_request_llm_json_with_fallback_skips_endpoint_with_missing_output(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_request_llm_json(
+        *, request_url, api_key, model_name, prompt, api_type="responses", **kwargs
+    ):
+        calls.append((request_url, model_name, prompt))
+        if request_url == "https://empty.example/v1/responses":
+            raise ValueError("response_missing_output_text")
+        return {"fit_score": 77, "decision": "Moderate Fit"}
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    parsed = fitting_notifier._request_llm_json_with_fallback(
+        endpoints=[
+            {
+                "name": "empty-proxy",
+                "request_url": "https://empty.example/v1/responses",
+                "api_key": "key-1",
+            },
+            {
+                "name": "working-proxy",
+                "request_url": "https://working.example/v1/responses",
+                "api_key": "key-2",
+            },
+        ],
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+    )
+
+    assert parsed == {"fit_score": 77, "decision": "Moderate Fit"}
+    assert calls == [
+        ("https://empty.example/v1/responses", "gpt-5.4", "Return JSON only"),
+        ("https://working.example/v1/responses", "gpt-5.4", "Return JSON only"),
+    ]
+
+
+def test_request_llm_json_with_fallback_tries_three_endpoints_in_order(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_request_llm_json(*, request_url, **kwargs):
+        calls.append(request_url)
+        if request_url != "https://third.example/v1/responses":
+            raise requests.Timeout(f"{request_url} timeout")
+        return {"fit_score": 77, "decision": "Moderate Fit"}
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    parsed = fitting_notifier._request_llm_json_with_fallback(
+        endpoints=[
+            {"name": "first", "request_url": "https://first.example/v1/responses", "api_key": "key-1"},
+            {"name": "second", "request_url": "https://second.example/v1/responses", "api_key": "key-2"},
+            {"name": "third", "request_url": "https://third.example/v1/responses", "api_key": "key-3"},
+        ],
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+    )
+
+    assert parsed["decision"] == "Moderate Fit"
+    assert calls == [
+        "https://first.example/v1/responses",
+        "https://second.example/v1/responses",
+        "https://third.example/v1/responses",
+    ]
+
+
+def test_parse_llm_endpoints_from_env_preserves_per_endpoint_model_override(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "nc",
+                    "request_url": "https://nowcoding.ai/v1/responses",
+                    "api_key": "nc-key",
+                },
+                {
+                    "name": "yuan",
+                    "request_url": "https://us.mcxhm.cn/v1/responses",
+                    "api_key": "yuan-key",
+                    "model": "glm-5.1",
+                },
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._parse_llm_endpoints_from_env()
+
+    assert endpoints == [
+        {
+            "name": "nc",
+            "request_url": "https://nowcoding.ai/v1/responses",
+            "api_key": "nc-key",
+            "api_type": "responses",
+        },
+        {
+            "name": "yuan",
+            "request_url": "https://us.mcxhm.cn/v1/responses",
+            "api_key": "yuan-key",
+            "api_type": "responses",
+            "model": "glm-5.1",
+        },
+    ]
+
+
+def test_parse_llm_endpoints_from_env_preserves_api_type(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "deepseek",
+                    "request_url": "https://api.deepseek.com/chat/completions",
+                    "api_key": "deepseek-key",
+                    "model": "deepseek-v4-pro",
+                    "api_type": "chat_completions",
+                }
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._parse_llm_endpoints_from_env()
+
+    assert endpoints == [
+        {
+            "name": "deepseek",
+            "request_url": "https://api.deepseek.com/chat/completions",
+            "api_key": "deepseek-key",
+            "model": "deepseek-v4-pro",
+            "api_type": "chat_completions",
+        }
+    ]
+
+
+def test_parse_llm_endpoints_from_env_preserves_chat_completion_options(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "deepseek",
+                    "request_url": "https://api.deepseek.com/chat/completions",
+                    "api_key": "deepseek-key",
+                    "model": "deepseek-v4-pro",
+                    "api_type": "chat_completions",
+                    "reasoning_effort": "high",
+                    "extra_body": {"thinking": {"type": "enabled"}},
+                }
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._parse_llm_endpoints_from_env()
+
+    assert endpoints == [
+        {
+            "name": "deepseek",
+            "request_url": "https://api.deepseek.com/chat/completions",
+            "api_key": "deepseek-key",
+            "model": "deepseek-v4-pro",
+            "api_type": "chat_completions",
+            "reasoning_effort": "high",
+            "extra_body": {"thinking": {"type": "enabled"}},
+        }
+    ]
+
+
+def test_parse_llm_endpoints_from_env_rejects_non_object_extra_body(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "deepseek",
+                    "request_url": "https://api.deepseek.com/chat/completions",
+                    "api_key": "deepseek-key",
+                    "api_type": "chat_completions",
+                    "extra_body": "thinking",
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="extra_body must be an object"):
+        fitting_notifier._parse_llm_endpoints_from_env()
+
+
+def test_parse_llm_endpoints_from_env_rejects_unknown_api_type(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "bad",
+                    "request_url": "https://example.com/v1",
+                    "api_key": "key",
+                    "api_type": "unknown",
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(ValueError, match="api_type must be responses or chat_completions"):
+        fitting_notifier._parse_llm_endpoints_from_env()
+
+
+def test_parse_llm_endpoints_from_env_resolves_api_key_env(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "nc",
+                    "request_url": "https://nowcoding.ai/v1/responses",
+                    "api_key_env": "NC_API_KEY",
+                }
+            ]
+        ),
+    )
+    monkeypatch.setenv("NC_API_KEY", "nc-key")
+
+    assert fitting_notifier._parse_llm_endpoints_from_env() == [
+        {
+            "name": "nc",
+            "request_url": "https://nowcoding.ai/v1/responses",
+            "api_key": "nc-key",
+            "api_type": "responses",
+        }
+    ]
+
+
+def test_parse_llm_endpoints_from_env_rejects_unset_api_key_env(monkeypatch):
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "nc",
+                    "request_url": "https://nowcoding.ai/v1/responses",
+                    "api_key_env": "NC_API_KEY",
+                }
+            ]
+        ),
+    )
+    monkeypatch.delenv("NC_API_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="api_key_env NC_API_KEY is unset"):
+        fitting_notifier._parse_llm_endpoints_from_env()
+
+
+def test_parse_llm_endpoints_from_env_ignores_legacy_single_endpoint_env(monkeypatch):
+    monkeypatch.delenv("LLM_ENDPOINTS_JSON", raising=False)
+    monkeypatch.setenv("FITTING_REQUEST_URL", "https://legacy.example/v1/responses")
+    monkeypatch.setenv("LLM_API_KEY", "legacy-key")
+    monkeypatch.setenv("GMN_API_KEY", "legacy-gmn-key")
+
+    assert fitting_notifier._parse_llm_endpoints_from_env() == []
+
+
+def test_load_llm_endpoints_prefers_database_order(monkeypatch, capsys):
+    monkeypatch.setattr(
+        fitting_notifier.database,
+        "list_active_llm_endpoints",
+        lambda: [
+            {
+                "name": "backup",
+                "request_url": "https://backup.example/v1/responses",
+                "api_key": "backup-key",
+            },
+            {
+                "name": "primary",
+                "request_url": "https://primary.example/chat/completions",
+                "api_key_env": "PRIMARY_API_KEY",
+                "api_type": "chat_completions",
+                "model": "deepseek-v4-pro",
+                "extra_body": '{"thinking": {"type": "enabled"}}',
+            },
+        ],
+    )
+    monkeypatch.setenv("PRIMARY_API_KEY", "primary-key")
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "env",
+                    "request_url": "https://env.example/v1/responses",
+                    "api_key": "env-key",
+                }
+            ]
+        ),
+    )
+
+    endpoints = fitting_notifier._load_llm_endpoints()
+
+    assert endpoints == [
+        {
+            "name": "backup",
+            "request_url": "https://backup.example/v1/responses",
+            "api_key": "backup-key",
+            "api_type": "responses",
+        },
+        {
+            "name": "primary",
+            "request_url": "https://primary.example/chat/completions",
+            "api_key": "primary-key",
+            "api_type": "chat_completions",
+            "model": "deepseek-v4-pro",
+            "extra_body": {"thinking": {"type": "enabled"}},
+        },
+    ]
+    output = capsys.readouterr().out
+    assert "LLM endpoint source=database" in output
+    assert output.index('"backup"') < output.index('"primary"')
+    assert "deepseek-v4-pro" in output
+    assert "backup-key" not in output
+    assert "primary-key" not in output
+
+
+def test_load_llm_endpoints_rejects_empty_table_even_with_env(monkeypatch):
+    monkeypatch.setattr(fitting_notifier.database, "list_active_llm_endpoints", lambda: [])
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "env",
+                    "request_url": "https://env.example/v1/responses",
+                    "api_key": "env-key",
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="no_active_llm_endpoints"):
+        fitting_notifier._load_llm_endpoints()
+
+
+def test_load_llm_endpoints_rejects_database_failure_even_with_env(monkeypatch):
+    def missing_table():
+        raise RuntimeError("undefined table")
+
+    monkeypatch.setattr(fitting_notifier.database, "list_active_llm_endpoints", missing_table)
+    monkeypatch.setenv(
+        "LLM_ENDPOINTS_JSON",
+        json.dumps(
+            [
+                {
+                    "name": "env",
+                    "request_url": "https://env.example/v1/responses",
+                    "api_key": "env-key",
+                }
+            ]
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="llm_endpoint_database_unavailable") as error:
+        fitting_notifier._load_llm_endpoints()
+    assert str(error.value.__cause__) == "undefined table"
+
+
+def test_load_llm_endpoints_rejects_invalid_database_row(monkeypatch):
+    monkeypatch.setattr(
+        fitting_notifier.database,
+        "list_active_llm_endpoints",
+        lambda: [
+            {
+                "name": "bad",
+                "request_url": "https://bad.example/v1/responses",
+                "api_key_env": "MISSING_LLM_KEY",
+            }
+        ],
+    )
+    monkeypatch.delenv("MISSING_LLM_KEY", raising=False)
+
+    with pytest.raises(ValueError, match="api_key_env MISSING_LLM_KEY is unset"):
+        fitting_notifier._load_llm_endpoints()
+
+
+def test_request_llm_json_with_fallback_uses_endpoint_model_override(monkeypatch):
+    calls = []
+
+    def fake_request_llm_json(
+        *, request_url, api_key, model_name, prompt, api_type="responses", **kwargs
+    ):
+        calls.append((request_url, model_name, prompt))
+        if request_url == "https://nowcoding.ai/v1/responses":
+            raise requests.Timeout("nc timeout")
+        return {"fit_score": 77, "decision": "Moderate Fit"}
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    parsed = fitting_notifier._request_llm_json_with_fallback(
+        endpoints=[
+            {
+                "name": "nc",
+                "request_url": "https://nowcoding.ai/v1/responses",
+                "api_key": "key-1",
+            },
+            {
+                "name": "yuan",
+                "request_url": "https://us.mcxhm.cn/v1/responses",
+                "api_key": "key-2",
+                "model": "glm-5.1",
+            },
+        ],
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+    )
+
+    assert parsed == {"fit_score": 77, "decision": "Moderate Fit"}
+    assert calls == [
+        ("https://nowcoding.ai/v1/responses", "gpt-5.4", "Return JSON only"),
+        ("https://us.mcxhm.cn/v1/responses", "glm-5.1", "Return JSON only"),
+    ]
+
+
+def test_default_fitting_model_name_comes_only_from_env(monkeypatch):
+    monkeypatch.setenv("FITTING_MODEL_NAME", "gpt-5.5")
+
+    assert fitting_notifier._default_fitting_model_name() == "gpt-5.5"
+
+
+def test_fitting_notifier_does_not_read_profile_model_name_for_runtime_selection():
+    source = Path(fitting_notifier.__file__).read_text(encoding="utf-8")
+
+    assert 'profile_record.get("model_name")' not in source
+
+
+def test_request_llm_json_with_fallback_treats_missing_output_as_transient_when_all_endpoints_fail(
+    monkeypatch,
+):
+    def fake_request_llm_json(
+        *, request_url, api_key, model_name, prompt, api_type="responses", **kwargs
+    ):
+        raise ValueError("response_missing_output_text")
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    with pytest.raises(RuntimeError, match="^TRANSIENT_API::") as error:
+        fitting_notifier._request_llm_json_with_fallback(
+            endpoints=[
+                {
+                    "name": "empty-proxy",
+                    "request_url": "https://empty.example/v1/responses",
+                    "api_key": "key-1",
+                }
+            ],
+            model_name="gpt-5.4",
+            prompt="Return JSON only",
+        )
+
+    assert "endpoint=empty-proxy model_name=gpt-5.4 error=response_missing_output_text" in str(
+        error.value
+    )
+
+
+def test_build_llm_call_budget_defaults_to_twenty_percent_success_headroom(monkeypatch):
+    monkeypatch.delenv("FITTING_BILLABLE_CALL_MULTIPLIER", raising=False)
+    monkeypatch.delenv("FITTING_TOTAL_CALL_MULTIPLIER", raising=False)
+
+    budget = fitting_notifier._build_llm_call_budget(10)
+
+    assert budget.snapshot()["billable_success_limit"] == 12
+    assert budget.snapshot()["total_attempt_limit"] == 40
+
+
+def test_llm_call_budget_does_not_count_http_error_as_billable(monkeypatch):
+    budget = fitting_notifier._LlmCallBudget(
+        billable_success_limit=1,
+        total_attempt_limit=1,
+    )
+
+    class FakeResponse:
+        def raise_for_status(self):
+            response = requests.Response()
+            response.status_code = 403
+            raise requests.HTTPError("403 Client Error", response=response)
+
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(requests.HTTPError):
+        fitting_notifier._request_llm_json(
+            request_url="https://forbidden.example/v1/responses",
+            api_key="bad-key",
+            model_name="gpt-5.4",
+            prompt="Return JSON only",
+            call_budget=budget,
+        )
+
+    snapshot = budget.snapshot()
+    assert snapshot["billable_successes"] == 0
+    assert snapshot["reserved_billable_slots"] == 0
+    assert snapshot["total_attempts"] == 1
+
+    with pytest.raises(RuntimeError, match="total_attempt_limit"):
+        budget.reserve_attempt()
+
+
+def test_llm_call_budget_counts_successful_empty_output_as_billable(monkeypatch):
+    budget = fitting_notifier._LlmCallBudget(
+        billable_success_limit=1,
+        total_attempt_limit=3,
+    )
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"output_text": ""}
+
+    monkeypatch.setattr(requests, "post", lambda *args, **kwargs: FakeResponse())
+
+    with pytest.raises(ValueError, match="response_missing_output_text"):
+        fitting_notifier._request_llm_json(
+            request_url="https://empty.example/v1/responses",
+            api_key="test-key",
+            model_name="gpt-5.4",
+            prompt="Return JSON only",
+            call_budget=budget,
+        )
+
+    snapshot = budget.snapshot()
+    assert snapshot["billable_successes"] == 1
+    assert snapshot["reserved_billable_slots"] == 0
+    assert snapshot["total_attempts"] == 1
+
+    with pytest.raises(RuntimeError, match="billable_success_limit"):
+        budget.reserve_attempt()
+
+
+def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(monkeypatch):
+    calls = []
+
+    def fake_request_llm_json(
+        *, request_url, api_key, model_name, prompt, api_type="responses", **kwargs
+    ):
+        calls.append(request_url)
+        return {"fit_score": 77, "decision": "Moderate Fit"}
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    endpoints = [
+        {
+            "name": "proxy-a",
+            "request_url": "https://a.example/v1/responses",
+            "api_key": "key-a",
+        },
+        {
+            "name": "proxy-b",
+            "request_url": "https://b.example/v1/responses",
+            "api_key": "key-b",
+        },
+    ]
+
+    fitting_notifier._request_llm_json_with_fallback(
+        endpoints=endpoints,
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+    )
+    fitting_notifier._request_llm_json_with_fallback(
+        endpoints=endpoints,
+        model_name="gpt-5.4",
+        prompt="Return JSON only",
+    )
+
+    assert calls == [
+        "https://a.example/v1/responses",
+        "https://a.example/v1/responses",
+    ]
+
+
+def _prepared_job(job_id):
+    return {"item": {"profile_id": 1, "job_id": job_id}}
+
+
+def _llm_endpoints_for_health():
+    return [
+        {
+            "name": "nowcoding",
+            "request_url": "https://nowcoding.ai/v1",
+            "api_key": "key-nc",
+        },
+        {
+            "name": "gpt-xcode",
+            "request_url": "https://gpt.example/v1/responses",
+            "api_key": "key-gpt",
+        },
+        {
+            "name": "grok",
+            "request_url": "https://xcode.best/v1/responses",
+            "api_key": "key-grok",
+        },
+    ]
+
+
+def _http_error(status_code):
+    response = requests.Response()
+    response.status_code = status_code
+    return requests.HTTPError(f"{status_code} Client Error", response=response)
+
+
+def test_request_llm_json_with_fallback_keeps_mixed_endpoint_failures_transient(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_request_llm_json(*, request_url, **kwargs):
+        calls.append(request_url)
+        if "nowcoding.ai" in request_url:
+            raise _http_error(404)
+        if "gpt.example" in request_url:
+            raise json.JSONDecodeError("Expecting value: line 1 column 1 (char 0)", "", 0)
+        raise requests.Timeout("Read timed out")
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+    endpoints = _llm_endpoints_for_health()
+    endpoint_health = fitting_notifier._LlmEndpointHealth(endpoints)
+
+    with pytest.raises(RuntimeError, match="^TRANSIENT_API::") as error:
+        fitting_notifier._request_llm_json_with_fallback(
+            endpoints=endpoints,
+            model_name="gpt-6.1-sol",
+            prompt="Return JSON only",
+            endpoint_health=endpoint_health,
+        )
+
+    assert not str(error.value).startswith("FATAL_API::")
+    assert endpoint_health.is_disabled("nowcoding")
+    assert endpoint_health.has_living()
+
+    with pytest.raises(RuntimeError, match="^TRANSIENT_API::"):
+        fitting_notifier._request_llm_json_with_fallback(
+            endpoints=endpoints,
+            model_name="gpt-6.1-sol",
+            prompt="Return JSON only",
+            endpoint_health=endpoint_health,
+        )
+
+    assert calls.count("https://nowcoding.ai/v1") == 1
+
+
+def test_request_llm_json_with_fallback_marks_all_auth_failures_fatal(monkeypatch):
+    def fake_request_llm_json(*, request_url, **kwargs):
+        raise _http_error(403)
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+    endpoints = _llm_endpoints_for_health()[:1]
+    endpoint_health = fitting_notifier._LlmEndpointHealth(endpoints)
+
+    with pytest.raises(RuntimeError, match="^FATAL_API::"):
+        fitting_notifier._request_llm_json_with_fallback(
+            endpoints=endpoints,
+            model_name="gpt-5.4",
+            prompt="Return JSON only",
+            endpoint_health=endpoint_health,
+        )
+
+    assert not endpoint_health.has_living()
+
+
+def test_execute_prepared_fitting_items_does_not_stop_after_one_fatal_with_living_endpoints():
+    started_job_ids = []
+    handled_events = []
+    endpoint_health = fitting_notifier._LlmEndpointHealth(_llm_endpoints_for_health())
+
+    def process_single_item(prepared):
+        job_id = prepared["item"]["job_id"]
+        started_job_ids.append(job_id)
+        if job_id == "fatal":
+            raise RuntimeError("FATAL_API::endpoint outage")
+        return prepared["item"], fitting_notifier._build_job_match_result(
+            prepared["item"]["profile_id"],
+            job_id,
+            llm_match=json.dumps({"fit_score": 77, "decision": "Moderate Fit"}),
+            model_name="gpt-5.4",
+        )
+
+    execution = fitting_notifier._execute_prepared_fitting_items(
+        [
+            _prepared_job("ok-1"),
+            _prepared_job("fatal"),
+            _prepared_job("ok-2"),
+            _prepared_job("ok-3"),
+        ],
+        concurrency=1,
+        process_single_item=process_single_item,
+        default_model_name_fn=lambda prepared: "gpt-5.4",
+        handle_completed_event=handled_events.append,
+        endpoint_health=endpoint_health,
+    )
+
+    assert started_job_ids == ["ok-1", "fatal", "ok-2", "ok-3"]
+    assert execution["fatal_events"] == []
+    assert execution["stop_submitting"] is False
+    assert any(
+        event["kind"] == "job_result" and event["job_result"]["job_id"] == "fatal"
+        for event in handled_events
+    )
+
+
+def test_execute_prepared_fitting_items_stops_when_no_living_endpoints():
+    started_job_ids = []
+    endpoints = _llm_endpoints_for_health()[:1]
+    endpoint_health = fitting_notifier._LlmEndpointHealth(endpoints)
+    endpoint_health.disable("nowcoding")
+
+    def process_single_item(prepared):
+        started_job_ids.append(prepared["item"]["job_id"])
+        raise RuntimeError("FATAL_API::status=403 insufficient_user_quota")
+
+    execution = fitting_notifier._execute_prepared_fitting_items(
+        [_prepared_job(f"job-{index}") for index in range(4)],
+        concurrency=1,
+        process_single_item=process_single_item,
+        default_model_name_fn=lambda prepared: "gpt-5.4",
+        handle_completed_event=lambda event: None,
+        endpoint_health=endpoint_health,
+    )
+
+    assert started_job_ids == ["job-0"]
+    assert execution["stop_submitting"] is True
+    assert len(execution["fatal_events"]) == 1
+
+
+def test_execute_prepared_fitting_items_stops_after_three_consecutive_exhausted_jobs():
+    started_job_ids = []
+
+    def process_single_item(prepared):
+        job_id = prepared["item"]["job_id"]
+        started_job_ids.append(job_id)
+        return prepared["item"], fitting_notifier._build_job_match_result(
+            prepared["item"]["profile_id"],
+            job_id,
+            llm_match_error="all_endpoints_exhausted_after_3_rounds: timeout",
+            model_name="grok-4.7",
+        )
+
+    execution = fitting_notifier._execute_prepared_fitting_items(
+        [_prepared_job(f"job-{index}") for index in range(5)],
+        concurrency=1,
+        process_single_item=process_single_item,
+        default_model_name_fn=lambda prepared: "grok-4.7",
+        handle_completed_event=lambda event: None,
+    )
+
+    assert started_job_ids == ["job-0", "job-1", "job-2"]
+    assert execution["stop_submitting"] is True
+    assert execution["fatal_events"] == []
+
+
+def test_execute_prepared_fitting_items_resets_exhausted_streak_after_success():
+    started_job_ids = []
+
+    def process_single_item(prepared):
+        job_id = prepared["item"]["job_id"]
+        started_job_ids.append(job_id)
+        if job_id == "ok":
+            return prepared["item"], fitting_notifier._build_job_match_result(
+                prepared["item"]["profile_id"],
+                job_id,
+                llm_match=json.dumps({"fit_score": 77, "decision": "Moderate Fit"}),
+                model_name="grok-4.7",
+            )
+        return prepared["item"], fitting_notifier._build_job_match_result(
+            prepared["item"]["profile_id"],
+            job_id,
+            llm_match_error="all_endpoints_exhausted_after_3_rounds: timeout",
+            model_name="grok-4.7",
+        )
+
+    execution = fitting_notifier._execute_prepared_fitting_items(
+        [
+            _prepared_job("job-0"),
+            _prepared_job("job-1"),
+            _prepared_job("ok"),
+            _prepared_job("job-3"),
+            _prepared_job("job-4"),
+        ],
+        concurrency=1,
+        process_single_item=process_single_item,
+        default_model_name_fn=lambda prepared: "grok-4.7",
+        handle_completed_event=lambda event: None,
+    )
+
+    assert started_job_ids == ["job-0", "job-1", "ok", "job-3", "job-4"]
+    assert execution["stop_submitting"] is False
+
+
+def test_request_llm_json_uses_plain_string_input_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"output_text": '{"ok": true}'}
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed = fitting_notifier._request_llm_json(
+        request_url="https://example.com/v1/responses",
+        api_key="test-key",
+        model_name="gpt-5.4",
+        prompt="Return only valid JSON: {\"ok\": true}",
+    )
+
+    assert parsed == {"ok": True}
+    assert captured["json"] == {
+        "model": "gpt-5.4",
+        "input": 'Return only valid JSON: {"ok": true}',
+    }
+
+
+def test_request_llm_json_returns_provider_response_model_when_requested(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"model": "gpt-5.4", "output_text": '{"ok": true}'}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed, response_model_name = fitting_notifier._request_llm_json(
+        request_url="https://proxy.example/v1/responses",
+        api_key="test-key",
+        model_name="gpt-5.6",
+        prompt="Return only valid JSON: {\"ok\": true}",
+        return_response_model=True,
+    )
+
+    assert parsed == {"ok": True}
+    assert captured["json"]["model"] == "gpt-5.6"
+    assert response_model_name == "gpt-5.4"
+
+
+def test_request_llm_json_with_fallback_returns_requested_and_response_models(
+    monkeypatch,
+):
+    def fake_request_llm_json(*, return_response_model=False, **kwargs):
+        parsed = {"fit_score": 77, "decision": "Moderate Fit"}
+        if return_response_model:
+            return parsed, "gpt-5.4"
+        return parsed
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+
+    parsed, model_metadata = fitting_notifier._request_llm_json_with_fallback(
+        endpoints=[
+            {
+                "name": "proxy",
+                "request_url": "https://proxy.example/v1/responses",
+                "api_key": "test-key",
+            }
+        ],
+        model_name="gpt-5.6",
+        prompt="Return JSON only",
+        return_model_metadata=True,
+    )
+
+    assert parsed == {"fit_score": 77, "decision": "Moderate Fit"}
+    assert model_metadata == {
+        "requested_model_name": "gpt-5.6",
+        "response_model_name": "gpt-5.4",
+    }
+
+
+def test_request_llm_json_supports_chat_completions_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"ok": true}',
+                        }
+                    }
+                ]
+            }
+
+    def fake_post(url, headers, json, timeout):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["json"] = json
+        captured["timeout"] = timeout
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed = fitting_notifier._request_llm_json(
+        request_url="https://api.deepseek.com/chat/completions",
+        api_key="test-key",
+        model_name="deepseek-v4-pro",
+        prompt='Return only valid JSON: {"ok": true}',
+        api_type="chat_completions",
+    )
+
+    assert parsed == {"ok": True}
+    assert captured["json"] == {
+        "model": "deepseek-v4-pro",
+        "messages": [
+            {
+                "role": "user",
+                "content": 'Return only valid JSON: {"ok": true}',
+            }
+        ],
+        "response_format": {"type": "json_object"},
+    }
+
+
+def test_request_llm_json_supports_chat_completions_reasoning_payload(monkeypatch):
+    captured = {}
+
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"choices": [{"message": {"content": '{"ok": true}'}}]}
+
+    def fake_post(url, headers, json, timeout):
+        captured["json"] = json
+        return FakeResponse()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    parsed = fitting_notifier._request_llm_json(
+        request_url="https://api.deepseek.com/chat/completions",
+        api_key="test-key",
+        model_name="deepseek-v4-pro",
+        prompt='Return only valid JSON: {"ok": true}',
+        api_type="chat_completions",
+        reasoning_effort="high",
+        extra_body={"thinking": {"type": "enabled"}},
+    )
+
+    assert parsed == {"ok": True}
+    assert captured["json"]["reasoning_effort"] == "high"
+    assert captured["json"]["thinking"] == {"type": "enabled"}
+
+
+def test_log_job_match_result_includes_requested_and_response_model_names_for_success(capsys):
+    fitting_notifier._log_job_match_result(
+        {
+            "profile_id": 12,
+            "job_id": "job-1",
+            "requested_model_name": "gpt-5.6",
+            "response_model_name": "gpt-5.4",
+            "llm_match": json.dumps(
+                {
+                    "fit_score": 88,
+                    "decision": "Strong Fit",
+                }
+            ),
+            "llm_match_error": None,
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert "status=ok" in captured.out
+    assert "requested_model_name=gpt-5.6" in captured.out
+    assert "response_model_name=gpt-5.4" in captured.out
+
+
+def test_log_job_match_result_rejects_invalid_success_payload(capsys):
+    fitting_notifier._log_job_match_result(
+        {
+            "profile_id": 12,
+            "job_id": "job-1",
+            "model_name": "deepseek-v4-pro",
+            "llm_match": json.dumps(
+                {
+                    "fit_score": "Not Recommended",
+                    "decision": "The candidate does not match the role.",
+                }
+            ),
+            "llm_match_error": None,
+        }
+    )
+
+    captured = capsys.readouterr()
+
+    assert "requested_model_name=deepseek-v4-pro" in captured.out
+    assert "response_model_name=unknown" in captured.out
+    assert "status=error" in captured.out
+    assert "invalid_success_payload" in captured.out
+    assert "status=ok" not in captured.out
+
+
+def test_log_job_match_result_includes_model_name_for_error(capsys):
+    fitting_notifier._log_job_match_result(
+        {
+            "profile_id": 12,
+            "job_id": "job-1",
+            "model_name": "gpt-5.4-mini",
+            "llm_match": None,
+            "llm_match_error": "invalid_json_response",
+        }
+    )
+
+    captured = capsys.readouterr()
+    assert "status=error" in captured.out
+    assert "requested_model_name=gpt-5.4-mini" in captured.out
+    assert "response_model_name=unknown" in captured.out
+
+
+
+def test_build_discord_notification_summary_message_reports_zero_results():
+    message = fitting_notifier._build_discord_notification_summary_message(
+        {
+            "profile_id": 7,
+            "display_name": "George Gu",
+            "eligible": 0,
+            "sent": 0,
+            "failed": 0,
+            "time": "2026-04-24 12:00:00",
+        }
+    )
+
+    assert "Fitting Notification Summary" in message
+    assert "Profile: George Gu" in message
+    assert "Eligible: 0" in message
+    assert "Sent: 0" in message
+    assert "Failed: 0" in message
+
+
+def test_send_zero_result_notification_summaries_sends_per_active_profile(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "test-token")
+    monkeypatch.setattr(
+        fitting_notifier.database,
+        "get_active_notification_profiles",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "profile_id": 1,
+                    "profile_key": "george",
+                    "display_name": "George Gu",
+                    "discord_channel_id": "chan-1",
+                    "discord_webhook_url": None,
+                },
+                {
+                    "profile_id": 2,
+                    "profile_key": "xingyou",
+                    "display_name": "Xingyou Li",
+                    "discord_channel_id": None,
+                    "discord_webhook_url": "https://discord.example/webhook",
+                },
+            ]
+        ),
+    )
+    sent_messages = []
+
+    def fake_send(content, *, channel_id=None, webhook_url=None):
+        sent_messages.append(
+            {"content": content, "channel_id": channel_id, "webhook_url": webhook_url}
+        )
+        return True, None
+
+    monkeypatch.setattr(fitting_notifier, "_send_discord_message", fake_send)
+
+    sent_count = fitting_notifier._send_zero_result_notification_summaries()
+
+    assert sent_count == 2
+    assert [message["channel_id"] for message in sent_messages] == ["chan-1", None]
+    assert sent_messages[1]["webhook_url"] == "https://discord.example/webhook"
+    assert all("Eligible: 0" in message["content"] for message in sent_messages)
+    assert "Profile: George Gu" in sent_messages[0]["content"]
+    assert "Profile: Xingyou Li" in sent_messages[1]["content"]
+
+
+def test_discord_skip_reason_distinguishes_disabled_and_missing(monkeypatch):
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("DISCORD_CHANNEL_ID", raising=False)
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+
+    assert fitting_notifier._discord_skip_reason({"discord_enabled": False, "discord_webhook_url": "https://discord.example/webhook"}) == "discord_disabled"
+    assert fitting_notifier._discord_skip_reason({"discord_enabled": True}) == "discord_missing_destination"
+    assert fitting_notifier._discord_skip_reason({"discord_enabled": True, "discord_webhook_url": "https://discord.example/webhook"}) is None
+
+
+def test_zero_result_summaries_skip_disabled_discord(monkeypatch):
+    import pandas as pd
+
+    monkeypatch.setattr(
+        fitting_notifier.database,
+        "get_active_notification_profiles",
+        lambda: pd.DataFrame(
+            [
+                {
+                    "profile_id": 1,
+                    "profile_key": "disabled",
+                    "display_name": "Disabled",
+                    "discord_channel_id": "chan-1",
+                    "discord_webhook_url": None,
+                    "discord_enabled": False,
+                }
+            ]
+        ),
+    )
+    sent_messages = []
+    monkeypatch.setattr(fitting_notifier, "_send_discord_message", lambda *args, **kwargs: sent_messages.append((args, kwargs)) or (True, None))
+
+    sent_count = fitting_notifier._send_zero_result_notification_summaries()
+
+    assert sent_count == 0
+    assert sent_messages == []
+
+
+def test_filter_notification_jobs_test_mode_allows_blockers_and_caps(monkeypatch):
+    monkeypatch.setenv("LINKEDIN_TEST_MODE", "true")
+    monkeypatch.setenv("LINKEDIN_TEST_MAX_NOTIFY_JOBS", "3")
+    jobs = [
+        {
+            "id": f"job-{index}",
+            "llm_match": json.dumps(
+                {
+                    "fit_score": index,
+                    "decision": "Not Recommended",
+                    "experience_check": {"experience_blocker": True},
+                }
+            ),
+            "llm_match_error": None,
+        }
+        for index in range(5)
+    ]
+
+    filtered = fitting_notifier._filter_notification_jobs(jobs)
+    capped = filtered[: fitting_notifier._test_mode_notification_limit()]
+
+    assert [job["id"] for job in filtered] == [f"job-{index}" for index in range(5)]
+    assert [job["id"] for job in capped] == ["job-0", "job-1", "job-2"]
+
+
+def test_build_discord_job_match_message_marks_test_mode(monkeypatch):
+    monkeypatch.setenv("LINKEDIN_TEST_MODE", "true")
+    monkeypatch.delenv("RESUME_MATCHER_BASE_URL", raising=False)
+    monkeypatch.delenv("MATERIALS_LINK_SECRET", raising=False)
+
+    message = fitting_notifier._build_discord_job_match_message(
+        {
+            "profile_id": 7,
+            "display_name": "LinkedIn Test Mode",
+            "id": "test-1",
+            "title": "Data Engineer",
+            "company": "Example",
+            "fit_score": 5,
+            "fit_decision": "Not Recommended",
+            "job_url": "https://example.test/job",
+        }
+    )
+
+    assert message.startswith("🧪 TEST Job Match")
+
+def test_build_discord_job_match_message_includes_materials_launch_url(monkeypatch):
+    monkeypatch.setenv("RESUME_MATCHER_BASE_URL", "https://materials.example.com")
+    monkeypatch.setenv("MATERIALS_LINK_SECRET", "test-secret")
+
+    message = fitting_notifier._build_discord_job_match_message(
+        {
+            "profile_id": 7,
+            "display_name": "George Gu",
+            "id": "li-123",
+            "title": "Data Engineer",
+            "company": "Example Co",
+            "fit_score": 88,
+            "fit_decision": "Strong Fit",
+            "job_url": "https://linkedin.example/job/li-123",
+            "llm_match": json.dumps({"exp_requirement": "3+ years preferred"}),
+        }
+    )
+
+    assert message is not None
+    assert "Materials: https://materials.example.com/launch?token=" in message
+    token = message.split("Materials: ", 1)[1].strip()
+    parsed = materials_launch.verify_materials_launch_token(
+        token=token.split("token=", 1)[1],
+        secret="test-secret",
+    )
+    assert parsed["profile_id"] == 7
+    assert parsed["job_id"] == "li-123"
+
+
+def test_build_discord_job_match_message_omits_materials_url_without_config(monkeypatch):
+    monkeypatch.delenv("RESUME_MATCHER_BASE_URL", raising=False)
+    monkeypatch.delenv("MATERIALS_LINK_SECRET", raising=False)
+
+    message = fitting_notifier._build_discord_job_match_message(
+        {
+            "profile_id": 7,
+            "display_name": "George Gu",
+            "id": "li-123",
+            "title": "Data Engineer",
+            "company": "Example Co",
+            "fit_score": 88,
+            "fit_decision": "Strong Fit",
+            "job_url": "https://linkedin.example/job/li-123",
+        }
+    )
+
+    assert message is not None
+    assert "Materials:" not in message
+
+
+def test_fitting_notifier_source_caps_test_mode_claims():
+    source = Path("dags/fitting_notifier.py").read_text(encoding="utf-8")
+    assert "LINKEDIN_TEST_MAX_FIT_JOBS" in source
+    assert "claim_pending_fitting_tasks(limit=limit)" in source
+    assert "Test mode fitting claim cap" in source
+
+
+def test_fitting_claim_limit_defaults_to_1000_in_production(monkeypatch):
+    monkeypatch.delenv("LINKEDIN_TEST_MODE", raising=False)
+    monkeypatch.delenv("FITTING_CLAIM_LIMIT", raising=False)
+
+    assert fitting_notifier._fitting_claim_limit() == 1000
+
+
+def test_fitting_claim_limit_allows_explicit_unlimited_production(monkeypatch):
+    monkeypatch.delenv("LINKEDIN_TEST_MODE", raising=False)
+    monkeypatch.setenv("FITTING_CLAIM_LIMIT", "0")
+
+    assert fitting_notifier._fitting_claim_limit() is None

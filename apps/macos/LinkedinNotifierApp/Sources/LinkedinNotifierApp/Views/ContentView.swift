@@ -4,7 +4,6 @@ private enum AppTab: Hashable {
     case overview
     case profiles
     case jobs
-    case runs
 }
 
 struct ContentView: View {
@@ -29,13 +28,19 @@ struct ContentView: View {
                     Label("Jobs", systemImage: "list.bullet.rectangle")
                 }
                 .tag(AppTab.jobs)
-
-            RunsTabView(isVisible: selectedTab == .runs)
-                .tabItem {
-                    Label("Runs", systemImage: "arrow.trianglehead.clockwise")
-                }
-                .tag(AppTab.runs)
         }
         .padding(.top, 10)
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                Button {
+                    if let url = URL(string: "file://\(CloudConfig.userConfigFileURL.path)") {
+                        NSWorkspace.shared.selectFile(nil, inFileViewerRootedAtPath: url.deletingLastPathComponent().path)
+                    }
+                } label: {
+                    Label("Reveal Config", systemImage: "gearshape")
+                }
+                .help("Reveal database configuration file in Finder")
+            }
+        }
     }
 }

@@ -16,7 +16,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Run Astro DAG import/parsing validation: `pytest .astro/test_dag_integrity_default.py`
 
 ### One-off scripts
-- Migrate legacy SQLite data into Postgres: `python scripts/migrate_sqlite_to_postgres.py --sqlite-path include/jobs.db --pg-url postgresql://postgres:postgres@127.0.0.1:5432/jobsdb`
+- Migrate legacy SQLite data into Postgres: `JOBS_DB_URL=postgresql://jobs_app:jobs_pass@db.example.com:5432/jobsdb python scripts/migrate_sqlite_to_postgres.py --sqlite-path include/jobs.db`
 
 ## Architecture
 
@@ -87,18 +87,12 @@ When changing fit behavior, inspect both prompt construction and `_apply_fit_cap
 
 ## Environment
 - Runtime env files are expected at `.env` and/or `dags/.env`.
-- Important runtime vars called out by the repo README include `JOBS_DB_URL`, `PROFILE_CONFIG_PATH`, scan tuning vars, JD/fitting stale-claim vars, `GMN_API_KEY`, and Discord credentials.
+- `JOBS_DB_URL` is required for the business database connection. Legacy split `JOBS_DB_HOST`, `JOBS_DB_PORT`, `JOBS_DB_USER`, `JOBS_DB_PASSWORD`, and `JOBS_DB_NAME` fallbacks should not be relied on.
+- Important runtime vars called out by the repo README include `JOBS_DB_URL`, `PROFILE_CONFIG_PATH`, scan tuning vars, JD/fitting stale-claim vars, `FITTING_MODEL_NAME`, `LLM_ENDPOINTS_JSON`, Discord credentials, and `AIRFLOW_ADMIN_PASSWORD` for fixed SimpleAuthManager login bootstrapping.
 - The Docker image installs Playwright Chromium during build (`Dockerfile`).
+- Zeabur deployment is a single Docker app service plus two Postgres databases: one for Airflow metadata (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`) and one for business data (`JOBS_DB_URL`).
+- In the single-container cloud deployment, keep `AIRFLOW__API__BASE_URL=http://127.0.0.1:8080` and `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`; do not point them at old multi-service hostnames.
 
 ### Code Review 工作流
 
-每次完成编码后，使用 codex 和 git diff 进行 code review，分析 codex 的反馈后，自行修改代码，然后将新的 diff 使用 codex-reply 和相同的 threadId 发给 codex，继续下一轮 review。如此循环，最多 3 轮，直到没有关键问题。
-
-#### Review Checklist
-1. 完成编码
-2. 运行 `codex` + `git diff` 发起 review
-3. 分析 codex 的反馈
-4. 手动修改代码
-5. 使用 `codex-reply` + 相同 `threadId` + 新的 diff 继续 review
-6. 最多迭代 3 轮
-7. 直到没有关键问题
+如果要求code review，使用 codex 和 git diff 进行 code review，分析 codex 的反馈后，自行修改代码，然后将新的 diff 使用 codex-reply 和相同的 threadId 发给 codex，继续下一轮 review。如此循环，最多 3 轮，直到没有关键问题。

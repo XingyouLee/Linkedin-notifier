@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from airflow.sdk import dag, task
 from airflow.providers.standard.operators.empty import EmptyOperator
 from airflow.providers.standard.operators.trigger_dagrun import TriggerDagRunOperator
@@ -9,10 +11,11 @@ import random
 import re
 import time
 from html import unescape
+from urllib.parse import urlencode
 
 import requests
 from dags import database
-from dags.runtime_utils import df_to_xcom_records, load_env
+from dags.runtime_utils import df_to_xcom_records, load_env, runtime_bool, runtime_int
 
 
 load_env()
@@ -31,6 +34,9 @@ SCAN_TITLE_RE = re.compile(r"<h3[^>]*>(.*?)</h3>", re.S)
 SCAN_COMPANY_RE = re.compile(r"<h4[^>]*>(.*?)</h4>", re.S)
 SCAN_JOB_ID_RE = re.compile(r"-(\d+)\?")
 SCAN_ITEM_RE = re.compile(r"<li>(.*?)</li>", re.S)
+RAW_SCAN_JOB_ID_RE = re.compile(r"\d+")
+TEST_JOB_ID_PREFIX = "test-"
+PERSISTED_SCAN_JOB_ID_RE = re.compile(rf"(?:{re.escape(TEST_JOB_ID_PREFIX)})?(\d+)")
 
 
 def _get_nonnegative_int_env(var_name: str, default: int) -> int:
@@ -41,9 +47,153 @@ def _get_nonnegative_int_env(var_name: str, default: int) -> int:
     return max(0, value)
 
 
+def _default_scan_results_per_term() -> int:
+    return _get_nonnegative_int_env("SCAN_RESULTS_PER_TERM", 10)
+
+
+def _coerce_bool(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "y", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "n", "off"}:
+        return False
+    return default
+
+
+def _is_test_mode_enabled() -> bool:
+    return runtime_bool("LINKEDIN_TEST_MODE", False)
+
+
+def _test_mode_cap(var_name: str, default: int) -> int | None:
+    """Return a positive row cap only while LINKEDIN_TEST_MODE is enabled."""
+    if not _is_test_mode_enabled():
+        return None
+    return runtime_int(
+        var_name, default, fallback_key="LINKEDIN_TEST_MAX_JOBS", minimum=1
+    )
+
+
+def _apply_test_mode_cap(records: list[dict], *, var_name: str, default: int, label: str) -> list[dict]:
+    cap = _test_mode_cap(var_name, default)
+    if cap is None or len(records) <= cap:
+        return records
+    print(
+        f"Test mode cap applied for {label}: keeping {cap} of {len(records)} "
+        f"records ({var_name} or LINKEDIN_TEST_MAX_JOBS)."
+    )
+    return records[:cap]
+
+
+def _is_test_profile(value) -> bool:
+    if isinstance(value, dict):
+        if "is_test_profile" in value:
+            return _coerce_bool(value.get("is_test_profile"), False)
+        if "test_mode_only" in value:
+            return _coerce_bool(value.get("test_mode_only"), False)
+    return _coerce_bool(value, False)
+
+
+def _apply_title_keyword_filter(jobs_df: pd.DataFrame, profile_filters: dict[int, dict[str, list[str]]]) -> pd.DataFrame:
+    if jobs_df is None or jobs_df.empty or "profile_id" not in jobs_df.columns:
+        return jobs_df
+    filtered = jobs_df.copy()
+    keep_mask = pd.Series(True, index=filtered.index)
+    title_col = filtered.get("title", pd.Series("", index=filtered.index)).fillna("").astype(str).str.lower()
+    for profile_id, config in (profile_filters or {}).items():
+        keywords = [str(keyword).strip().lower() for keyword in config.get("title_keywords", []) if str(keyword).strip()]
+        if not keywords:
+            continue
+        profile_mask = filtered["profile_id"].astype(str) == str(profile_id)
+        keyword_mask = pd.Series(False, index=filtered.index)
+        for keyword in keywords:
+            keyword_mask = keyword_mask | title_col.str.contains(re.escape(keyword), na=False)
+        keep_mask = keep_mask & ~(profile_mask & keyword_mask)
+    return filtered[keep_mask]
+
+
+def _apply_company_blacklist_filter(jobs_df: pd.DataFrame, profile_filters: dict[int, dict[str, list[str]]]) -> pd.DataFrame:
+    if jobs_df is None or jobs_df.empty or "profile_id" not in jobs_df.columns:
+        return jobs_df
+    filtered = jobs_df.copy()
+    keep_mask = pd.Series(True, index=filtered.index)
+    company_col = filtered.get("company", pd.Series("", index=filtered.index)).fillna("").astype(str).str.strip().str.lower()
+    for profile_id, config in (profile_filters or {}).items():
+        companies = {str(company).strip().lower() for company in config.get("companies", []) if str(company).strip()}
+        if not companies:
+            continue
+        profile_mask = filtered["profile_id"].astype(str) == str(profile_id)
+        company_mask = company_col.isin(companies)
+        keep_mask = keep_mask & ~(profile_mask & company_mask)
+    return filtered[keep_mask]
+
+
+def _normalize_jd_job_records(job_records) -> list[dict]:
+    """Collapse profile-level JD candidates into unique job-level work items."""
+    normalized_records: list[dict] = []
+    seen_job_ids: set[str] = set()
+    for record in job_records or []:
+        job_id = str(record.get("id") or "").strip()
+        if not job_id or job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job_id)
+        normalized_records.append(
+            {
+                "id": job_id,
+                "job_url": record.get("job_url"),
+            }
+        )
+    return normalized_records
+
+
+def _normalize_source_job_id(source_job_id) -> str | None:
+    if source_job_id is None:
+        return None
+    normalized = str(source_job_id).strip()
+    if not normalized:
+        return None
+    if RAW_SCAN_JOB_ID_RE.fullmatch(normalized):
+        return normalized
+    match = PERSISTED_SCAN_JOB_ID_RE.fullmatch(normalized)
+    if match:
+        return match.group(1)
+    return None
+
+
+def _transform_scan_job_identity(
+    job_id: str,
+    *,
+    is_test_profile: bool,
+    source_job_id=None,
+) -> tuple[str, str | None]:
+    normalized_job_id = str(job_id or "").strip()
+    if not normalized_job_id:
+        return "", None
+
+    if RAW_SCAN_JOB_ID_RE.fullmatch(normalized_job_id):
+        if is_test_profile:
+            raw_job_id = _normalize_source_job_id(source_job_id) or normalized_job_id
+            return f"{TEST_JOB_ID_PREFIX}{raw_job_id}", raw_job_id
+        return normalized_job_id, None
+
+    match = PERSISTED_SCAN_JOB_ID_RE.fullmatch(normalized_job_id)
+    if match:
+        raw_job_id = _normalize_source_job_id(source_job_id) or match.group(1)
+        return normalized_job_id, raw_job_id
+
+    return "", None
+
+
 def _build_scan_config(
     results_wanted: int, hours_old: int, distance: int | None = None
 ) -> dict:
+    if results_wanted is None:
+        results_wanted = _default_scan_results_per_term()
+    else:
+        results_wanted = max(0, int(results_wanted))
     return {
         "request_page_size": int(os.getenv("SCAN_REQUEST_PAGE_SIZE", "10")),
         "http_max_retries": max(0, int(os.getenv("SCAN_HTTP_MAX_RETRIES", "6"))),
@@ -56,10 +206,7 @@ def _build_scan_config(
             os.getenv("SCAN_BETWEEN_TERMS_DELAY_SEC", "8.0")
         ),
         "request_timeout_sec": int(os.getenv("SCAN_REQUEST_TIMEOUT_SEC", "45")),
-        "results_per_term": _get_nonnegative_int_env(
-            "SCAN_RESULTS_PER_TERM",
-            int(results_wanted),
-        ),
+        "results_per_term": int(results_wanted),
         "hours_old": int(hours_old),
         "distance": int(
             distance if distance is not None else os.getenv("SCAN_DISTANCE", "25")
@@ -88,6 +235,7 @@ def _build_scan_params(
     start: int,
     *,
     location: str | None,
+    geo_id: str | None,
     distance: int,
     hours_old: int,
 ) -> dict:
@@ -98,9 +246,29 @@ def _build_scan_params(
     }
     if location:
         params["location"] = str(location).strip()
+    if geo_id:
+        params["geoId"] = str(geo_id).strip()
     if hours_old > 0:
         params["f_TPR"] = f"r{hours_old * 3600}"
     return params
+
+
+def _build_scan_headers(
+    term: str,
+    *,
+    location: str | None,
+    geo_id: str | None,
+) -> dict[str, str]:
+    referer_params = {"keywords": term}
+    if location:
+        referer_params["location"] = str(location).strip()
+    if geo_id:
+        referer_params["geoId"] = str(geo_id).strip()
+    return {
+        "User-Agent": SCAN_USER_AGENT,
+        "Accept-Language": os.getenv("SCAN_ACCEPT_LANGUAGE", "en-US,en;q=0.9"),
+        "Referer": f"https://www.linkedin.com/jobs/search/?{urlencode(referer_params)}",
+    }
 
 
 def _parse_scan_items(html_text: str) -> list[dict]:
@@ -144,11 +312,16 @@ def _scan_fetch_page(
                     term=term,
                     start=start,
                     location=scan_config.get("location"),
+                    geo_id=scan_config.get("geo_id"),
                     distance=scan_config["distance"],
                     hours_old=scan_config["hours_old"],
                 ),
                 timeout=scan_config["request_timeout_sec"],
-                headers={"User-Agent": SCAN_USER_AGENT},
+                headers=_build_scan_headers(
+                    term=term,
+                    location=scan_config.get("location"),
+                    geo_id=scan_config.get("geo_id"),
+                ),
             )
         except requests.RequestException as error:
             if attempt >= scan_config["http_max_retries"]:
@@ -275,6 +448,11 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
             terms = [term for term in (search_config.get("terms") or []) if term]
             if not terms:
                 continue
+            profile_label = (
+                search_config.get("profile_key")
+                or search_config.get("display_name")
+                or search_config.get("profile_id")
+            )
             results_per_term = search_config.get("results_per_term")
             if results_per_term is None:
                 raise ValueError(
@@ -283,20 +461,17 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                 )
             scan_config = _build_scan_config(
                 results_wanted=results_per_term,
-                hours_old=search_config.get("hours_old") or 168,
+                hours_old=search_config.get("hours_old") or 100,
                 distance=search_config.get("distance") or 25,
             )
             scan_config["location"] = search_config.get("location") or "Netherlands"
-            profile_label = (
-                search_config.get("profile_key")
-                or search_config.get("display_name")
-                or search_config.get("profile_id")
-            )
+            scan_config["geo_id"] = search_config.get("geo_id")
 
             print(
                 f"Scanning profile={profile_label} config={search_config.get('search_config_name')} "
                 f"terms={terms} location={scan_config['location']} hours_old={scan_config['hours_old']} "
-                f"results_per_term={scan_config['results_per_term']} distance={scan_config['distance']}"
+                f"results_per_term={scan_config['results_per_term']} distance={scan_config['distance']} "
+                f"geo_id={scan_config.get('geo_id')}"
             )
 
             if scan_config["results_per_term"] <= 0:
@@ -318,6 +493,7 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                     row["profile_id"] = search_config.get("profile_id")
                     row["search_config_id"] = search_config.get("search_config_id")
                     row["search_term"] = term
+                    row["is_test_profile"] = _is_test_profile(search_config)
                 all_rows.extend(term_rows)
 
                 if (
@@ -389,11 +565,31 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
                 ),
                 errors="coerce",
             ),
+            "is_test_profile": jobs_df.get(
+                "is_test_profile",
+                pd.Series(False, index=jobs_df.index, dtype="object"),
+            ).map(_is_test_profile),
+            "source_job_id": jobs_df.get(
+                "source_job_id", pd.Series(index=jobs_df.index, dtype="object")
+            ),
         }
     )
+    transformed_identities = normalized_df.apply(
+        lambda row: _transform_scan_job_identity(
+            row["id"],
+            is_test_profile=_is_test_profile(row["is_test_profile"]),
+            source_job_id=row.get("source_job_id"),
+        ),
+        axis=1,
+        result_type="expand",
+    )
+    normalized_df["id"] = transformed_identities[0]
+    normalized_df["source_job_id"] = transformed_identities[1]
     normalized_df["site"] = normalized_df["site"].fillna("linkedin")
     normalized_df = normalized_df[
-        normalized_df["id"].str.fullmatch(r"[0-9]+", na=False)
+        normalized_df["id"].map(
+            lambda value: bool(PERSISTED_SCAN_JOB_ID_RE.fullmatch(str(value or "").strip()))
+        )
     ]
     normalized_count = len(normalized_df)
     invalid_id_count = raw_count - normalized_count
@@ -432,7 +628,15 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
             ascending=[True, False, False, False],
         )
         .drop_duplicates(subset=["id"], keep="first")
-        .drop(columns=["quality_score", "title_len", "company_len", "search_term"])
+        .drop(
+            columns=[
+                "quality_score",
+                "title_len",
+                "company_len",
+                "search_term",
+                "is_test_profile",
+            ]
+        )
         .reset_index(drop=True)
     )
     unique_count = len(deduped_df)
@@ -445,7 +649,9 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
         f"duplicates={duplicate_count}, invalid_ids={invalid_id_count}"
     )
 
-    database.save_jobs(deduped_df[["id", "site", "job_url", "title", "company"]])
+    database.save_jobs(
+        deduped_df[["id", "site", "job_url", "title", "company", "source_job_id"]]
+    )
 
     profile_job_df = (
         normalized_df[["profile_id", "search_config_id", "id", "search_term"]]
@@ -479,9 +685,43 @@ def _normalize_and_save_scan_rows(all_rows: list[dict]) -> dict:
     }
 
 
+def _resolve_unfinished_jd_jobs(job_ids) -> bool:
+    """Force unfinished JD queue rows into a terminal state at worker shutdown.
+
+    Leftover rows may be ``pending`` (never claimable — e.g. profile-mode mismatch or
+    missing profile_jobs) or ``processing`` (claimed by an earlier run but never
+    finalized and not yet stale enough to reclaim). Both block the worker from
+    completing, so they are force-failed with a state-specific error rather than
+    lumped together as "pending". Returns True if any row was resolved.
+    """
+    unfinished = database.get_unfinished_jd_jobs(job_ids)
+    pending_ids = [jid for jid, status in unfinished if status == "pending"]
+    processing_ids = [jid for jid, status in unfinished if status == "processing"]
+
+    if pending_ids:
+        print(
+            f"Resolving {len(pending_ids)} stuck pending JD jobs "
+            f"(unclaimable — likely profile-mode mismatch or missing profile_jobs): "
+            f"{pending_ids[:5]}{'...' if len(pending_ids) > 5 else ''}"
+        )
+        for jid in pending_ids:
+            database.save_jd_result(jid, description_error="unclaimable_pending_job")
+
+    if processing_ids:
+        print(
+            f"Resolving {len(processing_ids)} orphaned processing JD jobs "
+            f"(claimed but never finalized): "
+            f"{processing_ids[:5]}{'...' if len(processing_ids) > 5 else ''}"
+        )
+        for jid in processing_ids:
+            database.fail_jd_queue_row(jid, "stale_processing_job")
+
+    return bool(pending_ids or processing_ids)
+
+
 @dag(
     start_date=datetime(2023, 1, 1),
-    schedule="0 */12 * * *",
+    schedule="0 0 * * *",
     catchup=False,
     is_paused_upon_creation=False,
     max_active_runs=1,
@@ -518,6 +758,12 @@ def linkedin_notifier():
                 "profiles": profile_count,
             }
 
+        all_rows = _apply_test_mode_cap(
+            all_rows,
+            var_name="LINKEDIN_TEST_MAX_SCAN_ROWS",
+            default=10,
+            label="scan rows",
+        )
         scan_stats = _normalize_and_save_scan_rows(all_rows)
         print(
             "Scan stage progress: "
@@ -537,14 +783,7 @@ def linkedin_notifier():
     def filter_jobs():
         jd_max_attempts = int(os.getenv("JD_MAX_ATTEMPTS", "3"))
         df = database.get_jobs_needing_jd(max_attempts=jd_max_attempts)
-        blocked_companies = [
-            "Elevation Group",
-            "Capgemini",
-            "Jobster",
-            "Sogeti",
-            "CGI Nederland",
-            "Mercor",
-        ]
+        blocked_companies = database.DEFAULT_COMPANY_BLACKLIST
         if df is None or df.empty:
             print("No jobs currently need JD. Skip JD filtering stage.")
             return []
@@ -555,19 +794,47 @@ def linkedin_notifier():
             )
             return []
 
-        filter_columns = ["id", "site", "job_url", "title", "company"]
+        filter_columns = ["id", "site", "job_url", "title", "company", "profile_id"]
         for col in filter_columns:
             if col not in df.columns:
                 df[col] = None
 
         filtered_df = df[filter_columns].copy()
+        if _is_test_mode_enabled():
+            filtered_records = df_to_xcom_records(filtered_df)
+            total_records = len(filtered_records)
+            filtered_records = _apply_test_mode_cap(
+                filtered_records,
+                var_name="LINKEDIN_TEST_MAX_JD_JOBS",
+                default=10,
+                label="JD backlog",
+            )
+            print(
+                f"JD backlog candidates in test mode: {len(filtered_records)} "
+                f"of {total_records} "
+                f"(production pre-JD filters bypassed, max_attempts={jd_max_attempts})"
+            )
+            return filtered_records
+
         company_col = filtered_df["company"].fillna("").astype(str).str.strip()
         title_col = filtered_df["title"].fillna("").astype(str).str.lower()
+        default_title_pattern = "|".join(
+            re.escape(keyword) for keyword in database.DEFAULT_TITLE_EXCLUDE_KEYWORDS
+        )
         filtered_df = filtered_df[
             ~company_col.isin(blocked_companies)
-            & ~title_col.str.contains("senior", na=False)
-            & ~title_col.str.contains("medior", na=False)
+            & ~title_col.str.contains(default_title_pattern, na=False)
         ]
+        profile_filters = database.get_profile_scan_filters()
+        before_profile_filters = len(filtered_df)
+        filtered_df = _apply_title_keyword_filter(filtered_df, profile_filters)
+        after_title_filter = len(filtered_df)
+        filtered_df = _apply_company_blacklist_filter(filtered_df, profile_filters)
+        print(
+            "Profile scan filters suppressed "
+            f"title={before_profile_filters - after_title_filter} "
+            f"company={after_title_filter - len(filtered_df)}"
+        )
         filtered_records = df_to_xcom_records(filtered_df)
         print(
             f"JD backlog candidates after filters: {len(filtered_records)} "
@@ -577,16 +844,14 @@ def linkedin_notifier():
 
     @task
     def normalize_job_records(job_records):
-        if not job_records:
-            return []
-        return [
-            {
-                "id": record.get("id"),
-                "job_url": record.get("job_url"),
-            }
-            for record in job_records
-            if record.get("id")
-        ]
+        normalized_records = _normalize_jd_job_records(job_records)
+        raw_count = len(job_records or [])
+        if raw_count != len(normalized_records):
+            print(
+                "Deduplicated JD backlog candidates: "
+                f"{len(normalized_records)} unique jobs from {raw_count} profile-job rows"
+            )
+        return normalized_records
 
     @task.branch
     def branch_after_filter(job_records):
@@ -599,10 +864,11 @@ def linkedin_notifier():
 
     @task
     def enqueue_jd_requests(job_records):
-        jobs_df = pd.DataFrame(job_records or [])
+        unique_job_records = _normalize_jd_job_records(job_records)
+        jobs_df = pd.DataFrame(unique_job_records)
         queued = database.enqueue_jd_requests(jobs_df)
         print(f"Queued {queued} JD requests for in-DAG worker")
-        return [j.get("id") for j in (job_records or []) if j.get("id")]
+        return [j.get("id") for j in unique_job_records]
 
     @task(task_id="run_jd_worker")
     def run_jd_worker(job_ids, worker_batch_size=5, max_loops=20, idle_loop_limit=2):
@@ -615,6 +881,13 @@ def linkedin_notifier():
         if not job_ids:
             return {"processed": 0, "done": 0, "failed": 0, "pending": 0, "total": 0}
 
+        pruned = database.prune_unclaimable_jd_queue_rows()
+        if pruned:
+            print(
+                f"Pruned {pruned} mode-mismatched jd_queue rows "
+                "(pending/processing rows from a different test/production mode run)"
+            )
+
         worker_batch_size = int(
             os.getenv("JD_WORKER_BATCH_SIZE", str(worker_batch_size))
         )
@@ -626,18 +899,18 @@ def linkedin_notifier():
 
         total = len(job_ids)
         min_loops_needed = math.ceil(total / worker_batch_size) + idle_loop_limit
-        max_loops = int(
-            os.getenv("JD_WORKER_MAX_LOOPS", str(max(max_loops, min_loops_needed)))
-        )
-        if max_loops <= 0:
-            max_loops = min_loops_needed
+        configured_max_loops = int(os.getenv("JD_WORKER_MAX_LOOPS", str(max_loops)))
+        if configured_max_loops <= 0:
+            configured_max_loops = min_loops_needed
+        max_loops = max(configured_max_loops, min_loops_needed)
 
         total_processed = 0
         idle_loops = 0
 
         print(
             f"JD worker config: batch_size={worker_batch_size}, "
-            f"max_loops={max_loops}, idle_loop_limit={idle_loop_limit}, "
+            f"max_loops={max_loops}, configured_max_loops={configured_max_loops}, "
+            f"idle_loop_limit={idle_loop_limit}, "
             f"min_loops_needed={min_loops_needed}, total={total}"
         )
 
@@ -674,6 +947,13 @@ def linkedin_notifier():
         done_count = database.count_jd_queue_status(job_ids, "done")
         failed_count = database.count_jd_queue_status(job_ids, "failed")
         pending_count = total - done_count - failed_count
+
+        if pending_count > 0:
+            if _resolve_unfinished_jd_jobs(job_ids):
+                done_count = database.count_jd_queue_status(job_ids, "done")
+                failed_count = database.count_jd_queue_status(job_ids, "failed")
+                pending_count = total - done_count - failed_count
+
         result = {
             "processed": total_processed,
             "done": done_count,
@@ -688,10 +968,12 @@ def linkedin_notifier():
         )
 
         if pending_count > 0:
+            leftover = database.get_unfinished_jd_jobs(job_ids)
             raise RuntimeError(
-                "JD worker stopped with pending jobs: "
-                f"{result}. Increase JD_WORKER_MAX_LOOPS (suggested >= {min_loops_needed}) "
-                f"or JD_WORKER_BATCH_SIZE (current {worker_batch_size})."
+                "JD worker stopped with unfinished jobs: "
+                f"{result}. Leftover queue rows (job_id, status): "
+                f"{leftover[:10]}{'...' if len(leftover) > 10 else ''}. "
+                "Rows may be unclaimable due to profile-mode mismatch or missing data."
             )
 
         return result
@@ -701,6 +983,14 @@ def linkedin_notifier():
         jobs_df = database.get_profile_jobs_ready_for_fitting()
         if jobs_df is None or jobs_df.empty:
             return {"queued": 0}
+
+        fitting_cap = _test_mode_cap("LINKEDIN_TEST_MAX_FIT_JOBS", 10)
+        if fitting_cap is not None and len(jobs_df) > fitting_cap:
+            print(
+                f"Test mode cap applied for fitting queue: keeping {fitting_cap} "
+                f"of {len(jobs_df)} rows (LINKEDIN_TEST_MAX_FIT_JOBS or LINKEDIN_TEST_MAX_JOBS)."
+            )
+            jobs_df = jobs_df.head(fitting_cap).copy()
 
         queued = database.enqueue_fitting_requests(jobs_df)
         print(f"Queued {queued} fitting requests")
@@ -734,7 +1024,15 @@ def linkedin_notifier():
     trigger_fitting_notifier = TriggerDagRunOperator(
         task_id="trigger_fitting_notifier",
         trigger_dag_id="linkedin_fitting_notifier",
-        conf={"source_dag_run_id": "{{ dag_run.run_id }}"},
+        trigger_run_id="fitting__{{ dag_run.run_id }}",
+        skip_when_already_exists=True,
+        conf={
+            "source_dag_run_id": "{{ dag_run.run_id }}",
+            "LINKEDIN_TEST_MODE": "{{ dag_run.conf.get('LINKEDIN_TEST_MODE', false) }}",
+            "LINKEDIN_TEST_MAX_JOBS": "{{ dag_run.conf.get('LINKEDIN_TEST_MAX_JOBS', '') }}",
+            "LINKEDIN_TEST_MAX_FIT_JOBS": "{{ dag_run.conf.get('LINKEDIN_TEST_MAX_FIT_JOBS', '') }}",
+            "LINKEDIN_TEST_MAX_NOTIFY_JOBS": "{{ dag_run.conf.get('LINKEDIN_TEST_MAX_NOTIFY_JOBS', '') }}",
+        },
         wait_for_completion=False,
     )
     fitting_enqueue_meta >> trigger_fitting_notifier

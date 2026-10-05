@@ -84,10 +84,7 @@ def _sync_batches_sequence(pg_conn: psycopg.Connection):
 def _parse_args():
     repo_root = Path(__file__).resolve().parents[1]
     default_sqlite_path = repo_root / "include" / "jobs.db"
-    default_pg_url = (
-        os.getenv("JOBS_DB_URL")
-        or "postgresql://postgres:postgres@127.0.0.1:5432/jobsdb"
-    )
+    default_pg_url = os.getenv("JOBS_DB_URL")
 
     parser = argparse.ArgumentParser(
         description="One-time migration from local SQLite jobs.db to Postgres jobsdb."
@@ -100,7 +97,7 @@ def _parse_args():
     parser.add_argument(
         "--pg-url",
         default=default_pg_url,
-        help="Target Postgres DSN.",
+        help="Target Postgres DSN. Pass explicitly or set JOBS_DB_URL.",
     )
     return parser.parse_args()
 
@@ -108,18 +105,22 @@ def _parse_args():
 def main():
     args = _parse_args()
     sqlite_path = Path(args.sqlite_path).expanduser().resolve()
+    pg_url = (args.pg_url or "").strip()
 
     if not sqlite_path.exists():
         raise FileNotFoundError(f"SQLite file not found: {sqlite_path}")
 
-    os.environ["JOBS_DB_URL"] = args.pg_url
+    if not pg_url:
+        raise SystemExit("Set JOBS_DB_URL or pass --pg-url before running migration.")
+
+    os.environ["JOBS_DB_URL"] = pg_url
     from dags import database as pg_database  # noqa: WPS433
 
     pg_database.init_db()
 
     with sqlite3.connect(str(sqlite_path)) as sqlite_conn:
         sqlite_conn.row_factory = sqlite3.Row
-        with psycopg.connect(args.pg_url) as pg_conn:
+        with psycopg.connect(pg_url) as pg_conn:
             _copy_table(
                 sqlite_conn,
                 pg_conn,

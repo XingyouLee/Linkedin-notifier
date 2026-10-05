@@ -29,7 +29,7 @@ DEFAULT_ROLLBACK = False
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run SQL directly against jobsdb via docker exec into the Postgres container. "
+            "Run SQL against the configured jobs database using psql inside a Docker container. "
             "You can either edit DEFAULT_SQL in this file or pass SQL via CLI."
         )
     )
@@ -49,11 +49,11 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--db",
-        help="Database name. Default: derived from JOBS_DB_URL or jobsdb.",
+        help="Database name. Default: derived from JOBS_DB_URL.",
     )
     parser.add_argument(
         "--user",
-        help="Database user. Default: derived from JOBS_DB_URL or postgres.",
+        help="Database user. Default: derived from JOBS_DB_URL.",
     )
     parser.add_argument(
         "--expanded",
@@ -109,8 +109,19 @@ def _resolve_db_config(args: argparse.Namespace) -> tuple[str, str]:
     raw_url = os.getenv("JOBS_DB_URL") or env_values.get("JOBS_DB_URL") or ""
     parsed = urlparse(raw_url) if raw_url else None
 
-    db_name = args.db or (parsed.path.lstrip("/") if parsed and parsed.path else "") or "jobsdb"
-    db_user = args.user or (parsed.username if parsed and parsed.username else "") or "postgres"
+    if not parsed and not args.db and not args.user:
+        raise SystemExit(
+            "Set JOBS_DB_URL or pass both --db and --user before running SQL."
+        )
+
+    db_name = args.db or (parsed.path.lstrip("/") if parsed and parsed.path else "")
+    db_user = args.user or (parsed.username if parsed and parsed.username else "")
+
+    if not db_name or not db_user:
+        raise SystemExit(
+            "Could not determine database name and user. Set JOBS_DB_URL or pass --db and --user explicitly."
+        )
+
     return db_name, db_user
 
 

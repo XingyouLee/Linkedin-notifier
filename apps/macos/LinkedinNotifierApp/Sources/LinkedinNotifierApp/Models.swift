@@ -1,12 +1,5 @@
 import Foundation
 
-struct ContainerInfo: Identifiable, Hashable {
-    let name: String
-    let status: String
-
-    var id: String { name }
-}
-
 struct SummaryPayload: Codable, Hashable {
     let totalJobs: Int?
     let totalProfileJobs: Int?
@@ -61,96 +54,26 @@ extension SummaryPayload {
     }
 }
 
-struct EnvironmentSnapshot: Hashable {
-    let dockerRunning: Bool
-    let astroRunning: Bool
-    let schedulerContainer: String?
-    let apiServerContainer: String?
-    let postgresContainer: String?
-    let containers: [ContainerInfo]
+struct CloudStatusSnapshot: Hashable {
     let summary: SummaryPayload?
+    let databaseDescription: String
+    let airflowWebURL: String?
     let lastError: String?
 
-    static let empty = EnvironmentSnapshot(
-        dockerRunning: false,
-        astroRunning: false,
-        schedulerContainer: nil,
-        apiServerContainer: nil,
-        postgresContainer: nil,
-        containers: [],
+    static let empty = CloudStatusSnapshot(
         summary: nil,
+        databaseDescription: "Unavailable",
+        airflowWebURL: nil,
         lastError: nil
     )
 
-    func withStatus(
-        dockerRunning: Bool,
-        astroRunning: Bool,
-        schedulerContainer: String?,
-        apiServerContainer: String?,
-        postgresContainer: String?,
-        containers: [ContainerInfo]
-    ) -> EnvironmentSnapshot {
-        EnvironmentSnapshot(
-            dockerRunning: dockerRunning,
-            astroRunning: astroRunning,
-            schedulerContainer: schedulerContainer,
-            apiServerContainer: apiServerContainer,
-            postgresContainer: postgresContainer,
-            containers: containers,
-            summary: astroRunning ? summary : nil,
-            lastError: astroRunning ? lastError : nil
-        )
-    }
-
-    func withSummary(_ summary: SummaryPayload?, lastError: String?) -> EnvironmentSnapshot {
-        EnvironmentSnapshot(
-            dockerRunning: dockerRunning,
-            astroRunning: astroRunning,
-            schedulerContainer: schedulerContainer,
-            apiServerContainer: apiServerContainer,
-            postgresContainer: postgresContainer,
-            containers: containers,
+    func withSummary(_ summary: SummaryPayload?, lastError: String?) -> CloudStatusSnapshot {
+        CloudStatusSnapshot(
             summary: summary,
+            databaseDescription: databaseDescription,
+            airflowWebURL: airflowWebURL,
             lastError: lastError
         )
-    }
-}
-
-struct DagRunRecord: Decodable, Hashable, Identifiable {
-    let dagId: String
-    let runId: String
-    let state: String?
-    let logicalDate: String?
-    let startDate: String?
-    let endDate: String?
-    let runAfter: String?
-
-    var id: String { "\(dagId):\(runId)" }
-
-    enum CodingKeys: String, CodingKey {
-        case dagId
-        case runId
-        case dagRunId
-        case state
-        case logicalDate
-        case startDate
-        case endDate
-        case runAfter
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        dagId = try container.decode(String.self, forKey: .dagId)
-        if let runIdValue = try container.decodeIfPresent(String.self, forKey: .runId) {
-            runId = runIdValue
-        } else {
-            runId = try container.decode(String.self, forKey: .dagRunId)
-        }
-        state = try container.decodeIfPresent(String.self, forKey: .state)
-        logicalDate = try container.decodeIfPresent(String.self, forKey: .logicalDate)
-        startDate = try container.decodeIfPresent(String.self, forKey: .startDate)
-        endDate = try container.decodeIfPresent(String.self, forKey: .endDate)
-        runAfter = try container.decodeIfPresent(String.self, forKey: .runAfter)
     }
 }
 
@@ -226,6 +149,46 @@ struct ProfileDashboardResponse: Codable, Hashable {
     let profiles: [ProfileDashboard]
 }
 
+struct LocalProfileSummary: Codable, Hashable, Identifiable {
+    let profileKey: String
+    let displayName: String?
+    let active: Bool?
+    let resumePath: String?
+    let discordChannelId: String?
+    let modelName: String?
+    let candidateSummary: LocalCandidateSummary?
+    let searchConfigs: [LocalSearchConfig]
+
+    var id: String { profileKey }
+}
+
+struct LocalCandidateSummary: Codable, Hashable {
+    let summary: String?
+    let targetRoles: [String]
+    let candidateYears: Double?
+    let candidateSeniority: String?
+    let coreSkills: [String]
+    let obviousGaps: [String]
+    let languageSignals: LocalLanguageSignals?
+}
+
+struct LocalLanguageSignals: Codable, Hashable {
+    let dutchLevel: String?
+    let englishLevel: String?
+    let notes: String?
+}
+
+struct LocalSearchConfig: Codable, Hashable, Identifiable {
+    let name: String
+    let location: String?
+    let distance: Int?
+    let hoursOld: Int?
+    let resultsPerTerm: Int?
+    let terms: [String]
+
+    var id: String { name }
+}
+
 struct ProfileScoreBucket: Codable, Hashable, Identifiable {
     let bucketIndex: Int
     let label: String
@@ -279,6 +242,16 @@ struct ProfileDashboard: Codable, Hashable, Identifiable {
 }
 
 extension ProfileDashboard {
+    func matches(localProfile: LocalProfileSummary) -> Bool {
+        let localKeys = Set(
+            [localProfile.profileKey, localProfile.displayName]
+                .compactMap(Self.normalizedIdentity)
+        )
+        let remoteKeys = Set([profileKey, displayName].compactMap(Self.normalizedIdentity))
+
+        return !localKeys.isEmpty && !remoteKeys.isDisjoint(with: localKeys)
+    }
+
     var name: String {
         displayName ?? profileKey ?? "Profile \(profileId)"
     }
@@ -342,5 +315,12 @@ extension ProfileDashboard {
     var notifiedFraction: Double {
         guard totalJobsValue > 0 else { return 0 }
         return min(Double(notifiedJobsValue) / Double(totalJobsValue), 1.0)
+    }
+
+    private static func normalizedIdentity(_ value: String?) -> String? {
+        guard let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed.lowercased()
     }
 }

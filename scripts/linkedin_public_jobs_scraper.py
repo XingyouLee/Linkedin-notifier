@@ -163,7 +163,7 @@ def scrape_jobs_for_term(
     term: str,
     location: str = "Netherlands",
     distance: int = 25,
-    hours_old: int = 168,
+    hours_old: int = 100,
     results_wanted: int = 100,
 ):
     args = SimpleNamespace(
@@ -184,7 +184,7 @@ def scrape_linkedin_public_jobs(
     terms,
     location="Netherlands",
     distance=25,
-    hours_old=168,
+    hours_old=100,
     results_wanted=100,
 ):
     normalized_terms = _normalize_terms(terms)
@@ -247,7 +247,7 @@ def parse_args():
         "--posted", choices=sorted(POSTED_TO_HOURS.keys()), help="Post date window."
     )
     parser.add_argument(
-        "--hours-old", type=int, default=168, help="Lookback window in hours."
+        "--hours-old", type=int, default=100, help="Lookback window in hours."
     )
 
     parser.add_argument(
