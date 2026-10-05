@@ -243,6 +243,9 @@ def _build_uniform_error_results(job_records, error_message: str):
     return results
 
 
+LLM_ENDPOINT_EXHAUSTED_STOP_LIMIT = 3
+
+
 def _is_transient_llm_http_status(status_code) -> bool:
     try:
         parsed_status_code = int(status_code)
@@ -253,6 +256,43 @@ def _is_transient_llm_http_status(status_code) -> bool:
         or parsed_status_code == 429
         or parsed_status_code >= 500
     )
+
+
+def _llm_http_status_code(status_code):
+    try:
+        return int(status_code)
+    except (TypeError, ValueError):
+        return None
+
+
+def _llm_endpoint_name(endpoint: dict, index: int = 0) -> str:
+    return (
+        _normalize_text(endpoint.get("name"))
+        or _normalize_text(endpoint.get("request_url"))
+        or f"endpoint_{index + 1}"
+    )
+
+
+class _LlmEndpointHealth:
+    def __init__(self, endpoints):
+        self._lock = Lock()
+        self._names = [
+            _llm_endpoint_name(endpoint, index)
+            for index, endpoint in enumerate(endpoints or [])
+        ]
+        self._disabled = set()
+
+    def disable(self, name: str) -> None:
+        with self._lock:
+            self._disabled.add(name)
+
+    def is_disabled(self, name: str) -> bool:
+        with self._lock:
+            return name in self._disabled
+
+    def has_living(self) -> bool:
+        with self._lock:
+            return any(name not in self._disabled for name in self._names)
 
 
 def _strip_prefix(text: str, prefix: str) -> str:
@@ -302,14 +342,28 @@ def _execute_prepared_fitting_items(
     process_single_item,
     default_model_name_fn,
     handle_completed_event,
+    endpoint_health: _LlmEndpointHealth | None = None,
 ):
     fatal_events = []
+    stop_submitting = False
+    consecutive_exhausted = 0
     if not prepared_items:
-        return fatal_events
+        return {
+            "fatal_events": fatal_events,
+            "stop_submitting": False,
+        }
+
+    def _note_exhausted(is_exhausted: bool) -> None:
+        nonlocal consecutive_exhausted, stop_submitting
+        if is_exhausted:
+            consecutive_exhausted += 1
+            if consecutive_exhausted >= LLM_ENDPOINT_EXHAUSTED_STOP_LIMIT:
+                stop_submitting = True
+            return
+        consecutive_exhausted = 0
 
     max_workers = max(1, int(concurrency or 1))
     prepared_iter = iter(prepared_items)
-    stop_submitting = False
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         in_flight = {}
@@ -342,6 +396,7 @@ def _execute_prepared_fitting_items(
                         default_model_name_fn(prepared),
                     )
                     if error_text.startswith("TRANSIENT_API::"):
+                        _note_exhausted(True)
                         handle_completed_event(
                             {
                                 "kind": "transient_api_error",
@@ -355,18 +410,42 @@ def _execute_prepared_fitting_items(
                         )
                         continue
                     if error_text.startswith("FATAL_API::"):
-                        fatal_events.append(
+                        no_living_endpoints = (
+                            endpoint_health is not None
+                            and not endpoint_health.has_living()
+                        )
+                        if endpoint_health is None or no_living_endpoints:
+                            fatal_events.append(
+                                {
+                                    "prepared": prepared,
+                                    "error_message": _strip_prefix(
+                                        error_text,
+                                        "FATAL_API::",
+                                    ),
+                                    "model_name": error_model_name,
+                                }
+                            )
+                            stop_submitting = True
+                            continue
+                        _note_exhausted(False)
+                        handle_completed_event(
                             {
+                                "kind": "job_result",
                                 "prepared": prepared,
-                                "error_message": _strip_prefix(
-                                    error_text,
-                                    "FATAL_API::",
+                                "job_result": _build_job_match_result(
+                                    prepared["item"]["profile_id"],
+                                    prepared["item"]["job_id"],
+                                    llm_match_error=_strip_prefix(
+                                        error_text,
+                                        "FATAL_API::",
+                                    ),
+                                    model_name=error_model_name,
                                 ),
-                                "model_name": error_model_name,
                             }
                         )
                         continue
 
+                    _note_exhausted(False)
                     handle_completed_event(
                         {
                             "kind": "job_result",
@@ -381,6 +460,8 @@ def _execute_prepared_fitting_items(
                     )
                     continue
 
+                match_error = str((job_result or {}).get("llm_match_error") or "")
+                _note_exhausted(match_error.startswith("all_endpoints_exhausted"))
                 handle_completed_event(
                     {
                         "kind": "job_result",
@@ -389,15 +470,15 @@ def _execute_prepared_fitting_items(
                     }
                 )
 
-            if fatal_events:
-                stop_submitting = True
-
             if not stop_submitting:
                 for _ in range(completed_count):
                     if not _submit_next():
                         break
 
-    return fatal_events
+    return {
+        "fatal_events": fatal_events,
+        "stop_submitting": stop_submitting,
+    }
 
 
 def _log_job_match_result(job_result):
@@ -955,17 +1036,41 @@ def _load_llm_endpoints() -> list[dict]:
             "check JOBS_DB_URL and the Django llm_endpoints table"
         ) from error
     if not rows:
-        raise RuntimeError("no_active_llm_endpoints: enable an endpoint in Django admin")
+        raise RuntimeError(
+            "no_active_llm_endpoints: enable an endpoint in Django admin"
+        )
     endpoints = [_coerce_llm_endpoint(dict(row), index) for index, row in enumerate(rows)]
-    print("LLM endpoint source=database, retry_order=" + json.dumps([
-        {
-            "name": endpoint["name"],
-            "api_type": endpoint["api_type"],
-            "model": endpoint.get("model") or _default_fitting_model_name(),
-        }
-        for endpoint in endpoints
-    ]))
+    print(
+        "LLM endpoint source=database, retry_order="
+        + json.dumps([
+            {
+                "name": endpoint["name"],
+                "api_type": endpoint["api_type"],
+                "model": endpoint.get("model") or _default_fitting_model_name(),
+            }
+            for endpoint in endpoints
+        ])
+    )
     return endpoints
+
+
+def _raise_llm_fallback_error(
+    *,
+    auth_errors: list[str],
+    fatal_errors: list[str],
+    transient_errors: list[str],
+    endpoint_health: _LlmEndpointHealth | None,
+) -> None:
+    all_errors = auth_errors + fatal_errors + transient_errors
+    if not all_errors:
+        raise RuntimeError("FATAL_API::no_llm_endpoints_available")
+
+    no_living_endpoints = (
+        endpoint_health is not None and not endpoint_health.has_living()
+    )
+    only_auth = bool(auth_errors) and not fatal_errors and not transient_errors
+    prefix = "FATAL_API::" if no_living_endpoints or only_auth else "TRANSIENT_API::"
+    raise RuntimeError(prefix + " | ".join(all_errors))
 
 
 def _request_llm_json_with_fallback(
@@ -976,19 +1081,21 @@ def _request_llm_json_with_fallback(
     call_budget: _LlmCallBudget | None = None,
     return_metadata: bool = False,
     return_model_metadata: bool = False,
+    endpoint_health: _LlmEndpointHealth | None = None,
 ) -> dict | tuple[dict, str] | tuple[dict, dict[str, str]]:
     transient_errors: list[str] = []
     fatal_errors: list[str] = []
+    auth_errors: list[str] = []
 
     if not endpoints:
         raise RuntimeError("FATAL_API::no_llm_endpoints_available")
     if return_metadata and return_model_metadata:
         raise ValueError("return_metadata_and_return_model_metadata_are_mutually_exclusive")
 
-    for endpoint in endpoints:
-        endpoint_name = (
-            endpoint.get("name") or endpoint.get("request_url") or "endpoint"
-        )
+    for index, endpoint in enumerate(endpoints):
+        endpoint_name = _llm_endpoint_name(endpoint, index)
+        if endpoint_health is not None and endpoint_health.is_disabled(endpoint_name):
+            continue
         effective_model_name = endpoint.get("model") or model_name
         try:
             request_kwargs = {
@@ -1026,12 +1133,28 @@ def _request_llm_json_with_fallback(
                 f"endpoint={endpoint_name} model_name={effective_model_name} "
                 f"status={status_code} error={error}"
             )
+            parsed_status_code = _llm_http_status_code(status_code)
+            if parsed_status_code in {401, 403}:
+                if endpoint_health is not None:
+                    endpoint_health.disable(endpoint_name)
+                auth_errors.append(message)
+                continue
+            if parsed_status_code == 404:
+                if endpoint_health is not None:
+                    endpoint_health.disable(endpoint_name)
+                transient_errors.append(message)
+                continue
             if _is_transient_llm_http_status(status_code):
                 transient_errors.append(message)
                 continue
             fatal_errors.append(message)
             continue
         except (requests.Timeout, requests.ConnectionError) as error:
+            transient_errors.append(
+                f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
+            )
+            continue
+        except json.JSONDecodeError as error:
             transient_errors.append(
                 f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
             )
@@ -1051,14 +1174,12 @@ def _request_llm_json_with_fallback(
             fatal_errors.append(message)
             continue
 
-    if transient_errors and not fatal_errors:
-        raise RuntimeError("TRANSIENT_API::" + " | ".join(transient_errors))
-
-    all_errors = fatal_errors + transient_errors
-    if all_errors:
-        raise RuntimeError("FATAL_API::" + " | ".join(all_errors))
-
-    raise RuntimeError("FATAL_API::no_llm_endpoints_available")
+    _raise_llm_fallback_error(
+        auth_errors=auth_errors,
+        fatal_errors=fatal_errors,
+        transient_errors=transient_errors,
+        endpoint_health=endpoint_health,
+    )
 
 
 def _cap_decision(decision: str, max_decision: str | None) -> str:
@@ -1755,6 +1876,7 @@ def linkedin_fitting_notifier():
                         prompt=prompt,
                         call_budget=llm_call_budget,
                         return_model_metadata=True,
+                        endpoint_health=endpoint_health,
                     )
                     requested_model_name = model_metadata["requested_model_name"]
                     response_model_name = model_metadata["response_model_name"]
@@ -1900,6 +2022,8 @@ def linkedin_fitting_notifier():
             error_message = "missing_llm_endpoints"
             print(f"LLM API error detected before processing jobs: {error_message}")
             return _return_api_error(error_message, retry_items=claimed_items)
+
+        endpoint_health = _LlmEndpointHealth(llm_endpoints)
 
         profile_ids = sorted({item["profile_id"] for item in claimed_items})
         profiles_df = database.get_profiles_by_ids(profile_ids)
@@ -2144,13 +2268,22 @@ def linkedin_fitting_notifier():
             _finalize_job_result(item, job_result)
             _log_job_match_result(job_result)
 
-        fatal_events = _execute_prepared_fitting_items(
+        execution = _execute_prepared_fitting_items(
             ready_items,
             concurrency=concurrency,
             process_single_item=_process_single_item,
             default_model_name_fn=_default_prepared_model_name,
             handle_completed_event=_handle_completed_event,
+            endpoint_health=endpoint_health,
         )
+        fatal_events = execution["fatal_events"]
+
+        if execution["stop_submitting"] and not fatal_events:
+            return _return_api_error(
+                "consecutive_endpoint_exhausted "
+                f"limit={LLM_ENDPOINT_EXHAUSTED_STOP_LIMIT}",
+                matched_jobs,
+            )
 
         if fatal_events:
             fatal_messages = []

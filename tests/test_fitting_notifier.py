@@ -1,5 +1,4 @@
 import json
-import time
 from pathlib import Path
 
 import pytest
@@ -845,16 +844,105 @@ def test_request_llm_json_with_fallback_starts_from_first_endpoint_every_call(mo
     ]
 
 
-def test_execute_prepared_fitting_items_stops_submitting_after_fatal_api():
+def _prepared_job(job_id):
+    return {"item": {"profile_id": 1, "job_id": job_id}}
+
+
+def _llm_endpoints_for_health():
+    return [
+        {
+            "name": "nowcoding",
+            "request_url": "https://nowcoding.ai/v1",
+            "api_key": "key-nc",
+        },
+        {
+            "name": "gpt-xcode",
+            "request_url": "https://gpt.example/v1/responses",
+            "api_key": "key-gpt",
+        },
+        {
+            "name": "grok",
+            "request_url": "https://xcode.best/v1/responses",
+            "api_key": "key-grok",
+        },
+    ]
+
+
+def _http_error(status_code):
+    response = requests.Response()
+    response.status_code = status_code
+    return requests.HTTPError(f"{status_code} Client Error", response=response)
+
+
+def test_request_llm_json_with_fallback_keeps_mixed_endpoint_failures_transient(
+    monkeypatch,
+):
+    calls = []
+
+    def fake_request_llm_json(*, request_url, **kwargs):
+        calls.append(request_url)
+        if "nowcoding.ai" in request_url:
+            raise _http_error(404)
+        if "gpt.example" in request_url:
+            raise json.JSONDecodeError("Expecting value: line 1 column 1 (char 0)", "", 0)
+        raise requests.Timeout("Read timed out")
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+    endpoints = _llm_endpoints_for_health()
+    endpoint_health = fitting_notifier._LlmEndpointHealth(endpoints)
+
+    with pytest.raises(RuntimeError, match="^TRANSIENT_API::") as error:
+        fitting_notifier._request_llm_json_with_fallback(
+            endpoints=endpoints,
+            model_name="gpt-6.1-sol",
+            prompt="Return JSON only",
+            endpoint_health=endpoint_health,
+        )
+
+    assert not str(error.value).startswith("FATAL_API::")
+    assert endpoint_health.is_disabled("nowcoding")
+    assert endpoint_health.has_living()
+
+    with pytest.raises(RuntimeError, match="^TRANSIENT_API::"):
+        fitting_notifier._request_llm_json_with_fallback(
+            endpoints=endpoints,
+            model_name="gpt-6.1-sol",
+            prompt="Return JSON only",
+            endpoint_health=endpoint_health,
+        )
+
+    assert calls.count("https://nowcoding.ai/v1") == 1
+
+
+def test_request_llm_json_with_fallback_marks_all_auth_failures_fatal(monkeypatch):
+    def fake_request_llm_json(*, request_url, **kwargs):
+        raise _http_error(403)
+
+    monkeypatch.setattr(fitting_notifier, "_request_llm_json", fake_request_llm_json)
+    endpoints = _llm_endpoints_for_health()[:1]
+    endpoint_health = fitting_notifier._LlmEndpointHealth(endpoints)
+
+    with pytest.raises(RuntimeError, match="^FATAL_API::"):
+        fitting_notifier._request_llm_json_with_fallback(
+            endpoints=endpoints,
+            model_name="gpt-5.4",
+            prompt="Return JSON only",
+            endpoint_health=endpoint_health,
+        )
+
+    assert not endpoint_health.has_living()
+
+
+def test_execute_prepared_fitting_items_does_not_stop_after_one_fatal_with_living_endpoints():
     started_job_ids = []
     handled_events = []
+    endpoint_health = fitting_notifier._LlmEndpointHealth(_llm_endpoints_for_health())
 
     def process_single_item(prepared):
         job_id = prepared["item"]["job_id"]
         started_job_ids.append(job_id)
         if job_id == "fatal":
             raise RuntimeError("FATAL_API::endpoint outage")
-        time.sleep(0.02)
         return prepared["item"], fitting_notifier._build_job_match_result(
             prepared["item"]["profile_id"],
             job_id,
@@ -862,28 +950,115 @@ def test_execute_prepared_fitting_items_stops_submitting_after_fatal_api():
             model_name="gpt-5.4",
         )
 
-    fatal_events = fitting_notifier._execute_prepared_fitting_items(
+    execution = fitting_notifier._execute_prepared_fitting_items(
         [
-            {"item": {"profile_id": 1, "job_id": "ok-1"}},
-            {"item": {"profile_id": 1, "job_id": "fatal"}},
-            {"item": {"profile_id": 1, "job_id": "ok-2"}},
-            {"item": {"profile_id": 1, "job_id": "ok-3"}},
+            _prepared_job("ok-1"),
+            _prepared_job("fatal"),
+            _prepared_job("ok-2"),
+            _prepared_job("ok-3"),
         ],
-        concurrency=2,
+        concurrency=1,
         process_single_item=process_single_item,
         default_model_name_fn=lambda prepared: "gpt-5.4",
         handle_completed_event=handled_events.append,
+        endpoint_health=endpoint_health,
     )
 
-    assert len(started_job_ids) == 2
-    assert set(started_job_ids) == {"ok-1", "fatal"}
-    assert len(fatal_events) == 1
-    assert fatal_events[0]["prepared"]["item"]["job_id"] == "fatal"
+    assert started_job_ids == ["ok-1", "fatal", "ok-2", "ok-3"]
+    assert execution["fatal_events"] == []
+    assert execution["stop_submitting"] is False
     assert any(
-        event["kind"] == "job_result"
-        and event["job_result"]["job_id"] == "ok-1"
+        event["kind"] == "job_result" and event["job_result"]["job_id"] == "fatal"
         for event in handled_events
     )
+
+
+def test_execute_prepared_fitting_items_stops_when_no_living_endpoints():
+    started_job_ids = []
+    endpoints = _llm_endpoints_for_health()[:1]
+    endpoint_health = fitting_notifier._LlmEndpointHealth(endpoints)
+    endpoint_health.disable("nowcoding")
+
+    def process_single_item(prepared):
+        started_job_ids.append(prepared["item"]["job_id"])
+        raise RuntimeError("FATAL_API::status=403 insufficient_user_quota")
+
+    execution = fitting_notifier._execute_prepared_fitting_items(
+        [_prepared_job(f"job-{index}") for index in range(4)],
+        concurrency=1,
+        process_single_item=process_single_item,
+        default_model_name_fn=lambda prepared: "gpt-5.4",
+        handle_completed_event=lambda event: None,
+        endpoint_health=endpoint_health,
+    )
+
+    assert started_job_ids == ["job-0"]
+    assert execution["stop_submitting"] is True
+    assert len(execution["fatal_events"]) == 1
+
+
+def test_execute_prepared_fitting_items_stops_after_three_consecutive_exhausted_jobs():
+    started_job_ids = []
+
+    def process_single_item(prepared):
+        job_id = prepared["item"]["job_id"]
+        started_job_ids.append(job_id)
+        return prepared["item"], fitting_notifier._build_job_match_result(
+            prepared["item"]["profile_id"],
+            job_id,
+            llm_match_error="all_endpoints_exhausted_after_3_rounds: timeout",
+            model_name="grok-4.7",
+        )
+
+    execution = fitting_notifier._execute_prepared_fitting_items(
+        [_prepared_job(f"job-{index}") for index in range(5)],
+        concurrency=1,
+        process_single_item=process_single_item,
+        default_model_name_fn=lambda prepared: "grok-4.7",
+        handle_completed_event=lambda event: None,
+    )
+
+    assert started_job_ids == ["job-0", "job-1", "job-2"]
+    assert execution["stop_submitting"] is True
+    assert execution["fatal_events"] == []
+
+
+def test_execute_prepared_fitting_items_resets_exhausted_streak_after_success():
+    started_job_ids = []
+
+    def process_single_item(prepared):
+        job_id = prepared["item"]["job_id"]
+        started_job_ids.append(job_id)
+        if job_id == "ok":
+            return prepared["item"], fitting_notifier._build_job_match_result(
+                prepared["item"]["profile_id"],
+                job_id,
+                llm_match=json.dumps({"fit_score": 77, "decision": "Moderate Fit"}),
+                model_name="grok-4.7",
+            )
+        return prepared["item"], fitting_notifier._build_job_match_result(
+            prepared["item"]["profile_id"],
+            job_id,
+            llm_match_error="all_endpoints_exhausted_after_3_rounds: timeout",
+            model_name="grok-4.7",
+        )
+
+    execution = fitting_notifier._execute_prepared_fitting_items(
+        [
+            _prepared_job("job-0"),
+            _prepared_job("job-1"),
+            _prepared_job("ok"),
+            _prepared_job("job-3"),
+            _prepared_job("job-4"),
+        ],
+        concurrency=1,
+        process_single_item=process_single_item,
+        default_model_name_fn=lambda prepared: "grok-4.7",
+        handle_completed_event=lambda event: None,
+    )
+
+    assert started_job_ids == ["job-0", "job-1", "ok", "job-3", "job-4"]
+    assert execution["stop_submitting"] is False
 
 
 def test_request_llm_json_uses_plain_string_input_payload(monkeypatch):
