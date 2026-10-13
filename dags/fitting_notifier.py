@@ -1054,6 +1054,10 @@ def _load_llm_endpoints() -> list[dict]:
     return endpoints
 
 
+def _log_llm_endpoint_skip(message: str) -> None:
+    print(f"llm_endpoint_skip {message}")
+
+
 def _raise_llm_fallback_error(
     *,
     auth_errors: list[str],
@@ -1138,31 +1142,41 @@ def _request_llm_json_with_fallback(
                 if endpoint_health is not None:
                     endpoint_health.disable(endpoint_name)
                 auth_errors.append(message)
+                _log_llm_endpoint_skip(message)
                 continue
             if parsed_status_code == 404:
                 if endpoint_health is not None:
                     endpoint_health.disable(endpoint_name)
                 transient_errors.append(message)
+                _log_llm_endpoint_skip(message)
                 continue
             if _is_transient_llm_http_status(status_code):
                 transient_errors.append(message)
+                _log_llm_endpoint_skip(message)
                 continue
             fatal_errors.append(message)
+            _log_llm_endpoint_skip(message)
             continue
         except (requests.Timeout, requests.ConnectionError) as error:
-            transient_errors.append(
+            message = (
                 f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
             )
+            transient_errors.append(message)
+            _log_llm_endpoint_skip(message)
             continue
         except json.JSONDecodeError as error:
-            transient_errors.append(
+            message = (
                 f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
             )
+            transient_errors.append(message)
+            _log_llm_endpoint_skip(message)
             continue
         except requests.RequestException as error:
-            fatal_errors.append(
+            message = (
                 f"endpoint={endpoint_name} model_name={effective_model_name} error={error}"
             )
+            fatal_errors.append(message)
+            _log_llm_endpoint_skip(message)
             continue
         except ValueError as error:
             message = (
@@ -1170,8 +1184,10 @@ def _request_llm_json_with_fallback(
             )
             if str(error) == "response_missing_output_text":
                 transient_errors.append(message)
+                _log_llm_endpoint_skip(message)
                 continue
             fatal_errors.append(message)
+            _log_llm_endpoint_skip(message)
             continue
 
     _raise_llm_fallback_error(
