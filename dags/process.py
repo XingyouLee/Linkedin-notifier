@@ -20,6 +20,8 @@ from dags.runtime_utils import df_to_xcom_records, load_env, runtime_bool, runti
 
 load_env()
 
+SCAN_RECENT_HOURS = 24
+DEFAULT_LOOKBACK_HOURS = 120
 SCAN_API_URL = "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 SCAN_USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -441,6 +443,19 @@ def _scan_one_term(
     return term_rows
 
 
+def _scan_windows(hours_old) -> list[tuple[str, int]]:
+    try:
+        lookback_hours = int(hours_old)
+    except (TypeError, ValueError):
+        lookback_hours = DEFAULT_LOOKBACK_HOURS
+    if lookback_hours <= 0:
+        lookback_hours = DEFAULT_LOOKBACK_HOURS
+    windows = [("recent", SCAN_RECENT_HOURS)]
+    if lookback_hours > SCAN_RECENT_HOURS:
+        windows.append(("lookback", lookback_hours))
+    return windows
+
+
 def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
     all_rows = []
     with requests.Session() as session:
@@ -459,9 +474,11 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                     "search_config.results_per_term is required for "
                     f"profile={profile_label} config={search_config.get('search_config_name')}"
                 )
+            lookback_hours = search_config.get("hours_old") or DEFAULT_LOOKBACK_HOURS
+            scan_windows = _scan_windows(lookback_hours)
             scan_config = _build_scan_config(
                 results_wanted=results_per_term,
-                hours_old=search_config.get("hours_old") or 100,
+                hours_old=scan_windows[-1][1],
                 distance=search_config.get("distance") or 25,
             )
             scan_config["location"] = search_config.get("location") or "Netherlands"
@@ -469,7 +486,8 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
 
             print(
                 f"Scanning profile={profile_label} config={search_config.get('search_config_name')} "
-                f"terms={terms} location={scan_config['location']} hours_old={scan_config['hours_old']} "
+                f"terms={terms} location={scan_config['location']} "
+                f"windows={scan_windows} "
                 f"results_per_term={scan_config['results_per_term']} distance={scan_config['distance']} "
                 f"geo_id={scan_config.get('geo_id')}"
             )
@@ -483,18 +501,30 @@ def _collect_scan_rows(search_configs: list[dict]) -> list[dict]:
                 continue
 
             for term_index, term in enumerate(terms):
-                term_rows = _scan_one_term(
-                    session=session,
-                    term=term,
-                    target_count=scan_config["results_per_term"],
-                    scan_config=scan_config,
-                )
-                for row in term_rows:
-                    row["profile_id"] = search_config.get("profile_id")
-                    row["search_config_id"] = search_config.get("search_config_id")
-                    row["search_term"] = term
-                    row["is_test_profile"] = _is_test_profile(search_config)
-                all_rows.extend(term_rows)
+                for window_index, (window_name, window_hours) in enumerate(scan_windows):
+                    if (
+                        window_index > 0
+                        and scan_config["between_terms_delay_sec"] > 0
+                    ):
+                        time.sleep(scan_config["between_terms_delay_sec"])
+                    window_config = dict(scan_config)
+                    window_config["hours_old"] = window_hours
+                    print(
+                        f"Scanning profile={profile_label} term={term} "
+                        f"window={window_name} hours_old={window_hours}"
+                    )
+                    term_rows = _scan_one_term(
+                        session=session,
+                        term=term,
+                        target_count=window_config["results_per_term"],
+                        scan_config=window_config,
+                    )
+                    for row in term_rows:
+                        row["profile_id"] = search_config.get("profile_id")
+                        row["search_config_id"] = search_config.get("search_config_id")
+                        row["search_term"] = term
+                        row["is_test_profile"] = _is_test_profile(search_config)
+                    all_rows.extend(term_rows)
 
                 if (
                     term_index < len(terms) - 1

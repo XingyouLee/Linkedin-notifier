@@ -1,16 +1,19 @@
-from time import time
-import os
 from pathlib import Path
 import requests
-from dotenv import load_dotenv
+from dotenv import dotenv_values
 import time
-load_dotenv(Path(__file__).with_name('.env'))
+
+ENV_PATH = Path(__file__).with_name(".env")
+ENV = dotenv_values(ENV_PATH)
 
 
 time1 = time.time()
-API_KEY = os.getenv("_998_API_KEY")
+API_KEY = ENV.get("NOWCODING_API_KEY")
+if not API_KEY:
+    raise RuntimeError(f"NOWCODING_API_KEY is not set in {ENV_PATH}")
+
 payload = {
-  "model": "gpt-5.4",
+  "model": "gpt-5.6-terra",
   "input": [
     {"type": "message", "role": "user",
      "content": [{"type": "input_text", "text": "你是什么模型"}]}
@@ -18,7 +21,7 @@ payload = {
 }
 
 r = requests.post(
-  "https://9985678.xyz/v1/responses",
+  "https://nowcoding.ai/v1/responses",
   headers={
     "Content-Type": "application/json",
     "Authorization": f"Bearer {API_KEY}",
@@ -31,34 +34,6 @@ r.raise_for_status()
 print(r.json())
 time2 = time.time()
 print(time2 - time1)
-
-
-
-
-# time1 = time.time()
-# API_KEY = os.getenv("GMN_API_KEY")
-# payload = {
-#   "model": "gpt-5.4",
-#   "input": [
-#     {"type": "message", "role": "user",
-#      "content": [{"type": "input_text", "text": "你是什么模型"}]}
-#   ]
-# }
-
-# r = requests.post(
-#   "https://gmn.chuangzuoli.com/v1/responses",
-#   headers={
-#     "Content-Type": "application/json",
-#     "Authorization": f"Bearer {API_KEY}",
-#   },
-#   json=payload,
-#   timeout=60,
-# )
-
-# r.raise_for_status()
-# print(r.json())
-# time2 = time.time()
-# print(time2 - time1)
 
 
 

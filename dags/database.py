@@ -411,7 +411,7 @@ def _default_profile_config() -> dict[str, Any]:
                     os.getenv("SCAN_LOCATION", "Netherlands")
                 ),
                 "distance": _get_positive_int_env("SCAN_DISTANCE", 25),
-                "hours_old": _get_positive_int_env("SCAN_HOURS_OLD", 100),
+                "hours_old": _get_positive_int_env("SCAN_HOURS_OLD", 120),
                 "results_per_term": results_default,
                 "is_active": True,
                 "terms": _parse_terms(os.getenv("SCAN_SEARCH_TERMS", ""))
@@ -481,7 +481,7 @@ def _coerce_profile_configs(profile_configs) -> list[dict[str, Any]]:
                     "location": location,
                     "geo_id": geo_id,
                     "distance": int(search_config.get("distance") or 25),
-                    "hours_old": int(search_config.get("hours_old") or 100),
+                    "hours_old": int(search_config.get("hours_old") or 120),
                     "results_per_term": _coerce_nonnegative_int(
                         search_config.get("results_per_term"),
                         10,
@@ -1423,7 +1423,7 @@ def get_active_search_configs() -> list[dict[str, Any]]:
                 else _get_positive_int_env("SCAN_DISTANCE", 25),
                 "hours_old": row["hours_old"]
                 if row["hours_old"] is not None
-                else _get_positive_int_env("SCAN_HOURS_OLD", 100),
+                else _get_positive_int_env("SCAN_HOURS_OLD", 120),
                 "results_per_term": row["results_per_term"]
                 if row["results_per_term"] is not None
                 else _get_positive_int_env("SCAN_RESULTS_PER_TERM", 10),
