@@ -5,22 +5,19 @@ Scans LinkedIn public job search, scores each job against each profile's resume 
 ## Pipeline
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph scan["linkedin_notifier"]
-        direction TB
         A["Scan LinkedIn<br/>24h + lookback windows"] --> B["Upsert jobs<br/>jobs, profile_jobs"]
         B --> C["Fetch JDs<br/>jd_queue worker"]
         C --> D["Queue fitting<br/>pending_fit"]
     end
     subgraph fit["linkedin_fitting_notifier"]
-        direction TB
         E["Claim work<br/>pending + stale leases"] --> F["Call LLM<br/>DB endpoints, fallback"]
         F --> G["Post-checks<br/>experience, seniority, language"]
         G --> H["Notify Discord<br/>Strong / Moderate Fit"]
     end
     D -- triggers --> E
-    scan <--> DB[("Postgres business DB<br/>JOBS_DB_URL")]
-    fit <--> DB
+    H -.- DB[("Postgres business DB<br/>JOBS_DB_URL, shared by both DAGs")]
 ```
 
 1. `linkedin_notifier` (`dags/process.py`)
