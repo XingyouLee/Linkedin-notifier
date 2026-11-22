@@ -91,7 +91,7 @@ When changing fit behavior, inspect both prompt construction and `_apply_fit_cap
 - Important runtime vars called out by the repo README include `JOBS_DB_URL`, `PROFILE_CONFIG_PATH`, scan tuning vars, JD/fitting stale-claim vars, `FITTING_MODEL_NAME`, `LLM_ENDPOINTS_JSON`, Discord credentials, and `AIRFLOW_ADMIN_PASSWORD` for fixed SimpleAuthManager login bootstrapping.
 - The Docker image installs Playwright Chromium during build (`Dockerfile`).
 - Zeabur deployment is a single Docker app service plus two Postgres databases: one for Airflow metadata (`AIRFLOW__DATABASE__SQL_ALCHEMY_CONN`) and one for business data (`JOBS_DB_URL`).
-- In the single-container cloud deployment, keep `AIRFLOW__API__BASE_URL=http://127.0.0.1:8080` and `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/`; do not point them at old multi-service hostnames.
+- In the single-container cloud deployment, set `AIRFLOW__API__BASE_URL` to the public Airflow domain (browser-facing UI links and login redirects), and keep `AIRFLOW__CORE__EXECUTION_API_SERVER_URL=http://127.0.0.1:8080/execution/` (internal task-to-API calls); do not point either at old multi-service hostnames. Local Docker Compose defaults `AIRFLOW__API__BASE_URL` to `http://127.0.0.1:8080`.
 
 ### Code Review 工作流
 
