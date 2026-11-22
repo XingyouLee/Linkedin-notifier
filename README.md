@@ -4,6 +4,25 @@ Scans LinkedIn public job search, scores each job against each profile's resume 
 
 ## Pipeline
 
+```mermaid
+flowchart TB
+    subgraph scan["linkedin_notifier"]
+        direction TB
+        A["Scan LinkedIn<br/><small>24h window + lookback window</small>"] --> B["Upsert jobs<br/><small>jobs + profile_jobs</small>"]
+        B --> C["Fetch job descriptions<br/><small>jd_queue worker, reclaimable</small>"]
+        C --> D["Queue fitting<br/><small>mark pending_fit, trigger DAG</small>"]
+    end
+    subgraph fit["linkedin_fitting_notifier"]
+        direction TB
+        E["Claim work<br/><small>pending_fit + stale leases</small>"] --> F["Call LLM<br/><small>DB endpoints, ordered fallback</small>"]
+        F --> G["Conservative post-checks<br/><small>experience, seniority, language</small>"]
+        G --> H["Notify Discord<br/><small>Strong / Moderate Fit only</small>"]
+    end
+    D -- triggers --> E
+    scan --> DB[("Postgres business DB (JOBS_DB_URL)<br/><small>shared jobs and JDs, per-profile fits,<br/>profiles and LLM endpoints from Django</small>")]
+    fit --> DB
+```
+
 1. `linkedin_notifier` (`dags/process.py`)
    - Scans the LinkedIn guest search API for each active search config. Every scan covers a fixed recent 24h window first, then the config's `hours_old` lookback (default 120h).
    - Upserts canonical jobs into `jobs` and links them to profiles in `profile_jobs`.
